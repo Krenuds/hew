@@ -1257,6 +1257,25 @@ impl FaceMaterialJs {
     }
 }
 
+/// What [`Scene::purge_unused`] removed (mirrors `kernel::PurgeReport`).
+#[wasm_bindgen]
+pub struct PurgeReportJs {
+    materials: usize,
+    definitions: usize,
+}
+
+#[wasm_bindgen]
+impl PurgeReportJs {
+    /// Palette materials tombstoned because nothing referenced them.
+    pub fn materials(&self) -> usize {
+        self.materials
+    }
+    /// Component definitions hidden because nothing placed them.
+    pub fn definitions(&self) -> usize {
+        self.definitions
+    }
+}
+
 // ----------------------------------------------------------------- reports
 
 /// What a sketch segment insertion did (mirrors `kernel::SegmentAdded`).
@@ -4810,6 +4829,89 @@ impl Scene {
         Ok(())
     }
 
+    /// Handles of all currently live component definitions (undone creations
+    /// are hidden, not listed), in stable order.
+    pub fn component_ids(&self) -> Vec<u64> {
+        self.doc
+            .component_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Delete a component definition together with every instance that
+    /// places it (undoable, one entry: the definition and every world/nested
+    /// instance restore together on undo).
+    ///
+    /// # Errors
+    /// - `UnknownComponent` — stale or hidden component handle.
+    /// - `DefinitionNestedInDefinition` — a live definition still places
+    ///   this one as a member; delete/explode the parent first.
+    pub fn delete_definition(&mut self, component: u64) -> Result<(), ApiError> {
+        let cid = component_id(component);
+        let change = self.doc.delete_definition(cid).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteDefinition { component });
+        Ok(())
+    }
+
+    /// How many live instances place `component` directly — the count a
+    /// Components panel shows. Zero for a stale/hidden handle.
+    pub fn definition_usage(&self, component: u64) -> usize {
+        self.doc.definition_usage(component_id(component))
+    }
+
+    /// Renders `component`'s own geometry to a square PNG thumbnail — the
+    /// same fitted isometric view and rasterizer as [`render_item_thumbnail`],
+    /// but sourced directly from the live document ([`kernel::Document::
+    /// definition_preview`]) instead of a saved item's bytes, so it works
+    /// for a definition that isn't (or isn't currently) placed anywhere
+    /// (`definition_usage() == 0`). The Components panel thumbnail path.
+    /// `undefined` for a stale/hidden component, a definition with nothing
+    /// visible to render, or while a component-edit session is open —
+    /// best-effort: the caller just skips the thumbnail rather than the
+    /// panel surfacing an error for a purely cosmetic miss.
+    pub fn render_definition_thumbnail(&self, component: u64, size: u32) -> Option<Vec<u8>> {
+        let item = self.doc.definition_preview(component_id(component)).ok()?;
+        let size = size.clamp(16, 2048);
+        softrender::render_document_thumbnail(&item, size)
+    }
+
+    /// Handles of live definitions nothing reachable places (including
+    /// transitively, through another unused definition) — what a Purge
+    /// Unused preview and `purge_unused` itself act on. Listed
+    /// container-before-contained, the order `delete_definition` accepts.
+    pub fn unused_definitions(&self) -> Vec<u64> {
+        self.doc
+            .unused_definitions()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Delete every unused definition and every unused material as ONE
+    /// undo entry labeled "Purge unused" (no entry, and a zeroed report, when
+    /// there is nothing to purge).
+    pub fn purge_unused(&mut self) -> Result<PurgeReportJs, ApiError> {
+        let before = self.doc.state_hash();
+        let report = self.doc.purge_unused().map_err(doc_err)?;
+        // purge_unused can touch an arbitrary set of objects/instances/
+        // components across the whole document (every unused definition's
+        // subtree, plus every now-unpainted face); reconciling via a
+        // hand-built DocChange would have to enumerate all of that, so a
+        // full-scene resync is the simplest correct path here — mirrors how
+        // `load`/`replay` resync after a wholesale document change. Skipped
+        // entirely when idle (no-op purge changes nothing to reconcile).
+        if self.doc.state_hash() != before {
+            self.full_resync();
+            recording::record(recording::RecordedCall::PurgeUnused);
+        }
+        Ok(PurgeReportJs {
+            materials: report.materials,
+            definitions: report.definitions,
+        })
+    }
+
     // ---------------------------------------------------------- node metadata
 
     /// Rename a visible tree node (undoable). `name = None` clears the name so
@@ -6887,9 +6989,60 @@ impl Scene {
     }
 
     /// Handles of all palette materials, in unspecified but stable order.
+    /// Excludes deleted (tombstoned) materials.
     pub fn material_ids(&self) -> Vec<u64> {
         self.doc
             .material_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Rename a palette material (undoable). Renaming to the current name is
+    /// a no-op (no undo entry).
+    ///
+    /// # Errors
+    /// - `UnknownMaterial` — stale or deleted material handle.
+    pub fn set_material_name(&mut self, material: u64, name: String) -> Result<(), ApiError> {
+        let mid = MaterialId::from(KeyData::from_ffi(material));
+        let change = self
+            .doc
+            .set_material_name(mid, name.clone())
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetMaterialName { material, name });
+        Ok(())
+    }
+
+    /// Delete a palette material (undoable): every face/object-base
+    /// reference to it, over every object row live or tombstoned, is cleared
+    /// to unpainted, then the material is tombstoned (the handle stays valid
+    /// for undo, but `material_ids`/`material_info` stop seeing it).
+    ///
+    /// # Errors
+    /// - `UnknownMaterial` — stale or already-deleted material handle.
+    pub fn delete_material(&mut self, material: u64) -> Result<(), ApiError> {
+        let mid = MaterialId::from(KeyData::from_ffi(material));
+        let change = self.doc.delete_material(mid).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteMaterial { material });
+        Ok(())
+    }
+
+    /// How many LIVE faces and object bases carry `material` — the count a
+    /// Materials panel shows and a delete confirmation quotes. Zero for a
+    /// stale/deleted handle.
+    pub fn material_usage(&self, material: u64) -> usize {
+        let mid = MaterialId::from(KeyData::from_ffi(material));
+        self.doc.material_usage(mid)
+    }
+
+    /// Handles of palette materials nothing references (conservative: a
+    /// material only a deleted-but-undoable object still carries is NOT
+    /// listed) — what a Purge Unused preview and `purge_unused` itself act on.
+    pub fn unused_materials(&self) -> Vec<u64> {
+        self.doc
+            .unused_materials()
             .iter()
             .map(|id| id.data().as_ffi())
             .collect()
@@ -8802,6 +8955,12 @@ impl Scene {
                     DeleteDefMember { component, object } => {
                         self.delete_def_member(component, object)?;
                     }
+                    DeleteDefinition { component } => {
+                        self.delete_definition(component)?;
+                    }
+                    PurgeUnused => {
+                        self.purge_unused()?;
+                    }
                     MergeFaces { object, edge } => {
                         self.merge_faces(object, edge)?;
                     }
@@ -8920,6 +9079,12 @@ impl Scene {
                     }
                     SetMaterialAlpha { material, alpha } => {
                         self.set_material_alpha(material, alpha)?;
+                    }
+                    SetMaterialName { material, name } => {
+                        self.set_material_name(material, name)?;
+                    }
+                    DeleteMaterial { material } => {
+                        self.delete_material(material)?;
                     }
                     PaintFace {
                         object,
@@ -11609,6 +11774,79 @@ mod tests {
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
+    /// The v1.1 assets lane's palette/definition lifecycle ops — material
+    /// rename, material delete (unpainting a live face), definition delete
+    /// (removing a world instance), and Purge Unused — record and replay to
+    /// the exact same state, including the deleted rows dropping out of
+    /// `save()`. `purge_unused` is exercised in BOTH postures: once where it
+    /// actually purges something (recorded), once idle (no-op, unrecorded)
+    /// — mirroring the kernel's own no-entry-when-idle contract.
+    #[test]
+    fn record_then_replay_covers_material_and_definition_lifecycle() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+
+        // A material renamed, then painted onto a live face and set as an
+        // object's base — both references must unpaint on delete.
+        let m = scene.add_material("Red".to_string(), 220, 30, 30, 255);
+        scene.set_material_name(m, "Brick".to_string()).unwrap();
+        scene.set_material_name(m, "Brick".to_string()).unwrap(); // no-op rename records nothing extra
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a, "picked object `a`'s top face as expected");
+        scene.paint_face(pick.object(), pick.face(), m).unwrap();
+        scene.set_object_material(b, m).unwrap();
+        assert_eq!(scene.material_usage(m), 2);
+        scene.delete_material(m).unwrap();
+        assert!(scene.material_ids().is_empty(), "tombstoned, not listed");
+
+        // A definition with a world instance, deleted outright.
+        let inst_of_a = scene.make_component(&[0], &[a]).unwrap();
+        let def_a = scene.instance_def(inst_of_a).unwrap();
+        assert_eq!(scene.definition_usage(def_a), 1);
+        scene.delete_definition(def_a).unwrap();
+        assert!(scene.component_ids().is_empty());
+
+        // A second component, made unused (its only instance deleted) so
+        // Purge Unused has something to do, alongside a fresh unused
+        // material.
+        let inst_of_b = scene.make_component(&[0], &[b]).unwrap();
+        let def_b = scene.instance_def(inst_of_b).unwrap();
+        scene.delete_node(2, inst_of_b).unwrap();
+        assert_eq!(scene.unused_definitions(), vec![def_b]);
+        let stray = scene.add_material("Stray".to_string(), 1, 2, 3, 255);
+        assert_eq!(scene.unused_materials(), vec![stray]);
+
+        let report = scene.purge_unused().unwrap();
+        assert_eq!(report.definitions(), 1);
+        assert_eq!(report.materials(), 1);
+        assert!(scene.component_ids().is_empty());
+        assert!(scene.material_ids().is_empty());
+
+        // Idle purge: nothing left to do, no undo entry, not recorded.
+        let report = scene.purge_unused().unwrap();
+        assert_eq!(report.definitions(), 0);
+        assert_eq!(report.materials(), 0);
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        assert_eq!(
+            replayed.replay(&json).unwrap(),
+            golden,
+            "replaying a material/definition lifecycle session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
     /// The byte-embedding arms replay: a session containing a glTF import
     /// (file bytes embedded in the recording) and a texture-material
     /// addition (encoded image bytes embedded) reproduces object counts,
@@ -13204,6 +13442,43 @@ mod tests {
         assert_eq!(scene.instance_def(inst2), Some(comp));
         // The pose round-trips as a 3×4 affine.
         assert_eq!(scene.instance_pose(inst2).unwrap(), affine.to_vec());
+    }
+
+    /// `render_definition_thumbnail` sources a definition's geometry
+    /// straight from the live document — unlike `extract_item`, which needs
+    /// a live instance to select FROM, it has nothing to select from an
+    /// unplaced definition, so it must keep working after the definition's
+    /// only instance is deleted (`definition_usage() == 0`) — exactly why
+    /// the Components panel needs this path rather than reusing
+    /// `extract_item`. A stale/unknown handle renders nothing rather than
+    /// erroring — a purely cosmetic miss the panel just skips.
+    #[test]
+    fn render_definition_thumbnail_works_used_and_unused_and_none_for_unknown() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+
+        // Used definition: renders something, and it's a real PNG.
+        let used_png = scene
+            .render_definition_thumbnail(comp, 32)
+            .expect("a used definition renders a thumbnail");
+        assert!(
+            used_png.starts_with(&[0x89, 0x50, 0x4e, 0x47]),
+            "PNG signature"
+        );
+
+        // Delete the only instance: the definition survives, unused.
+        scene.delete_node(2, inst).unwrap();
+        assert_eq!(scene.definition_usage(comp), 0);
+        assert!(
+            scene.render_definition_thumbnail(comp, 32).is_some(),
+            "an unused definition still has its own geometry to render"
+        );
+
+        // A stale/unknown handle: no thumbnail, no panic.
+        assert!(scene.render_definition_thumbnail(comp + 999, 32).is_none());
     }
 
     /// `component_member_objects` must filter out a member whose birth was

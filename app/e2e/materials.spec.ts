@@ -200,6 +200,110 @@ test('losing window focus while Alt is held clears the stuck eyedropper status',
   await expect(page.getByText(/Click a face to paint it with the current material/i)).toBeVisible()
 })
 
+test('double-click renames a material in place, undoably', async ({ page }) => {
+  await revealMaterialsTray(page)
+  await page.evaluate(() => window.__hew_test!.addMaterial('Oak', 180, 140, 90, 255))
+  await expect(page.getByTitle('Oak')).toBeVisible()
+
+  await page.getByText('Oak', { exact: true }).dblclick()
+  const input = page.getByRole('textbox', { name: 'Rename material Oak' })
+  await expect(input).toBeVisible()
+  await input.fill('Walnut')
+  await input.press('Enter')
+  await expect(page.getByTitle('Walnut')).toBeVisible()
+  await expect(page.getByTitle('Oak')).toHaveCount(0)
+
+  await page.locator('canvas').first().click({ position: { x: 5, y: 5 } })
+  await page.keyboard.press('Control+z')
+  await expect(page.getByTitle('Oak')).toBeVisible()
+  await expect(page.getByTitle('Walnut')).toHaveCount(0)
+})
+
+/** Deleting an unused material removes it with no confirmation; deleting one
+ *  used on a face confirms first (naming how many), then unpaints it —
+ *  the delete unwinds cleanly with one undo. */
+test('deleting a used material confirms, then unpaints every face it painted', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [8, 6, 8], target: [1, 1, 1], up: [0, 0, 1], fovDeg: 45 })
+  })
+  const boxId = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 2))
+  const redId = await page.evaluate(() => window.__hew_test!.addMaterial('Red', 220, 30, 30, 255))
+  const topFace = await page.evaluate((box) => window.__hew_test!.pickFace([1, 1, 10], [0, 0, -1]), boxId)
+  expect(topFace).not.toBeNull()
+  await page.evaluate(
+    ({ box, face, red }) => window.__hew_test!.paintFace(box, face, red),
+    { box: boxId, face: topFace!.face, red: redId },
+  )
+
+  await revealMaterialsTray(page)
+  await page.getByRole('button', { name: 'Delete material Red' }).click()
+
+  // Used on 1 face — a confirmation names it, nothing deleted yet.
+  await expect(page.getByRole('dialog', { name: 'Delete material?' })).toBeVisible()
+  await expect(page.getByText(/used on 1 face/i)).toBeVisible()
+  const before = await page.evaluate(
+    ({ box, face }) => window.__hew_test!.getFaceMaterial(box, face),
+    { box: boxId, face: topFace!.face },
+  )
+  expect(before?.face).toBe(redId)
+
+  // getFaceMaterial reads the KERNEL's assignment, which a stale mesh could
+  // still disagree with if the viewport never re-tessellates after the
+  // delete — read back what's actually RENDERED at the painted face's
+  // world point (the same (1,1,2) the pickFace ray above resolved to),
+  // before and after, so a missing viewport resync would show up here even
+  // if the kernel-side assignment already looks right.
+  const facePoint: [number, number, number] = [1, 1, 2]
+  const litRed = await page.evaluate((p) => window.__hew_test!.pixelColorAt(p), facePoint)
+  expect(litRed, 'the painted face is visible to the camera').not.toBeNull()
+  expect(litRed!.r, 'the face renders red before the delete').toBeGreaterThan(litRed!.g + 30)
+  expect(litRed!.r).toBeGreaterThan(litRed!.b + 30)
+
+  await page.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByTitle('Red')).toHaveCount(0)
+  const after = await page.evaluate(
+    ({ box, face }) => window.__hew_test!.getFaceMaterial(box, face),
+    { box: boxId, face: topFace!.face },
+  )
+  expect(after?.face, 'the face is unpainted after the delete').toBeNull()
+
+  // The viewport must have actually re-tessellated: the SAME world point
+  // renders differently now, and no longer reads as red-dominant — a
+  // missing refreshScene() call would leave the old red mesh on the GPU
+  // even though the kernel-side assignment above already changed.
+  const litAfter = await page.evaluate((p) => window.__hew_test!.pixelColorAt(p), facePoint)
+  expect(litAfter, 'the (now unpainted) face is still visible').not.toBeNull()
+  expect(
+    Math.abs(litAfter!.r - litRed!.r) + Math.abs(litAfter!.g - litRed!.g) + Math.abs(litAfter!.b - litRed!.b),
+    'the rendered pixel actually changed after the delete',
+  ).toBeGreaterThan(30)
+  expect(litAfter!.r, 'no longer red-dominant — back to the neutral default').toBeLessThanOrEqual(litAfter!.g + 30)
+
+  // One undo restores the material AND its paint.
+  await page.evaluate(() => window.__hew_test!.undo())
+  await expect(page.getByTitle('Red')).toBeVisible()
+  const restored = await page.evaluate(
+    ({ box, face }) => window.__hew_test!.getFaceMaterial(box, face),
+    { box: boxId, face: topFace!.face },
+  )
+  expect(restored?.face).toBe(redId)
+})
+
+test('deleting an unused material removes it immediately, with no confirmation', async ({ page }) => {
+  await revealMaterialsTray(page)
+  // Named "Spare", not "Unused" — the panel's own Purge Unused button's
+  // title text contains the word "unused" and would make a plain
+  // getByTitle('Unused') ambiguous.
+  await page.evaluate(() => window.__hew_test!.addMaterial('Spare', 10, 20, 30, 255))
+  await expect(page.getByTitle('Spare')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Delete material Spare' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByTitle('Spare')).toHaveCount(0)
+})
+
 test('Shift-click replaces every matching assignment document-wide; one undo restores it all', async ({ page }) => {
   await page.evaluate(() => {
     const h = window.__hew_test!

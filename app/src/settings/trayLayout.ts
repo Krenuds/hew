@@ -30,6 +30,7 @@ export interface TrayLayout {
   modelInfo: boolean
   objectInfo: boolean
   materials: boolean
+  components: boolean
   tags: boolean
   scenes: boolean
   /** Changes section (Lane C, docs/design/v1.1-cycle.md) — this session's
@@ -39,13 +40,15 @@ export interface TrayLayout {
 
 const STORAGE_KEY = 'hew.settings.trayLayout'
 
-const KEYS = ['modelInfo', 'objectInfo', 'materials', 'tags', 'scenes', 'changes'] as const
+const KEYS = ['modelInfo', 'objectInfo', 'materials', 'components', 'tags', 'scenes', 'changes'] as const
 
-/**  defaults: Object Info + Outliner + Scenes open, Materials + Tags + Changes collapsed. */
+/**  defaults: Object Info + Outliner + Scenes open, Materials + Components +
+ * Tags + Changes collapsed. */
 export const DEFAULT_TRAY_LAYOUT: TrayLayout = {
   modelInfo: true,
   objectInfo: true,
   materials: false,
+  components: false,
   tags: false,
   scenes: true,
   changes: false,

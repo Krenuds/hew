@@ -322,6 +322,14 @@ below.
 - An Object Info panel for renaming, tagging, and checking an object's
   solid status; with several objects selected it tags them all at once,
   showing the tags they share
+- A Components panel listing every component definition with its live
+  instance count; rename and delete (deleting a definition removes every
+  instance that places it, confirmed when it has any); Purge Unused
+  removes every material and component definition nothing references, as
+  one undoable step, and reports what it removed
+- `hew.entity.rename`/`hew.entity.delete` reach materials and component
+  definitions the same way they reach any other entity; `hew.doc.purge_unused`
+  is the API counterpart of Purge Unused
 
 ### Materials
 
@@ -339,6 +347,10 @@ below.
   scale, and shear it, or type an exact angle or scale factor
 - A searchable material palette, with the add-color and add-texture panels
   collapsed until needed
+- Rename and delete a palette material from the Materials panel; deleting
+  a material used on faces or as an object's default unpaints them (with
+  a confirmation naming how many), and Purge Unused clears out whatever
+  nothing references
 
 ### Library
 

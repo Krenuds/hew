@@ -295,6 +295,7 @@ fn material_summary(ctx: &Ctx, id: kernel::MaterialId) -> Result<Value, CmdError
         "name": m.name,
         "color": { "r": m.color.r, "g": m.color.g, "b": m.color.b, "a": m.color.a },
         "has_texture": m.texture.is_some(),
+        "usage": ctx.doc.material_usage(id),
     }))
 }
 
@@ -312,6 +313,17 @@ fn component_summary(ctx: &Ctx, id: kernel::ComponentId) -> Result<Value, CmdErr
         "id": public_of_or_internal(ctx, &EntityRef::Component(id))?,
         "name": ctx.doc.component_name(id),
         "instance_count": instance_count,
+        // World instances plus member instances of a LIVE owning
+        // definition — the count a Components panel and a Purge Unused
+        // preview act on, per `kernel::Document::definition_usage`'s doc
+        // comment. In every reachable document state this equals
+        // `instance_count` above (a member instance's row is only ever
+        // live while its owning definition is too — deleting a definition
+        // hides its own member subtree in the same step), so the two
+        // fields agree in practice; `usage` is kept as its own field
+        // because it is the kernel's own documented "what a Components
+        // panel shows" accessor, not derived from `instance_count` here.
+        "usage": ctx.doc.definition_usage(id),
     }))
 }
 

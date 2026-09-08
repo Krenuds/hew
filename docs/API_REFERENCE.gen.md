@@ -712,6 +712,48 @@ Open a .hew document (headless hosts; live hosts advertise via capabilities).
 - `host_capability_missing`
 - `load_failed`
 
+### `hew.doc.purge_unused`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Delete every unused material and component definition, as one undo entry.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "definitions": {
+      "type": "integer"
+    },
+    "materials": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "materials",
+    "definitions"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
 ### `hew.doc.save`
 
 - **Version:** 1
@@ -867,13 +909,16 @@ Delete an entity.
 **Refusals:**
 
 - `unknown_entity`
-- `delete_unsupported`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
 - `unknown_guide` — That guide is no longer there — the model changed since it was picked. Click it again.
 - `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `unknown_material` — That material is no longer in the palette. Pick another swatch.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `definition_nested_in_definition` — This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.entity.move`
 
@@ -1005,6 +1050,7 @@ Rename an entity.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_material` — That material is no longer in the palette. Pick another swatch.
 
 ### `hew.entity.rotate`
 

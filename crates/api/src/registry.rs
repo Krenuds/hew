@@ -263,6 +263,13 @@ impl Registry {
             Std,
             "Merge a foreign-format file into the attached document through the shared healing pipeline.",
         );
+        add(
+            "hew.doc.purge_unused",
+            M,
+            Kernel,
+            Std,
+            "Delete every unused material and component definition, as one undo entry.",
+        );
         // hew.query — the read surface.
         add(
             "hew.query.scene",
@@ -1185,6 +1192,27 @@ impl Registry {
         }
         {
             let cmd = commands
+                .get_mut("hew.doc.purge_unused")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "materials": { "type": "integer" },
+                    "definitions": { "type": "integer" }
+                },
+                "required": ["materials", "definitions"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![];
+        }
+        {
+            let cmd = commands
                 .get_mut("hew.view.snapshot")
                 .expect("declared above");
             cmd.implemented = true;
@@ -1677,6 +1705,7 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_component",
+                "unknown_material",
             ];
         }
         {
@@ -1702,13 +1731,16 @@ impl Registry {
             });
             cmd.refusals = vec![
                 "unknown_entity",
-                "delete_unsupported",
                 "unknown_object",
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
                 "unknown_guide",
                 "unknown_edge",
+                "unknown_material",
+                "unknown_component",
+                "definition_nested_in_definition",
+                "explode_session_scope",
             ];
         }
         {

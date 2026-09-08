@@ -48,6 +48,7 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, 
 | Ungroup | `⇧⌘G` | `Ctrl+Shift+G` |
 | Toggle Outliner (Model Info) | `⇧⌘I` | `Ctrl+Shift+I` |
 | Toggle Materials | `⇧⌘C` | `Ctrl+Shift+C` |
+| Toggle Components | `⇧⌘M` | `Ctrl+Shift+M` |
 | Toggle Tags | `⇧⌘T` | `Ctrl+Shift+T` |
 | Toggle Object Info | `⇧⌘O` | `Ctrl+Shift+O` |
 | Next Scene / Previous Scene | `Page Down` / `Page Up` | `Page Down` / `Page Up` |

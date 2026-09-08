@@ -281,6 +281,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "LastDefinitionMember" => {
             "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
         }
+        "DefinitionNestedInDefinition" => {
+            "This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component."
+        }
         "AmbiguousInstanceScale" => {
             "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
         }

@@ -169,6 +169,12 @@ export interface HewTestHarness {
     dz: number,
   ): { kind: string; id: string }
   deleteObject(id: string): void
+  /** Delete ANY tree node — object, group, or instance (undoable). Wraps
+   *  `delete_node` on the node's own kind, the general form `deleteObject`
+   *  predates (kept for its existing call sites). Useful for setting up an
+   *  "unused definition" scenario: deleting an instance without deleting
+   *  its definition. */
+  deleteNode(kind: string, id: string): void
   selectObjects(ids: string[]): void
   /** Edit ▸ Select All: every visible top-level node + free sketch (or a
    * group context's direct members) — the same path ⌘A takes. */
@@ -561,6 +567,22 @@ export interface HewTestHarness {
    */
   addMaterial(name: string, r: number, g: number, b: number, a: number): string
 
+  /** Rename a palette material (undoable). Wraps `set_material_name`
+   *  (v1.1 assets lane). */
+  renameMaterial(material: string, name: string): void
+
+  /** Delete a palette material (undoable): unpaints every face/object-base
+   *  reference, then tombstones it. Wraps `delete_material`. */
+  deleteMaterial(material: string): void
+
+  /** How many LIVE faces and object bases carry `material` — wraps
+   *  `material_usage`. Zero for a stale/deleted handle. Read-only. */
+  materialUsage(material: string): number
+
+  /** Handles of palette materials nothing references — wraps
+   *  `unused_materials`. Read-only. */
+  unusedMaterials(): string[]
+
   /**
    * Set `object`'s base material — the color the whole solid (and faces grown
    * later by extrude/boolean) renders with, unless a face is explicitly painted.
@@ -853,6 +875,29 @@ export interface HewTestHarness {
    * meters. Returns the new instance handle as a decimal string.
    */
   placeInstance(component: string, dx: number, dy: number, dz: number): string
+
+  /** Handles of all currently live component definitions — wraps
+   *  `component_ids` (v1.1 assets lane). Read-only. */
+  getComponentIds(): string[]
+
+  /** Rename a component definition (undoable). Wraps `set_component_name`. */
+  renameComponent(component: string, name: string): void
+
+  /** Delete a component definition together with every instance that
+   *  places it, as one undo entry. Wraps `delete_definition`. */
+  deleteDefinition(component: string): void
+
+  /** How many live instances place `component` directly — wraps
+   *  `definition_usage`. Read-only. */
+  definitionUsage(component: string): number
+
+  /** Handles of live definitions nothing reachable places — wraps
+   *  `unused_definitions`. Read-only. */
+  unusedDefinitions(): string[]
+
+  /** Delete every unused definition and material as ONE undo entry — wraps
+   *  `purge_unused`. Returns the counts actually removed. */
+  purgeUnused(): { materials: number; definitions: number }
 
   // -------- camera --------
 
@@ -1161,6 +1206,10 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     deleteObject: (id) => {
       act((s) => s.delete_node(0, BigInt(id))) // kind 0 = object
+    },
+
+    deleteNode: (kind, id) => {
+      act((s) => s.delete_node(nodeKindToNumber(kind as NodeKind), BigInt(id)))
     },
 
     selectObjects: (ids) => deps.setSelectedObjects(ids.map((id) => BigInt(id))),
@@ -1682,6 +1731,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     addMaterial: (name, r, g, b, a) =>
       act((s) => s.add_material(name, r, g, b, a).toString()),
 
+    renameMaterial: (material, name) => {
+      act((s) => s.set_material_name(BigInt(material), name))
+    },
+
+    deleteMaterial: (material) => {
+      act((s) => s.delete_material(BigInt(material)))
+    },
+
+    materialUsage: (material) => query((s) => s.material_usage(BigInt(material))),
+
+    unusedMaterials: () => query((s) => Array.from(s.unused_materials()).map((id) => id.toString())),
+
     paintObject: (object, material) => {
       act((s) => s.set_object_material(BigInt(object), materialHandle(material)))
     },
@@ -1949,6 +2010,26 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       act((s) => {
         const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
         return s.place_instance(BigInt(component), affine).toString()
+      }),
+
+    getComponentIds: () => query((s) => Array.from(s.component_ids()).map((id) => id.toString())),
+
+    renameComponent: (component, name) => {
+      act((s) => s.set_component_name(BigInt(component), name))
+    },
+
+    deleteDefinition: (component) => {
+      act((s) => s.delete_definition(BigInt(component)))
+    },
+
+    definitionUsage: (component) => query((s) => s.definition_usage(BigInt(component))),
+
+    unusedDefinitions: () => query((s) => Array.from(s.unused_definitions()).map((id) => id.toString())),
+
+    purgeUnused: () =>
+      act((s) => {
+        const report = s.purge_unused()
+        return { materials: report.materials(), definitions: report.definitions() }
       }),
 
     // -------- camera --------

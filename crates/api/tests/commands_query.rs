@@ -273,6 +273,115 @@ fn scene_reports_the_tree_and_the_top_level_lists() {
     );
 }
 
+/// A live object's top face (`+Z` normal) — the face a paint assignment
+/// targets in the fixtures below.
+fn top_face(doc: &Document, o: ObjectId) -> kernel::FaceId {
+    doc.object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(kernel::Vec3::new(0.0, 0.0, 1.0), 1e-9)
+        })
+        .map(|(id, _)| id)
+        .expect("a top face exists")
+}
+
+/// `hew.query.scene`'s `materials[].usage` and `components[].usage` fields
+/// (v1.1 assets lane — Lane A) had no API-level coverage at all; this pins
+/// both.
+///
+/// `materials[].usage` counts LIVE references only: a material painted on
+/// a face that survives is counted, one painted on a face belonging to an
+/// object that was since deleted (tombstoned, still undo-restorable) is
+/// not — `kernel::Document::material_usage`'s own documented contract.
+///
+/// `components[].usage` counts direct live placements: both a plain world
+/// instance AND a member instance nested inside another (live) component
+/// definition. In every reachable document state this equals
+/// `instance_count` (`kernel::Document::instances_of`) — a member
+/// instance's row is only ever live while its owning definition is too,
+/// since deleting a definition hides its own member subtree in the same
+/// step — so this fixture pins both fields at the SAME value across a
+/// world instance and a nested one, rather than asserting a divergence
+/// that does not exist in the kernel's current semantics.
+#[test]
+fn scene_reports_usage_for_materials_and_components() {
+    let mut doc = Document::new();
+
+    // ---- materials: usage counts live references only ----
+    let live_obj = build_box(&mut doc, 0.0);
+    let doomed_obj = build_box(&mut doc, 3.0);
+    let mat = doc.add_material(Material::solid("Oak", Rgba8::rgb(180, 140, 90)));
+    let live_face = top_face(&doc, live_obj);
+    doc.paint_face(live_obj, live_face, Some(mat))
+        .expect("paint the live object");
+    let doomed_face = top_face(&doc, doomed_obj);
+    doc.paint_face(doomed_obj, doomed_face, Some(mat))
+        .expect("paint the object that's about to be deleted");
+    doc.delete_node(NodeId::Object(doomed_obj))
+        .expect("delete (tombstoned — still undo-restorable, but no longer LIVE)");
+
+    // ---- components: usage counts a world instance AND a nested member instance ----
+    let member_obj = build_box(&mut doc, 6.0);
+    let (inner, inner_inst, _) = doc
+        .make_component(&[NodeId::Object(member_obj)])
+        .expect("fold the member object into a definition + its first (world) instance");
+    doc.make_component(&[NodeId::Instance(inner_inst)])
+        .expect("nest that instance as a member of an outer definition");
+    let world_obj = build_box(&mut doc, 9.0);
+    let (inner2, _, _) = doc
+        .make_component(&[NodeId::Object(world_obj)])
+        .expect("a second, unrelated definition with its own world instance");
+    doc.place_instance(inner, kernel::Transform::IDENTITY)
+        .expect("place a SECOND, world instance of `inner` (on top of the nested one)");
+
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let scene = call_ok(&mut conn, &mut doc, 2, "hew.query.scene", json!({}));
+
+    let materials = scene["materials"].as_array().expect("materials array");
+    let mat_entry = materials
+        .iter()
+        .find(|m| m["name"] == "Oak")
+        .expect("the Oak material is listed");
+    assert_eq!(
+        mat_entry["usage"], 1,
+        "only the surviving object's paint counts; the tombstoned object's paint does not"
+    );
+
+    let components = scene["components"].as_array().expect("components array");
+    let inner_pub = api::ids::public_id(
+        &kernel::EntityRef::Component(inner),
+        doc.sid_of(&kernel::EntityRef::Component(inner)).unwrap(),
+    );
+    let inner_entry = components
+        .iter()
+        .find(|c| c["id"] == inner_pub)
+        .expect("`inner`'s definition is listed");
+    assert_eq!(
+        inner_entry["instance_count"], 2,
+        "the nested member instance + the second world instance"
+    );
+    assert_eq!(
+        inner_entry["usage"], 2,
+        "both the nested member instance (its owner is live) and the world instance count"
+    );
+
+    let inner2_pub = api::ids::public_id(
+        &kernel::EntityRef::Component(inner2),
+        doc.sid_of(&kernel::EntityRef::Component(inner2)).unwrap(),
+    );
+    let inner2_entry = components
+        .iter()
+        .find(|c| c["id"] == inner2_pub)
+        .expect("the second, unrelated definition is also listed");
+    assert_eq!(inner2_entry["instance_count"], 1);
+    assert_eq!(inner2_entry["usage"], 1);
+}
+
 #[test]
 fn scene_rejects_unknown_params() {
     let mut conn = Connection::new(Profile::Core, "test");

@@ -57,14 +57,15 @@ The right-hand tray holds a set of collapsible panels. Click a panel's header to
 
 - **Object Info** (View ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the selected item's name, type, solid status, bounding-box dimensions, and tags. This is where you rename things and tag them.
 - **Outliner** (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) is the document tree: every object, group, component instance, and sketch, with per-item visibility toggles.
-- **Materials** (View ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`) holds the document's material palette.
+- **Materials** (View ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`) holds the document's material palette — rename and delete a material from here too.
+- **Components** (View ▸ Components, `⇧⌘M` / `Ctrl+Shift+M`) lists every component definition with its live instance count; rename, delete, and Purge Unused (clear out whatever nothing references) live here.
 - **Tags** (View ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the tag tree, with visibility toggles per tag.
 - **Scenes** (View ▸ Scenes) lists the document's saved camera/visibility snapshots — see [Scenes](/learn/scenes/).
 - **Changes** (View ▸ Changes) lists this session's undo history with a marker at your last save — see [Files, saving, and recovery](/learn/files-and-saving/#changes-panel).
 
 On the desktop app, if you have more than one document window open, the Window menu also lists them by name at the bottom, with a checkmark beside whichever one you're in — click another to bring it to the front.
 
-These panels are covered in depth in [Organizing your model](/learn/organizing/) and [Materials](/learn/materials/).
+These panels are covered in depth in [Organizing your model](/learn/organizing/), [Groups and components](/learn/groups-and-components/), and [Materials](/learn/materials/).
 
 ## The status bar
 

@@ -20,6 +20,8 @@ import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { nextPaint } from './paint'
 import { TagsPanel } from './panels/TagsPanel'
+import { ComponentsPanel, PurgeUnusedButton } from './panels/ComponentsPanel'
+import { ConfirmDialog } from './panels/ConfirmDialog'
 import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/ScenesPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
@@ -28,7 +30,7 @@ import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/Unsa
 import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
+import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -394,6 +396,8 @@ export default function App() {
   const [showModelInfo, setShowModelInfo] = useState(() => getTrayLayout().modelInfo)
   /** Pane visibility: Materials (MaterialPalette) */
   const [showMaterials, setShowMaterials] = useState(() => getTrayLayout().materials)
+  /** Pane visibility: Components (ComponentsPanel) */
+  const [showComponents, setShowComponents] = useState(() => getTrayLayout().components)
   /** Pane visibility: Tags */
   const [showTags, setShowTags] = useState(() => getTrayLayout().tags)
   /** Pane visibility: Scenes (docs/design/scenes.md §5) */
@@ -488,6 +492,28 @@ export default function App() {
    *  call site (finding 5). */
   const pendingRescaleConfirmRef = useRef(pendingRescaleConfirm)
   pendingRescaleConfirmRef.current = pendingRescaleConfirm
+  /** A material delete pending confirmation (used on >0 faces/objects) —
+   *  null once confirmed/cancelled, or when a delete of an UNUSED material
+   *  never needed a modal at all (v1.1 assets lane). */
+  const [pendingMaterialDelete, setPendingMaterialDelete] = useState<{
+    id: bigint
+    name: string
+    usage: number
+  } | null>(null)
+  /** A component-definition delete pending confirmation (used by >0
+   *  instances). */
+  const [pendingComponentDelete, setPendingComponentDelete] = useState<{
+    id: bigint
+    name: string
+    usage: number
+  } | null>(null)
+  /** Purge Unused's preview — what would be removed, shown before commit.
+   *  null when no dialog is open (including the "nothing to purge" case,
+   *  which never opens one — a toast alone is enough). */
+  const [pendingPurgePreview, setPendingPurgePreview] = useState<{
+    materialNames: string[]
+    definitionNames: string[]
+  } | null>(null)
   /** Recovery snapshot to offer at startup (null = no dialog). */
   const [recoveryPrompt, setRecoveryPrompt] = useState<RecoveryListing[] | null>(null)
   /** Welcome screen on a bare launch (startup-handoff effect decides). */
@@ -682,16 +708,18 @@ export default function App() {
       modelInfo: showModelInfo,
       objectInfo: showObjectInfo,
       materials: showMaterials,
+      components: showComponents,
       tags: showTags,
       scenes: showScenes,
       changes: showChanges,
     })
-  }, [showModelInfo, showObjectInfo, showMaterials, showTags, showScenes, showChanges])
+  }, [showModelInfo, showObjectInfo, showMaterials, showComponents, showTags, showScenes, showChanges])
   useEffect(() => {
     return subscribeTrayLayout((layout) => {
       setShowModelInfo(layout.modelInfo)
       setShowObjectInfo(layout.objectInfo)
       setShowMaterials(layout.materials)
+      setShowComponents(layout.components)
       setShowTags(layout.tags)
       setShowScenes(layout.scenes)
       setShowChanges(layout.changes)
@@ -1330,6 +1358,26 @@ export default function App() {
       armAutosaveTick()
     }
   }, [activeContext, trimContextPath, armAutosaveTick])
+
+  /** Re-tessellate + re-render after a kernel mutation committed OUTSIDE a
+   *  tool — a tray panel calling a `Scene` method directly (material/
+   *  component delete, purge) rather than routing through a dedicated
+   *  Viewport method the way `deleteSelection`'s `runDelete` does. Mirrors
+   *  the harness's own `act()` dispatch (`app/src/test/harness.ts`):
+   *  `refreshScene()` already calls `handleDocumentChanged` internally
+   *  (`Viewport.tsx`'s `handleSceneRefresh`), so call ONLY that when a
+   *  viewport is mounted — falling back to `handleDocumentChanged()`
+   *  directly (no re-tessellation possible) when it isn't, matching every
+   *  App.test.tsx render (Viewport is mocked to `null` there; App guards
+   *  every `viewportApi` call with optional chaining) so docRev/dirty/
+   *  selection bookkeeping still happens under test. Calling both would
+   *  double-fire `handleDocumentChanged` — harmless (idempotent) but not
+   *  the point of this helper. */
+  const refreshAfterPanelMutation = useCallback(() => {
+    const api = viewportApi.current
+    if (api !== null) api.refreshScene()
+    else handleDocumentChanged()
+  }, [handleDocumentChanged])
 
   // Re-derive the View ▸ Section Cut menu state from the section
   // manager's own truth (`getSectionState`) — called by the viewport
@@ -3818,6 +3866,7 @@ export default function App() {
       // Window pane toggles — must use functional updaters (StrictMode safe)
       case 'toggle-model-info':   setShowModelInfo((v) => !v); break
       case 'toggle-materials':    setShowMaterials((v) => !v); break
+      case 'toggle-components':   setShowComponents((v) => !v); break
       case 'toggle-tags':         setShowTags((v) => !v); break
       case 'toggle-scenes':       setShowScenes((v) => !v); break
       case 'toggle-changes':      setShowChanges((v) => !v); break
@@ -3842,6 +3891,7 @@ export default function App() {
       case 'open-guide': handleOpenGuide(); break
       case 'open-library':   openLibraryEntry(); break
       case 'toggle-library': openLibraryEntry(); break
+      case 'purge-unused': requestPurgeUnused(); break
       // Contextual dock only (needs a single selected object/group/instance)
       // — same posture as 'enter-context' above: excused from the palette
       // in registry.ts rather than registered, since it needs a picked node.
@@ -4425,6 +4475,11 @@ export default function App() {
         setShowMaterials((v) => !v)
         return
       }
+      if (ev.key.toLowerCase() === 'm' && ev.shiftKey) {
+        ev.preventDefault()
+        setShowComponents((v) => !v)
+        return
+      }
       if (ev.key.toLowerCase() === 't' && ev.shiftKey) {
         ev.preventDefault()
         setShowTags((v) => !v)
@@ -4572,6 +4627,7 @@ export default function App() {
       'view-section-plane': sectionPlaneMenuState.checked,
       'win-model-info': showModelInfo,
       'win-materials': showMaterials,
+      'win-components': showComponents,
       'win-tags': showTags,
       'win-scenes': showScenes,
       'win-changes': showChanges,
@@ -4626,6 +4682,7 @@ export default function App() {
     sectionPlaneMenuState,
     showModelInfo,
     showMaterials,
+    showComponents,
     showTags,
     showScenes,
     showChanges,
@@ -4789,6 +4846,151 @@ export default function App() {
     return null
   }, [resyncTagVisibility, handleDocumentChanged])
 
+  // ---------------------------------------------------------------- materials: rename/delete
+
+  /** Rename a palette material (MaterialPalette's inline Finder-style
+   *  editor). Returns inline error text or null on success, mirroring
+   *  handleRenameTag. */
+  const handleRenameMaterial = useCallback((id: bigint, name: string): string | null => {
+    const scene = sceneRef.current
+    if (scene === null) return 'No document.'
+    try {
+      scene.set_material_name(id, name)
+    } catch (err: unknown) {
+      return friendlyErrorText(err)
+    }
+    handleDocumentChanged()
+    return null
+  }, [handleDocumentChanged])
+
+  /** Actually deletes the material — the shared tail of both the
+   *  immediate (unused) and confirmed (used) delete paths. */
+  const doDeleteMaterial = useCallback((id: bigint, name: string) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    try {
+      scene.delete_material(id)
+    } catch (err: unknown) {
+      handleToast(`Delete material failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    // Unpainting a face/object-base is a rendering change, not just
+    // bookkeeping — re-tessellate so the viewport actually shows it.
+    refreshAfterPanelMutation()
+    // The Paint tool must never keep a deleted material as "current".
+    setCurrentMaterialId((cur) => (cur === id ? MATERIAL_SENTINEL : cur))
+    handleToast(`Deleted material "${name}".`)
+  }, [refreshAfterPanelMutation, handleToast])
+
+  /** MaterialPalette's × button: an unused material deletes immediately;
+   *  one used on any face/object-base opens the confirm dialog naming how
+   *  many (docs/design/v1.1-cycle.md Lane A). */
+  const handleDeleteMaterial = useCallback((id: bigint) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const info = scene.material_info(id)
+    const name = info?.name() ?? 'Material'
+    const usage = scene.material_usage(id)
+    if (usage === 0) {
+      doDeleteMaterial(id, name)
+      return
+    }
+    setPendingMaterialDelete({ id, name, usage })
+  }, [doDeleteMaterial])
+
+  // ---------------------------------------------------------------- components: rename/delete
+
+  /** Rename a component definition from the Components panel. */
+  const handleRenameComponent = useCallback((id: bigint, name: string): string | null => {
+    const scene = sceneRef.current
+    if (scene === null) return 'No document.'
+    try {
+      scene.set_component_name(id, name)
+    } catch (err: unknown) {
+      return friendlyErrorText(err)
+    }
+    handleDocumentChanged()
+    return null
+  }, [handleDocumentChanged])
+
+  const doDeleteComponent = useCallback((id: bigint, name: string) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    try {
+      scene.delete_definition(id)
+    } catch (err: unknown) {
+      handleToast(`Delete component failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    // Every instance vanishing from the scene is a rendering change.
+    refreshAfterPanelMutation()
+    handleToast(`Deleted component "${name}".`)
+  }, [refreshAfterPanelMutation, handleToast])
+
+  /** ComponentsPanel's × button: a definition with no live instances
+   *  deletes immediately; one with instances opens the confirm dialog
+   *  naming how many. */
+  const handleDeleteComponent = useCallback((id: bigint) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const rawName = scene.component_name(id)
+    // Same positional fallback ComponentsPanel's row uses, so the name in
+    // the confirm dialog matches the button the user just clicked.
+    const index = Array.from(scene.component_ids()).indexOf(id)
+    const name = rawName !== undefined && rawName.length > 0 ? rawName : entityLabel('instance', index)
+    const usage = scene.definition_usage(id)
+    if (usage === 0) {
+      doDeleteComponent(id, name)
+      return
+    }
+    setPendingComponentDelete({ id, name, usage })
+  }, [doDeleteComponent])
+
+  // ---------------------------------------------------------------- purge unused
+
+  /** File ▸ Purge Unused… / the Components panel's header button: preview
+   *  what would go (docs/design/v1.1-cycle.md Lane A), or toast "Nothing
+   *  to purge" outright when there is nothing pending — no modal for a
+   *  no-op. */
+  const requestPurgeUnused = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const materialIds = Array.from(scene.unused_materials())
+    const definitionIds = Array.from(scene.unused_definitions())
+    if (materialIds.length === 0 && definitionIds.length === 0) {
+      handleToast('Nothing to purge.')
+      return
+    }
+    const materialNames = materialIds.map((id) => scene.material_info(id)?.name() ?? 'Material')
+    const definitionNames = definitionIds.map((id) => {
+      const n = scene.component_name(id)
+      return n !== undefined && n.length > 0 ? n : 'Component'
+    })
+    setPendingPurgePreview({ materialNames, definitionNames })
+  }, [handleToast])
+
+  const confirmPurgeUnused = useCallback(() => {
+    const scene = sceneRef.current
+    setPendingPurgePreview(null)
+    if (scene === null) return
+    let report: ReturnType<Scene['purge_unused']>
+    try {
+      report = scene.purge_unused()
+    } catch (err: unknown) {
+      handleToast(`Purge failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    // Purged materials/definitions can remove geometry (a purged
+    // definition's instances) or change face rendering — re-tessellate.
+    refreshAfterPanelMutation()
+    // The Paint tool must never keep a purged material as "current": a
+    // purged handle no longer resolves in the palette at all.
+    setCurrentMaterialId((cur) =>
+      cur !== MATERIAL_SENTINEL && scene.material_info(cur) === undefined ? MATERIAL_SENTINEL : cur,
+    )
+    handleToast(`Purged ${report.definitions()} definitions, ${report.materials()} materials.`)
+  }, [refreshAfterPanelMutation, handleToast])
+
   if (error !== null) {
     return (
       <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'var(--danger-base, red)' }}>
@@ -4949,6 +5151,7 @@ export default function App() {
         onPrint={() => setPrintDialogOpen(true)}
         onSaveToLibrary={() => menuActionRef.current('save-to-library-doc')}
         saveToLibraryDisabled={!libraryStore().available()}
+        onPurgeUnused={() => menuActionRef.current('purge-unused')}
         onDrawText={openTextDialog}
         onClose={
           isTauri && !isMac
@@ -4988,6 +5191,7 @@ export default function App() {
         onSelectTool={(name) => activateTool(name as ToolName)}
         showModelInfo={showModelInfo}
         showMaterials={showMaterials}
+        showComponents={showComponents}
         showTags={showTags}
         showScenes={showScenes}
         showChanges={showChanges}
@@ -4996,6 +5200,7 @@ export default function App() {
         showLibrary={showLibrary}
         onToggleModelInfo={() => setShowModelInfo((v) => !v)}
         onToggleMaterials={() => setShowMaterials((v) => !v)}
+        onToggleComponents={() => setShowComponents((v) => !v)}
         onToggleTags={() => setShowTags((v) => !v)}
         onToggleScenes={() => setShowScenes((v) => !v)}
         onToggleChanges={() => setShowChanges((v) => !v)}
@@ -5477,6 +5682,23 @@ export default function App() {
               onDocumentChanged={handleDocumentChanged}
               onAlphaCommitted={() => viewportApi.current?.syncMaterialOpacity()}
               onSaveToLibrary={handleSaveMaterialToLibrary}
+              onRenameMaterial={handleRenameMaterial}
+              onDeleteMaterial={handleDeleteMaterial}
+            />
+          </TraySection>
+          <TraySection
+            title="Components"
+            collapsed={!showComponents}
+            onToggle={() => setShowComponents((v) => !v)}
+            headerRight={<PurgeUnusedButton onClick={requestPurgeUnused} />}
+          >
+            <ComponentsPanel
+              scene={state.scene}
+              docRev={docRev}
+              docGeneration={docGeneration}
+              onSelectNodes={handleReplaceSelection}
+              onRenameComponent={handleRenameComponent}
+              onDeleteComponent={handleDeleteComponent}
             />
           </TraySection>
           <TraySection title="Tags" collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
@@ -5670,6 +5892,81 @@ export default function App() {
             setPendingRescaleConfirm(null)
             viewportApi.current?.cancelPendingRescale()
           }}
+        />
+      )}
+
+      {/* Material delete confirmation — only shown when the material is
+          actually used somewhere (v1.1 assets lane); an unused one deletes
+          immediately with no modal. */}
+      {pendingMaterialDelete !== null && (
+        <ConfirmDialog
+          heading="Delete material?"
+          body={
+            <>
+              "{pendingMaterialDelete.name}" — used on {pendingMaterialDelete.usage} faces —
+              delete and unpaint them?
+            </>
+          }
+          confirmLabel="Delete"
+          danger
+          onConfirm={() => {
+            const { id, name } = pendingMaterialDelete
+            setPendingMaterialDelete(null)
+            doDeleteMaterial(id, name)
+          }}
+          onCancel={() => setPendingMaterialDelete(null)}
+        />
+      )}
+
+      {/* Component definition delete confirmation — only shown when it has
+          live instances; a definition with none deletes immediately. */}
+      {pendingComponentDelete !== null && (
+        <ConfirmDialog
+          heading="Delete definition?"
+          body={
+            <>
+              Delete "{pendingComponentDelete.name}" and its {pendingComponentDelete.usage} instances?
+            </>
+          }
+          confirmLabel="Delete"
+          danger
+          onConfirm={() => {
+            const { id, name } = pendingComponentDelete
+            setPendingComponentDelete(null)
+            doDeleteComponent(id, name)
+          }}
+          onCancel={() => setPendingComponentDelete(null)}
+        />
+      )}
+
+      {/* Purge Unused preview — lists what would go before committing
+          (docs/design/v1.1-cycle.md Lane A). Never shown when there is
+          nothing to purge — requestPurgeUnused toasts that case directly. */}
+      {pendingPurgePreview !== null && (
+        <ConfirmDialog
+          heading="Purge unused?"
+          body={
+            <>
+              {pendingPurgePreview.definitionNames.length > 0 && (
+                <div>
+                  {pendingPurgePreview.definitionNames.length}{' '}
+                  {pendingPurgePreview.definitionNames.length === 1 ? 'definition' : 'definitions'}:{' '}
+                  {pendingPurgePreview.definitionNames.join(', ')}
+                </div>
+              )}
+              {pendingPurgePreview.materialNames.length > 0 && (
+                <div>
+                  {pendingPurgePreview.materialNames.length}{' '}
+                  {pendingPurgePreview.materialNames.length === 1 ? 'material' : 'materials'}:{' '}
+                  {pendingPurgePreview.materialNames.join(', ')}
+                </div>
+              )}
+            </>
+          }
+          confirmLabel="Purge"
+          danger
+          onConfirm={confirmPurgeUnused}
+          onCancel={() => setPendingPurgePreview(null)}
         />
       )}
 

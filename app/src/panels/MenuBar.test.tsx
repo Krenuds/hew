@@ -319,6 +319,28 @@ describe('MenuBar', () => {
     expect(onToggleMaterials).toHaveBeenCalledOnce()
   })
 
+  it('calls onToggleComponents when View > Components is mousedown-clicked', () => {
+    const onToggleComponents = vi.fn()
+    render(<MenuBar {...defaultProps} showComponents={false} onToggleComponents={onToggleComponents} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('Components'))
+    expect(onToggleComponents).toHaveBeenCalledOnce()
+  })
+
+  it('omits Purge Unused… from the File menu when onPurgeUnused is not provided', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.queryByText('Purge Unused…')).toBeNull()
+  })
+
+  it('calls onPurgeUnused when File > Purge Unused… is mousedown-clicked', () => {
+    const onPurgeUnused = vi.fn()
+    render(<MenuBar {...defaultProps} onPurgeUnused={onPurgeUnused} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    fireEvent.mouseDown(screen.getByText('Purge Unused…'))
+    expect(onPurgeUnused).toHaveBeenCalledOnce()
+  })
+
   it('omits Shop Mode from the View menu when onEnterShopMode is not provided', () => {
     render(<MenuBar {...defaultProps} />)
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))

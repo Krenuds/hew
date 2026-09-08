@@ -344,6 +344,29 @@ enum DocOp {
         face_sel: usize,
         frame_sel: usize,
     },
+    /// `set_material_name` on the `mat_sel`-th seeded material (same
+    /// `mat_sel` convention; the sentinel slot is a no-op). A deleted
+    /// material refuses typed — exercised because `DeleteMaterial` below
+    /// can precede this.
+    RenameMaterial {
+        mat_sel: usize,
+        name: String,
+    },
+    /// `delete_material` on the `mat_sel`-th seeded material: clears every
+    /// reference (tombstoned rows included) and tombstones the handle. The
+    /// global `Undo` brings it back, so later material ops see both live
+    /// and deleted handles.
+    DeleteMaterial {
+        mat_sel: usize,
+    },
+    /// `delete_definition` on the `comp_sel`-th live definition — every
+    /// world instance plus the definition as one entry, or a typed refusal
+    /// when a live definition nests it.
+    DeleteDefinition {
+        comp_sel: usize,
+    },
+    /// `purge_unused` — one labeled entry (or nothing when idle).
+    PurgeUnused,
     Undo,
     Redo,
 }
@@ -478,15 +501,23 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
             |(obj_sel, face_sel, frame_sel)| DocOp::SetFaceUvFrame { obj_sel, face_sel, frame_sel }
         ),
+        1 => (any::<usize>(), "[A-Za-z]{1,8}").prop_map(|(mat_sel, name)| {
+            DocOp::RenameMaterial { mat_sel, name }
+        }),
+        1 => any::<usize>().prop_map(|mat_sel| DocOp::DeleteMaterial { mat_sel }),
+        1 => any::<usize>().prop_map(|comp_sel| DocOp::DeleteDefinition { comp_sel }),
+        1 => Just(DocOp::PurgeUnused),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
 }
 
-/// Fixed 3-material palette, seeded once (materials are never removed or
-/// undone — `add_material` is deliberately not on the undo stack — so these
-/// handles stay valid for the whole test). `mat_sel % 4` resolves into it:
-/// `3` (the last slot) is the unpainted sentinel `None`.
+/// Fixed 3-material palette, seeded once. `add_material` is deliberately
+/// not on the undo stack, and `delete_material` tombstones rather than
+/// removes, so these handles stay VALID for the whole test — a deleted one
+/// simply refuses typed (`UnknownMaterial`) until an undo revives it,
+/// which is exactly the stale-handle path worth fuzzing. `mat_sel % 4`
+/// resolves into it: `3` (the last slot) is the unpainted sentinel `None`.
 fn seed_materials(doc: &mut Document) -> Vec<MaterialId> {
     vec![
         doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30))),
@@ -1831,6 +1862,25 @@ fn apply_doc_op(
                 return Ok(true);
             };
             let _ = doc.set_face_uv_frame(oid, face, pick_uv_frame(*frame_sel));
+        }
+        DocOp::RenameMaterial { mat_sel, name } => {
+            if let Some(mid) = pick_material(materials, *mat_sel) {
+                let _ = doc.set_material_name(mid, name.clone());
+            }
+        }
+        DocOp::DeleteMaterial { mat_sel } => {
+            if let Some(mid) = pick_material(materials, *mat_sel) {
+                let _ = doc.delete_material(mid);
+            }
+        }
+        DocOp::DeleteDefinition { comp_sel } => {
+            let Some(cid) = nth(&doc.component_ids(), *comp_sel) else {
+                return Ok(true);
+            };
+            let _ = doc.delete_definition(cid);
+        }
+        DocOp::PurgeUnused => {
+            let _ = doc.purge_unused();
         }
         DocOp::Undo => {
             if doc.can_undo()

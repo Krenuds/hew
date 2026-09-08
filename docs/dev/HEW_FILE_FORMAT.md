@@ -665,6 +665,11 @@ that does carry a `uv_frame` ignores `world_size` and uses the frame's
 affine mapping instead. A material with no `texture` renders as a flat
 `color` fill.
 
+A material the user deletes from the palette is tombstoned in-session
+(its id stays valid for undo) but never written out: `save()` simply
+omits it from `materials[]`, so deletion carries no format change — a
+reader sees exactly the same shape it always has, one entry shorter.
+
 ### 4.6 Sketches
 
 A **sketch** (`sketches[]`) is a first-class 2D construction plane with its

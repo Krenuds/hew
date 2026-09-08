@@ -268,6 +268,18 @@ export interface DocOpenParams {
 export interface DocOpenResult {}
 
 /**
+ * `hew.doc.purge_unused` (v1) — Delete every unused material and component definition, as one undo entry.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: none.
+ */
+export interface DocPurgeUnusedParams {}
+
+export interface DocPurgeUnusedResult {
+  definitions: number
+  materials: number
+}
+
+/**
  * `hew.doc.save` (v1) — Save the attached document — written by hosts with filesystem access, bytes base64 by those without.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: host_capability_missing, path_required, save_failed
@@ -298,7 +310,7 @@ export interface DocTransactResult {
 /**
  * `hew.entity.delete` (v1) — Delete an entity.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, delete_unsupported, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_edge
+ * Refusals: unknown_entity, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_edge, unknown_material, unknown_component, definition_nested_in_definition, explode_session_scope
  */
 export interface EntityDeleteParams {
   /** any public id; a sketch edge id ("edg_…") erases just that one edge — the eraser's own kernel path (Sketch::remove_edge) — as one undo entry, rather than the whole sketch */
@@ -327,7 +339,7 @@ export interface EntityMoveResult {
 /**
  * `hew.entity.rename` (v1) — Rename an entity.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, rename_unsupported, unknown_object, unknown_group, unknown_instance, unknown_component
+ * Refusals: unknown_entity, rename_unsupported, unknown_object, unknown_group, unknown_instance, unknown_component, unknown_material
  */
 export interface EntityRenameParams {
   id: string
@@ -1419,6 +1431,7 @@ export class HewApiClient {
     import: (params: DocImportParams): Promise<DocImportResult> => this.call('hew.doc.import', params),
     new: (params: DocNewParams): Promise<DocNewResult> => this.call('hew.doc.new', params),
     open: (params: DocOpenParams): Promise<DocOpenResult> => this.call('hew.doc.open', params),
+    purgeUnused: (params: DocPurgeUnusedParams): Promise<DocPurgeUnusedResult> => this.mutate('hew.doc.purge_unused', params),
     save: (params: DocSaveParams): Promise<DocSaveResult> => this.call('hew.doc.save', params),
     transact: (params: DocTransactParams): Promise<DocTransactResult> => this.call('hew.doc.transact', params),
   }

@@ -2643,6 +2643,14 @@ fn main() {
             let file_save_to_library =
                 MenuItemBuilder::with_id("file-save-to-library", "Save to Library…")
                     .build(handle)?;
+            // Deletes every unused palette material and component
+            // definition as one undoable step (v1.1 assets lane). No
+            // accelerator — a housekeeping action, not a frequent one. The
+            // frontend confirms with a preview modal before committing; the
+            // native item just opens that same flow (App.tsx's
+            // "purge-unused" action).
+            let file_purge_unused =
+                MenuItemBuilder::with_id("file-purge-unused", "Purge Unused…").build(handle)?;
             let file_close = MenuItemBuilder::with_id("file-close", "Close")
                 .accelerator("CmdOrCtrl+W")
                 .build(handle)?;
@@ -2660,6 +2668,8 @@ fn main() {
                 .item(&file_save)
                 .item(&file_save_as)
                 .item(&file_save_to_library)
+                .separator()
+                .item(&file_purge_unused)
                 .separator()
                 .item(&file_import)
                 .item(&file_export)
@@ -2890,6 +2900,14 @@ fn main() {
                 Some("Shift+CmdOrCtrl+C"),
                 Some("Shift+CmdOrCtrl+C"),
             )?;
+            let win_components = check_item(
+                handle,
+                &mut checks,
+                "win-components",
+                "Components",
+                Some("Shift+CmdOrCtrl+M"),
+                Some("Shift+CmdOrCtrl+M"),
+            )?;
             let win_tags = check_item(
                 handle,
                 &mut checks,
@@ -2977,6 +2995,7 @@ fn main() {
                 .item(&win_model_info)
                 .item(&win_object_info)
                 .item(&win_materials)
+                .item(&win_components)
                 .item(&win_tags)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&scenes_menu)
@@ -3692,6 +3711,7 @@ fn main() {
                 "file-save" => "save",
                 "file-save-as" => "save-as",
                 "file-save-to-library" => "save-to-library-doc",
+                "file-purge-unused" => "purge-unused",
                 "file-close" => "close",
                 "edit-undo" => "undo",
                 "edit-redo" => "redo",
@@ -3759,6 +3779,7 @@ fn main() {
                 "cam-view-iso" => "view-iso",
                 "win-model-info" => "toggle-model-info",
                 "win-materials" => "toggle-materials",
+                "win-components" => "toggle-components",
                 "win-tags" => "toggle-tags",
                 "win-scenes" => "toggle-scenes",
                 "win-changes" => "toggle-changes",

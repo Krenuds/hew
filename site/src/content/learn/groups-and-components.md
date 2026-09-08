@@ -58,6 +58,17 @@ Two commands take an instance out of the shared-definition world, both available
 - **Make Unique** detaches this instance into its own new definition. Use it when one screw needs to be different from its siblings. The new component is named "Screw Copy" (then "Screw Copy 2", and so on) — unless the instance had its own name, which becomes the new definition's name.
 - **Explode** bakes the instance down into ordinary, independent geometry in place. The definition (and other instances) are unaffected.
 
+## Components panel
+
+Expand **Components** in the right-hand tray (or View ▸ Components, `⇧⌘M` / `Ctrl+Shift+M`) to see every component definition in the document, one row per definition, with a small thumbnail of its geometry and its live instance count alongside.
+
+- Type into the filter box above the list to narrow it to definitions whose name matches — handy once a model has dozens of them. Clearing the filter shows everything again; it never changes what's selected in the model.
+- Click a row to select every instance of that definition, in the viewport and the Outliner together — the same thing clicking Object Info's instance count does, but for a definition you haven't picked an instance of yet.
+- Double-click a row's name (or click the pencil next to it) to rename the definition in place — the same rename Object Info's Definition Name field does.
+- Click the `×` next to a row to delete the definition. One with no instances disappears immediately. One that's still placed somewhere asks first — "Delete definition and its N instances?" — since deleting a definition takes every instance of it with it. Either way it's a single undoable step.
+
+**Purge Unused**, in the panel header, deletes every component definition with no instances anywhere AND every palette material nothing paints, in one step. It shows you what it's about to remove — names and counts — before you confirm. The same action is available from File ▸ Purge Unused… when the panel itself isn't open.
+
 ## In the Outliner
 
 Groups appear as folders you can expand; component instances get their own hexagon icon. Double-clicking a row in the Outliner opens every level between the top and that row in one step — group, nested group, instance, whatever the chain is — landing in the same state you'd reach clicking through the viewport one level at a time, with each level on the breadcrumb marked "editing". The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.

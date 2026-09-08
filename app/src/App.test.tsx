@@ -84,6 +84,17 @@ const mockScene = {
   material_texture_bytes: () => undefined,
   set_torture_mode: vi.fn(),
   component_member_objects: () => new BigUint64Array(),
+  // v1.1 assets lane: material/definition rename+delete, purge unused.
+  set_material_name: vi.fn(),
+  delete_material: vi.fn(),
+  material_usage: () => 0,
+  unused_materials: () => new BigUint64Array(),
+  component_ids: () => new BigUint64Array(),
+  delete_definition: vi.fn(),
+  definition_usage: () => 0,
+  render_definition_thumbnail: () => undefined as Uint8Array | undefined,
+  unused_definitions: () => new BigUint64Array(),
+  purge_unused: vi.fn().mockReturnValue({ materials: () => 0, definitions: () => 0 }),
   // Object Info's Bounding Box row (objectBounds.worldBoundsForSelection) reads
   // per-object render meshes; a mesh-less stub keeps it a no-op here.
   object_mesh: () => ({ positions: () => new Float32Array(), free: () => {} }),
@@ -194,6 +205,7 @@ import { makeFileHost, type FileHost } from './io/fileHost'
 import { isPristineDocument, sameSessionStackIdentity, AUTOSAVE_INTERVAL_MS } from './App'
 import type { DocSessionState } from './io/documentSession'
 import type { Scene } from './wasm/loader'
+import { MATERIAL_SENTINEL } from './tools/PaintTool'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -611,7 +623,7 @@ describe('App — tray layout persistence', () => {
   })
 
   it('restores each tray section\'s collapsed/expanded state from the persisted layout', async () => {
-    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false, scenes: false, changes: false })
+    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, components: false, tags: false, scenes: false, changes: false })
     await renderAndLoad()
     expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByRole('button', { name: /object info/i })).toHaveAttribute('aria-expanded', 'false')
@@ -627,6 +639,7 @@ describe('App — tray layout persistence', () => {
     // The other sections are untouched.
     expect(getTrayLayout().objectInfo).toBe(true)
     expect(getTrayLayout().materials).toBe(false)
+    expect(getTrayLayout().components).toBe(false)
     expect(getTrayLayout().tags).toBe(false)
   })
 
@@ -634,6 +647,19 @@ describe('App — tray layout persistence', () => {
     await renderAndLoad()
     fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
     await waitFor(() => expect(getTrayLayout().modelInfo).toBe(false))
+  })
+
+  it('expanding the Components section persists to the trayLayout singleton', async () => {
+    await renderAndLoad()
+    expect(getTrayLayout().components).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /^components$/i }))
+    await waitFor(() => expect(getTrayLayout().components).toBe(true))
+  })
+
+  it('the Ctrl+Shift+M shortcut also toggles the Components section', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: 'M', ctrlKey: true, shiftKey: true })
+    await waitFor(() => expect(getTrayLayout().components).toBe(true))
   })
 })
 
@@ -2664,5 +2690,117 @@ describe('App — recovery snapshot clearing on clean', () => {
     // snapshot it just wrote never survives the clean transition.
     resolveWrite()
     await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
+  })
+})
+
+describe('App — v1.1 assets lane: viewport resync + current-material reset after delete/purge', () => {
+  // Material/component delete and purge are panel-driven (MaterialPalette's
+  // ×, ComponentsPanel's ×, the header's Purge Unused… button) — NOT tool
+  // commits, so they don't automatically reach Viewport's internal
+  // handleSceneRefresh the way a tool gesture does. doDeleteMaterial/
+  // doDeleteComponent/confirmPurgeUnused must explicitly call
+  // viewportApi.current?.refreshScene() (mirrors onAlphaCommitted's
+  // syncMaterialOpacity precedent) or the deleted/purged geometry's
+  // rendering never updates even though the kernel already changed.
+  function latestViewportProps(): {
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  const priors: Partial<typeof mockScene> = {}
+  function stub<K extends keyof typeof mockScene>(key: K, value: (typeof mockScene)[K]) {
+    if (!(key in priors)) (priors as Record<string, unknown>)[key] = mockScene[key]
+    ;(mockScene as Record<string, unknown>)[key] = value
+  }
+  afterEach(() => {
+    for (const key of Object.keys(priors) as (keyof typeof mockScene)[]) {
+      ;(mockScene as Record<string, unknown>)[key] = priors[key]
+      delete priors[key]
+    }
+  })
+
+  it('deleting an unused material calls refreshScene and, if it was the current material, resets currentMaterialId to the sentinel', async () => {
+    const redInfo = { name: () => 'Red', r: () => 220, g: () => 30, b: () => 30, a: () => 255, has_texture: () => false }
+    stub('material_ids', () => BigUint64Array.from([7n]))
+    stub('material_info', ((id: bigint) => (id === 7n ? redInfo : undefined)) as typeof mockScene.material_info)
+    stub('material_usage', (() => 0) as typeof mockScene.material_usage)
+    const deleteMaterial = vi.fn()
+    stub('delete_material', deleteMaterial as typeof mockScene.delete_material)
+
+    setTrayLayout({ ...DEFAULT_TRAY_LAYOUT, materials: true })
+    await renderAndLoad()
+
+    const { apiRef } = latestViewportProps()
+    const refreshScene = vi.fn()
+    act(() => { if (apiRef !== undefined) apiRef.current = { refreshScene } })
+
+    // Select the swatch as current (Paint tool's active material) — the
+    // thing that must be cleared once its material is gone.
+    fireEvent.click(screen.getByTitle('Red'))
+    expect(latestViewportProps().apiRef?.current).toBeTruthy()
+    expect(vi.mocked(Viewport).mock.calls.at(-1)![0].currentMaterialId).toBe(7n)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete material Red' }))
+
+    expect(deleteMaterial).toHaveBeenCalledWith(7n)
+    expect(refreshScene, 'the viewport must re-tessellate after a material delete').toHaveBeenCalled()
+    expect(
+      vi.mocked(Viewport).mock.calls.at(-1)![0].currentMaterialId,
+      'the deleted material must not stay "current"',
+    ).toBe(MATERIAL_SENTINEL)
+  })
+
+  it('deleting a component definition with no instances calls refreshScene', async () => {
+    stub('component_ids', () => BigUint64Array.from([9n]))
+    stub('component_name', ((id: bigint) => (id === 9n ? 'Leg' : undefined)) as typeof mockScene.component_name)
+    stub('definition_usage', (() => 0) as typeof mockScene.definition_usage)
+    const deleteDefinition = vi.fn()
+    stub('delete_definition', deleteDefinition as typeof mockScene.delete_definition)
+
+    setTrayLayout({ ...DEFAULT_TRAY_LAYOUT, components: true })
+    await renderAndLoad()
+
+    const { apiRef } = latestViewportProps()
+    const refreshScene = vi.fn()
+    act(() => { if (apiRef !== undefined) apiRef.current = { refreshScene } })
+
+    fireEvent.click(screen.getByRole('button', { name: /^delete component/i }))
+
+    expect(deleteDefinition).toHaveBeenCalledWith(9n)
+    expect(refreshScene, 'the viewport must re-tessellate after a definition delete').toHaveBeenCalled()
+  })
+
+  it('Purge Unused calls refreshScene and clears currentMaterialId when the current material was purged', async () => {
+    const staleInfo = { name: () => 'Stray', r: () => 5, g: () => 5, b: () => 5, a: () => 255, has_texture: () => false }
+    let purged = false
+    stub('material_ids', () => (purged ? new BigUint64Array() : BigUint64Array.from([11n])))
+    stub('material_info', ((id: bigint) => (id === 11n && !purged ? staleInfo : undefined)) as typeof mockScene.material_info)
+    stub('unused_materials', () => (purged ? new BigUint64Array() : BigUint64Array.from([11n])))
+    stub('unused_definitions', () => new BigUint64Array())
+    stub('purge_unused', (() => {
+      purged = true
+      return { materials: () => 1, definitions: () => 0 }
+    }) as typeof mockScene.purge_unused)
+
+    setTrayLayout({ ...DEFAULT_TRAY_LAYOUT, materials: true, components: true })
+    await renderAndLoad()
+
+    const { apiRef } = latestViewportProps()
+    const refreshScene = vi.fn()
+    act(() => { if (apiRef !== undefined) apiRef.current = { refreshScene } })
+
+    fireEvent.click(screen.getByTitle('Stray'))
+    expect(vi.mocked(Viewport).mock.calls.at(-1)![0].currentMaterialId).toBe(11n)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Purge Unused…' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Purge' }))
+
+    expect(refreshScene, 'the viewport must re-tessellate after a purge').toHaveBeenCalled()
+    expect(
+      vi.mocked(Viewport).mock.calls.at(-1)![0].currentMaterialId,
+      'a purged material must not stay "current"',
+    ).toBe(MATERIAL_SENTINEL)
   })
 })

@@ -1422,3 +1422,59 @@ fn undo_refuses_nothing_to_undo_and_redo_refuses_nothing_to_redo() {
     let data = call_err(&mut conn, &mut doc, 3, "hew.history.redo", json!({}));
     assert_eq!(data["refusal"], "nothing_to_redo");
 }
+
+// ============================================================= hew.doc.purge_unused
+
+#[test]
+fn purge_unused_removes_an_unused_material_and_definition_as_one_undo_entry() {
+    let mut doc = Document::new();
+    // A used material (stays) and an unused one (goes).
+    let used = doc.add_material(Material::solid("Used", Rgba8::rgb(1, 2, 3)));
+    let unused = doc.add_material(Material::solid("Unused", Rgba8::rgb(4, 5, 6)));
+    let a = build_box(&mut doc, 0.0);
+    doc.set_object_material(a, Some(used)).expect("base");
+    // A definition made unused by deleting its only instance.
+    let b = build_box(&mut doc, 3.0);
+    let (stray_def, stray_inst, _) = doc.make_component(&[NodeId::Object(b)]).expect("fold");
+    doc.delete_node(NodeId::Instance(stray_inst))
+        .expect("delete the only instance");
+
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    let result = call_ok(&mut conn, &mut doc, 2, "hew.doc.purge_unused", json!({}));
+    assert_eq!(result["materials"], 1);
+    assert_eq!(result["definitions"], 1);
+    assert!(!doc.material_ids().contains(&unused));
+    assert!(doc.material_ids().contains(&used));
+    assert!(!doc.component_ids().contains(&stray_def));
+
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.clone()),
+        None,
+        "the undo restored past the compound entry — nothing left on the stack to peek"
+    );
+}
+
+#[test]
+fn purge_unused_is_a_noop_and_adds_no_undo_entry_when_idle() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let mat = doc.add_material(Material::solid("Used", Rgba8::rgb(1, 2, 3)));
+    doc.set_object_material(a, Some(mat)).expect("base");
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+
+    let result = call_ok(&mut conn, &mut doc, 2, "hew.doc.purge_unused", json!({}));
+    assert_eq!(result["materials"], 0);
+    assert_eq!(result["definitions"], 0);
+    assert_eq!(
+        doc.undo_depth(),
+        depth_before,
+        "an idle purge adds no undo entry"
+    );
+}

@@ -23,6 +23,14 @@ The panel contains:
 - **Add color** and **Add texture** are collapsed by default — click either header to expand it. In Add color, name the material and click the swatch button to open the color picker; **+ Add color** stays disabled until you've actually picked a color.
 - **Add texture**: choose a PNG or JPEG image and give it a real-world size (width × height in meters). The image tiles across faces at that physical scale.
 
+## Renaming and deleting a material
+
+Double-click a swatch's name (or click the pencil next to it) to rename it in place — type the new name and press `Enter`, or `Esc` to back out.
+
+Click the `×` next to a swatch to delete it from the palette. A material nothing is using disappears immediately. One that's actually painted on a face or set as an object's base asks first — "Used on N faces — delete and unpaint them?" — since deleting it unpaints every face and object it touches. Either way it's a single undoable step.
+
+Not sure what's actually in use? **Purge Unused** — in the [Components panel](/learn/groups-and-components/#components-panel) or File ▸ Purge Unused… — removes every material (and component definition) nothing references in one step, after showing you what it would remove.
+
 ## Opacity
 
 Every material has an opacity, from fully opaque (100%) down to fully transparent (0%) — 255 shades either way. Select the swatch you want to change, then drag the **Opacity** slider underneath the swatch list. The percentage next to it tracks where you are.

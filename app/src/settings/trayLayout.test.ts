@@ -35,11 +35,27 @@ afterEach(() => {
   ;(globalThis as { localStorage?: unknown }).localStorage = originalLocalStorage
 })
 
-const ALL_OPEN: TrayLayout = { modelInfo: true, objectInfo: true, materials: true, tags: true, scenes: true, changes: true }
+const ALL_OPEN: TrayLayout = {
+  modelInfo: true,
+  objectInfo: true,
+  materials: true,
+  components: true,
+  tags: true,
+  scenes: true,
+  changes: true,
+}
 
 describe('tray layout setting', () => {
-  it('defaults to the layout: Object Info + Outliner + Scenes open, Materials + Tags + Changes collapsed', () => {
-    expect(DEFAULT_TRAY_LAYOUT).toEqual({ modelInfo: true, objectInfo: true, materials: false, tags: false, scenes: true, changes: false })
+  it('defaults to the layout: Object Info + Outliner + Scenes open, Materials + Components + Tags + Changes collapsed', () => {
+    expect(DEFAULT_TRAY_LAYOUT).toEqual({
+      modelInfo: true,
+      objectInfo: true,
+      materials: false,
+      components: false,
+      tags: false,
+      scenes: true,
+      changes: false,
+    })
     expect(getTrayLayout()).toEqual(DEFAULT_TRAY_LAYOUT)
   })
 

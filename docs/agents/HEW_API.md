@@ -654,11 +654,11 @@ for, not shipped.
 | Namespace | Contents | Tier |
 |---|---|---|
 | `hew.meta` | `hello`, `capabilities`, `documents` | Required |
-| `hew.doc` | `attach`, `transact`, `new`, `open`, `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats) | Required (`import` Standard) |
+| `hew.doc` | `attach`, `transact`, `new`, `open`, `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry) | Required (`import`, `purge_unused` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` | Required |
 | `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me` | Required (`follow_me` Standard) |
-| `hew.entity` | `rename`, `delete`, `move` (with copy/array), `rotate`, `scale` | Required |
+| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode` | Required |
 | `hew.component` | `create`, `place`, `make_unique`, `explode` | Standard |
@@ -814,6 +814,27 @@ Semantics notes, normative:
   split, written to `<path>.ids.bin` (with its path returned as
   `id_buffer_path`) rather than base64-encoded inline — `id_palette`
   itself stays inline either way, since it is small.
+- `hew.entity.rename`/`hew.entity.delete` reach a palette material
+  (`mat_…`) or a component definition (`cmp_…`) the same way they reach
+  any other entity kind — no separate namespace. A material's `name` is a
+  required kernel `String`, unlike a node's optional display name, so
+  renaming a material with `name: null` is a params error, not a kernel
+  refusal. Deleting a material clears every face/object-base reference to
+  it (live and tombstoned rows alike) and tombstones it — the handle stays
+  valid for undo, but it drops out of `hew.query.scene`'s `materials` list
+  and out of `save()`. Deleting a component definition deletes every
+  instance that places it (world and nested) as the SAME one undo entry,
+  and refuses `definition_nested_in_definition` when a live definition
+  still places it as a member — explode or make-unique that parent first,
+  or delete the parent instead.
+- `hew.doc.purge_unused` deletes every palette material and component
+  definition nothing references — materials over every object row (live
+  or tombstoned, so a purge can never leave a reference dangling even
+  through an undo that revives a deleted object), definitions
+  transitively (one only reachable through another unused definition is
+  purged too) — as ONE undo entry, and adds no entry at all when there is
+  nothing to purge. Returns `{materials, definitions}`, the counts
+  actually removed.
 - `hew.entity.move` with `copy` over a Sketch selection refuses typed at
   1.0, whatever the count: the UI's sketch copy is tool-layer replay
   through the sticky rules, and the kernel-side sketch duplicate op does

@@ -58,6 +58,11 @@ export interface MenuBarProps {
    *  to Library… rather than hiding it, matching Import…'s session-gating
    *  posture. */
   saveToLibraryDisabled?: boolean
+  /** File ▸ Purge Unused… — deletes every unused palette material and
+   *  component definition, previewed and confirmed in a modal (v1.1 assets
+   *  lane). Always enabled: an idle purge is a documented no-op toast, not
+   *  a disabled state to compute. */
+  onPurgeUnused?: () => void
   /** File ▸ Open on Phone… (docs/design/shop-mode.md §4) — starts the LAN
    *  QR-handoff dialog. `undefined` — and the item hidden — outside Tauri
    *  (only the desktop shell can run the LAN server); same optional-prop-
@@ -97,6 +102,8 @@ export interface MenuBarProps {
   showModelInfo?: boolean
   /** Whether the Materials pane is visible. */
   showMaterials?: boolean
+  /** Whether the Components pane is visible. */
+  showComponents?: boolean
   /** Whether the Tags pane is visible. */
   showTags?: boolean
   /** Whether the Scenes pane is visible (docs/design/scenes.md §5). */
@@ -113,6 +120,8 @@ export interface MenuBarProps {
   onToggleModelInfo?: () => void
   /** Toggle the Materials pane. */
   onToggleMaterials?: () => void
+  /** Toggle the Components pane. */
+  onToggleComponents?: () => void
   /** Toggle the Tags pane. */
   onToggleTags?: () => void
   /** Toggle the Scenes pane. */
@@ -593,6 +602,7 @@ export function MenuBar({
   onPrint,
   onSaveToLibrary,
   saveToLibraryDisabled = false,
+  onPurgeUnused,
   onClose,
   onExit,
   recentFiles,
@@ -608,6 +618,7 @@ export function MenuBar({
   onSelectTool,
   showModelInfo = true,
   showMaterials = true,
+  showComponents = false,
   showTags = false,
   showScenes = false,
   showChanges = false,
@@ -616,6 +627,7 @@ export function MenuBar({
   showLibrary = false,
   onToggleModelInfo,
   onToggleMaterials,
+  onToggleComponents,
   onToggleTags,
   onToggleScenes,
   onToggleChanges,
@@ -763,6 +775,12 @@ export function MenuBar({
                 disabled={saveToLibraryDisabled}
                 onClick={withClose(onSaveToLibrary)}
               />
+            )}
+            {onPurgeUnused !== undefined && (
+              <>
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem label="Purge Unused…" onClick={withClose(onPurgeUnused)} />
+              </>
             )}
             <div style={SEPARATOR_STYLE} />
             <MenuItem
@@ -949,6 +967,12 @@ export function MenuBar({
               shortcut={`⇧${mod}C`}
               checked={showMaterials}
               onClick={withClose(() => onToggleMaterials?.())}
+            />
+            <CheckMenuItem
+              label="Components"
+              shortcut={`⇧${mod}M`}
+              checked={showComponents}
+              onClick={withClose(() => onToggleComponents?.())}
             />
             <CheckMenuItem
               label="Tags"

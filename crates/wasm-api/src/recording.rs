@@ -542,6 +542,16 @@ pub enum RecordedCall {
     },
     /// `set_material_alpha(material, alpha)`.
     SetMaterialAlpha { material: u64, alpha: u8 },
+    /// `set_material_name(material, name)` — palette material rename (v1.1
+    /// assets lane). Additive variant (the [`RecordedCall::SketchBeginCurveWith`]
+    /// posture): old recordings replay unchanged; one that renames a
+    /// material fails to parse on older builds — loudly, never silently
+    /// divergent.
+    SetMaterialName { material: u64, name: String },
+    /// `delete_material(material)` — palette material delete/tombstone
+    /// (v1.1 assets lane). Additive variant, same posture as
+    /// [`RecordedCall::SetMaterialName`].
+    DeleteMaterial { material: u64 },
     /// `paint_face(object, face, material)` — `u64::MAX` = unpaint.
     PaintFace {
         object: u64,
@@ -789,6 +799,19 @@ pub enum RecordedCall {
     },
     /// `delete_def_member(component, object)`.
     DeleteDefMember { component: u64, object: u64 },
+    /// `delete_definition(component)` — deletes a component definition and
+    /// every instance that places it (v1.1 assets lane). Additive variant
+    /// (the [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; one that deletes a definition fails to parse on
+    /// older builds — loudly, never silently divergent.
+    DeleteDefinition { component: u64 },
+    /// `purge_unused()` — deletes every unused definition and material as
+    /// one undo entry (v1.1 assets lane). Recorded only when the call
+    /// actually purged something (the kernel records no undo entry, and this
+    /// mirrors that: an idle purge is a no-op replay would gain nothing
+    /// from). Additive variant, same posture as
+    /// [`RecordedCall::DeleteDefinition`].
+    PurgeUnused,
 
     // ---------------------------------------------------------------------
     // component-edit-parity.md phase K2 — additive variants (the

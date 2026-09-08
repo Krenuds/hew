@@ -247,3 +247,53 @@ describe('Library menu items parity (Window ▸ Library, File ▸ Save to Librar
     expect(menuBarSource.includes('onToggleLibrary')).toBe(true)
   })
 })
+
+/**
+ * v1.1 assets lane: the Components panel toggle (View ▸ Components, a
+ * checkable pane toggle like win-materials/win-tags) and File ▸ Purge
+ * Unused… (a plain item like file-save-to-library) — same two binding
+ * shapes as the Library block above, pinned separately since they're a
+ * different feature.
+ */
+describe('Components/Purge Unused menu items parity (v1.1 assets lane)', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+
+  it('win-components is built via check_item, attached to a submenu, and dispatches to toggle-components', () => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"win-components"`, 's').exec(source)
+    expect(binding, 'no check_item binding found for win-components').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      source.includes(`.item(&${variable})`),
+      'win-components is built but never attached to a SubmenuBuilder chain',
+    ).toBe(true)
+    expect(
+      /"win-components"\s*=>\s*"toggle-components"/.test(source),
+      'win-components has no dispatch arm to toggle-components',
+    ).toBe(true)
+  })
+
+  it('file-purge-unused is built as a plain item, attached to a submenu, and dispatches to purge-unused', () => {
+    const binding = new RegExp(
+      `let\\s+(\\w+)\\s*=\\s*MenuItemBuilder::with_id\\(\\s*"file-purge-unused"`,
+      's',
+    ).exec(source)
+    expect(binding, 'no MenuItemBuilder binding found for file-purge-unused').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      source.includes(`.item(&${variable})`),
+      'file-purge-unused is built but never attached to a SubmenuBuilder chain',
+    ).toBe(true)
+    expect(
+      /"file-purge-unused"\s*=>\s*"purge-unused"/.test(source),
+      'file-purge-unused has no dispatch arm to purge-unused',
+    ).toBe(true)
+  })
+
+  it('is offered from the web MenuBar (View ▸ Components, File ▸ Purge Unused…)', () => {
+    expect(menuBarSource.includes('Components')).toBe(true)
+    expect(menuBarSource.includes('onToggleComponents')).toBe(true)
+    expect(menuBarSource.includes('Purge Unused…')).toBe(true)
+    expect(menuBarSource.includes('onPurgeUnused')).toBe(true)
+  })
+})

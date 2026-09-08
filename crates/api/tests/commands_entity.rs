@@ -220,6 +220,42 @@ fn rename_renames_an_object_and_refuses_an_unknown_id() {
 }
 
 #[test]
+fn rename_renames_a_material_and_refuses_a_null_name() {
+    let mut doc = Document::new();
+    let mat = doc.add_material(kernel::Material::solid(
+        "Oak",
+        kernel::Rgba8::rgb(180, 140, 90),
+    ));
+    let public = public_of(&doc, &kernel::EntityRef::Material(mat));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.rename",
+        json!({ "id": public, "name": "Brick" }),
+    );
+    assert_eq!(doc.material(mat).unwrap().name, "Brick");
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+
+    // A material's name is a required kernel `String`, never `Option` —
+    // there is no "unnamed swatch" state to clear to, so `name: null` is
+    // a params error rather than a kernel refusal.
+    let r = call(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.entity.rename",
+        json!({ "id": public }),
+    );
+    assert_eq!(r.error.as_ref().unwrap().code, codes::INVALID_PARAMS);
+}
+
+#[test]
 fn rename_refuses_kinds_the_kernel_cannot_rename() {
     let mut doc = Document::new();
     let sketch = build_circle_sketch(&mut doc, 5.0, 5.0, 1.0);
@@ -287,15 +323,89 @@ fn delete_deletes_an_object_and_refuses_an_unknown_id() {
 }
 
 #[test]
-fn delete_refuses_materials_and_components_as_unsupported() {
+fn delete_deletes_a_material_unpainting_a_face_and_refuses_a_deleted_handle() {
     let mut doc = Document::new();
     let mat = doc.add_material(kernel::Material::solid(
         "Oak",
         kernel::Rgba8::rgb(180, 140, 90),
     ));
+    let obj = build_box(&mut doc, 0.0);
+    doc.set_object_material(obj, Some(mat)).expect("base");
     let public = public_of(&doc, &kernel::EntityRef::Material(mat));
     let mut conn = Connection::new(Profile::Core, "test");
     hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.delete",
+        json!({ "id": public }),
+    );
+    assert!(doc.material(mat).is_none(), "tombstoned");
+    assert_eq!(
+        doc.object(obj).unwrap().default_material(),
+        None,
+        "the object's base material was unpainted"
+    );
+
+    // A second delete of the now-deleted handle refuses (its public id
+    // still resolves — the sid is a tombstone, not erased — but the
+    // kernel's own `UnknownMaterial` surfaces). Checked BEFORE the
+    // undo-restores-byte-identically assertion below, which undoes the
+    // first delete and would make a second one succeed again.
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.entity.delete",
+        json!({ "id": public }),
+    );
+    assert_eq!(data["refusal"], "unknown_material");
+
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+}
+
+#[test]
+fn delete_deletes_a_component_definition_and_its_world_instance() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let (component, instance, _) = doc
+        .make_component(&[kernel::NodeId::Object(obj)])
+        .expect("fold");
+    let public = public_of(&doc, &kernel::EntityRef::Component(component));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.delete",
+        json!({ "id": public }),
+    );
+    assert!(!doc.component_ids().contains(&component));
+    assert!(!doc.instance_ids().contains(&instance));
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+}
+
+#[test]
+fn delete_refuses_a_definition_nested_inside_another_live_definition() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let (inner, inner_inst, _) = doc
+        .make_component(&[kernel::NodeId::Object(obj)])
+        .expect("fold inner");
+    doc.make_component(&[kernel::NodeId::Instance(inner_inst)])
+        .expect("fold outer, nesting the inner instance");
+    let public = public_of(&doc, &kernel::EntityRef::Component(inner));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
 
     let data = call_err(
         &mut conn,
@@ -304,7 +414,9 @@ fn delete_refuses_materials_and_components_as_unsupported() {
         "hew.entity.delete",
         json!({ "id": public }),
     );
-    assert_eq!(data["refusal"], "delete_unsupported");
+    assert_eq!(data["refusal"], "definition_nested_in_definition");
+    assert!(doc.component_ids().contains(&inner), "untouched");
+    assert_eq!(doc.undo_depth(), depth_before, "document untouched");
 }
 
 #[test]

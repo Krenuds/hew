@@ -9,6 +9,9 @@
  *   - Opacity slider — adjusts the selected swatch's alpha (color or
  *     texture alike) → set_material_alpha(). Live while dragging, but only
  *     commits to the kernel (one undo step) on release.
+ *   - Per-swatch Rename (✎ button, or double-click the name — Finder-style,
+ *     like TagsPanel) and Delete (× button; the caller decides whether to
+ *     confirm, based on `material_usage`).
  *
  * Props:
  *   `scene`        — the WASM scene (for material queries / mutations)
@@ -20,6 +23,10 @@
  *     apply the new alpha to its already-built materials in place (alpha is
  *     live render state, resolved from the palette at render time rather
  *     than baked into geometry — no re-tessellation needed or wanted)
+ *   `onRenameMaterial` — commit a rename; returns inline error text (a
+ *     kernel refusal) or null on success, mirroring TagsPanel's onRenameTag.
+ *   `onDeleteMaterial` — request a delete; the caller (App.tsx) decides
+ *     whether to confirm first (checking `scene.material_usage`).
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -50,6 +57,14 @@ interface Props {
    * gates the button on `libraryStore().available()` itself since it has no
    * other signal of platform capability. */
   onSaveToLibrary?: (materialId: bigint) => void
+  /** Rename a material in place. Returns inline error text (a kernel
+   *  refusal) or null on success — mirroring TagsPanel's onRenameTag.
+   *  Omitted entirely hides the rename control (defensive; App.tsx always
+   *  wires this). */
+  onRenameMaterial?: (id: bigint, name: string) => string | null
+  /** Request a material delete. The caller decides whether to confirm
+   *  first (checking `scene.material_usage`) before actually deleting. */
+  onDeleteMaterial?: (id: bigint) => void
 }
 
 const PANEL_STYLE: React.CSSProperties = {
@@ -158,6 +173,8 @@ export function MaterialPalette({
   onDocumentChanged,
   onSaveToLibrary,
   onAlphaCommitted,
+  onRenameMaterial,
+  onDeleteMaterial,
 }: Props) {
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
   // re-query material_ids from the WASM scene on each document change.
@@ -244,6 +261,37 @@ export function MaterialPalette({
     pendingScrollRef.current = false
     selectedRowRef.current?.scrollIntoView?.({ block: 'nearest' })
   })
+
+  // --- Rename state (Finder-style, mirroring TagsPanel) ---
+  const [editingMaterialId, setEditingMaterialId] = useState<bigint | null>(null)
+  const [editingText, setEditingText] = useState('')
+  const [editingError, setEditingError] = useState<string | null>(null)
+
+  function startRename(id: bigint, currentName: string) {
+    if (onRenameMaterial === undefined) return
+    setEditingMaterialId(id)
+    setEditingText(currentName)
+    setEditingError(null)
+  }
+  function cancelRename() {
+    setEditingMaterialId(null)
+    setEditingText('')
+    setEditingError(null)
+  }
+  function commitRename(id: bigint, currentName: string) {
+    if (onRenameMaterial === undefined) return
+    const next = editingText.trim()
+    if (next.length === 0 || next === currentName) {
+      cancelRename()
+      return
+    }
+    const err = onRenameMaterial(id, next)
+    if (err !== null) {
+      setEditingError(err)
+      return
+    }
+    cancelRename()
+  }
 
   // --- Opacity state ---
   // Non-null only mid-drag/mid-keystroke, so the slider tracks the pointer
@@ -461,34 +509,115 @@ export function MaterialPalette({
           thumbUrl = thumbCache.get(cacheKey)
         }
 
+        const isEditing = editingMaterialId === id
+        const name = info.name()
+
         return (
-          <div
-            key={id.toString()}
-            ref={selected ? selectedRowRef : undefined}
-            style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-          >
+          <div key={id.toString()}>
             <div
-              onClick={() => onSelectMaterial(id)}
-              title={info.name()}
-              style={{
-                ...SWATCH_STYLE,
-                background: thumbUrl !== undefined ? `url(${thumbUrl}) center/cover` : hex,
-                borderColor: selected ? 'var(--accent-base)' : 'var(--border-strong, #444)',
-              }}
-            />
-            <span
-              style={{
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                flex: 1,
-                color: selected ? 'var(--accent-base)' : 'var(--text-secondary, #ccc)',
-                cursor: 'pointer',
-              }}
-              onClick={() => onSelectMaterial(id)}
+              ref={selected ? selectedRowRef : undefined}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
-              {info.name()}
-            </span>
+              <div
+                onClick={() => onSelectMaterial(id)}
+                title={name}
+                style={{
+                  ...SWATCH_STYLE,
+                  background: thumbUrl !== undefined ? `url(${thumbUrl}) center/cover` : hex,
+                  borderColor: selected ? 'var(--accent-base)' : 'var(--border-strong, #444)',
+                }}
+              />
+              {isEditing ? (
+                <input
+                  autoFocus
+                  aria-label={`Rename material ${name}`}
+                  value={editingText}
+                  onChange={(e) => setEditingText(e.target.value)}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      commitRename(id, name)
+                    } else if (e.key === 'Escape') {
+                      e.stopPropagation()
+                      cancelRename()
+                    }
+                  }}
+                  onBlur={() => commitRename(id, name)}
+                  spellCheck={false}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    background: 'var(--surface-input, #111)',
+                    border: '1px solid var(--accent-border)',
+                    borderRadius: '3px',
+                    color: 'var(--text-primary, #eee)',
+                    fontFamily: 'monospace',
+                    fontSize: '11px',
+                    padding: '1px 4px',
+                    outline: 'none',
+                  }}
+                />
+              ) : (
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flex: 1,
+                    color: selected ? 'var(--accent-base)' : 'var(--text-secondary, #ccc)',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => onSelectMaterial(id)}
+                  onDoubleClick={() => startRename(id, name)}
+                >
+                  {name}
+                </span>
+              )}
+              {!isEditing && onRenameMaterial !== undefined && (
+                <button
+                  type="button"
+                  onClick={() => startRename(id, name)}
+                  aria-label={`Rename material ${name}`}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-faint, #666)',
+                    cursor: 'pointer',
+                    padding: '0 2px',
+                    fontSize: '11px',
+                    lineHeight: 1,
+                    flexShrink: 0,
+                  }}
+                >
+                  ✎
+                </button>
+              )}
+              {!isEditing && onDeleteMaterial !== undefined && (
+                <button
+                  type="button"
+                  onClick={() => onDeleteMaterial(id)}
+                  aria-label={`Delete material ${name}`}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-faint, #666)',
+                    cursor: 'pointer',
+                    padding: '0 2px',
+                    fontSize: '12px',
+                    lineHeight: 1,
+                    flexShrink: 0,
+                  }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {isEditing && editingError !== null && (
+              <div style={{ padding: '2px 0 4px 42px', fontSize: '10px', color: 'var(--scene-delete-text)' }}>
+                {editingError}
+              </div>
+            )}
           </div>
         )
       })}

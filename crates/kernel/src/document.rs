@@ -1373,6 +1373,44 @@ enum DocAction {
         prev: u8,
         next: u8,
     },
+    /// [`Document::set_material_name`] renamed a palette material. Undo/
+    /// redo swap the recorded names back in verbatim.
+    MaterialRenamed {
+        material: MaterialId,
+        prev: String,
+        next: String,
+    },
+    /// [`Document::delete_material`] tombstoned a palette material after
+    /// clearing EVERY reference to it: `faces` are the face rows (over
+    /// every object row, live or tombstoned) whose own material was the
+    /// deleted one, `defaults` the object rows whose base material was.
+    /// Undo restores each reference and un-tombstones the material; redo
+    /// re-clears and re-tombstones. All-or-nothing on replay, refused
+    /// [`DocumentError::ReplaceMaterialReplayStale`] if a recorded face
+    /// row no longer exists — the same rule-9 posture as
+    /// [`DocAction::ReplaceMaterial`].
+    MaterialDeleted {
+        material: MaterialId,
+        faces: Vec<(ObjectId, FaceId)>,
+        defaults: Vec<ObjectId>,
+    },
+    /// [`Document::delete_definition`] hid a component definition (its
+    /// instances were deleted first, as ordinary [`DocAction::Deleted`]
+    /// siblings inside the same compound). Undo un-hides it; redo re-hides
+    /// it. Hide-not-delete, so the [`ComponentId`] stays stable.
+    DefinitionDeleted {
+        component: ComponentId,
+        /// Everything tombstoned together with the definition: its whole
+        /// member subtree (objects, groups, instances the definition owns,
+        /// recursively) plus any instance OF it still live inside an
+        /// already-hidden definition (unreachable, so never deleted as a
+        /// world node) — `save()` and the tree validator both key on the
+        /// per-row `hidden` flag, so a hidden definition must own no live
+        /// rows. Undo un-hides exactly this set with the definition.
+        hidden_nodes: Vec<NodeId>,
+        /// The definition's own sketches, hidden the same way.
+        hidden_sketches: Vec<SketchId>,
+    },
     /// `set_node_name` / `add_node_tag` / `remove_node_tag` changed a tree
     /// node's display name or tag list (or both). Undo restores `prev_name` /
     /// `prev_tags`; redo re-applies `next_name` / `next_tags`. All three ops
@@ -1739,7 +1777,15 @@ impl DocAction {
                 v.extend(defaults.iter().copied());
                 v
             }
-            DocAction::SetMaterialAlpha { .. } => Vec::new(),
+            DocAction::SetMaterialAlpha { .. } | DocAction::MaterialRenamed { .. } => Vec::new(),
+            DocAction::MaterialDeleted {
+                faces, defaults, ..
+            } => {
+                let mut v: Vec<ObjectId> = faces.iter().map(|&(o, _)| o).collect();
+                v.extend(defaults.iter().copied());
+                v
+            }
+            DocAction::DefinitionDeleted { .. } => Vec::new(),
             DocAction::NodeMetaChanged { node, .. } => match node {
                 NodeId::Object(id) => vec![*id],
                 _ => Vec::new(),
@@ -1832,6 +1878,9 @@ impl DocAction {
             | DocAction::SetFaceUvFrame { .. }
             | DocAction::ReplaceMaterial { .. }
             | DocAction::SetMaterialAlpha { .. }
+            | DocAction::MaterialRenamed { .. }
+            | DocAction::MaterialDeleted { .. }
+            | DocAction::DefinitionDeleted { .. }
             | DocAction::NodeMetaChanged { .. }
             | DocAction::ComponentRenamed { .. }
             | DocAction::TagDeleted { .. }
@@ -2345,6 +2394,12 @@ pub enum DocumentError {
     /// drill-down never hits this; it is the kernel backstop for a direct
     /// caller skipping levels.
     ExplodeSessionNestedGroup,
+    /// `delete_definition` refused: the definition is still placed as a
+    /// member INSIDE another live definition (nested components). Deleting
+    /// it would silently edit that parent's shared geometry through the
+    /// back door; the parent's instances have to be made unique or
+    /// exploded first (or the parent deleted). The document is untouched.
+    DefinitionNestedInDefinition,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -2540,6 +2595,10 @@ impl std::fmt::Display for DocumentError {
                 "a placement of this component is inside a group; it opens in \
                  the in-context editing mode instead"
             ),
+            DocumentError::DefinitionNestedInDefinition => write!(
+                f,
+                "this component is used inside another component definition — make that component's instances unique or explode them first"
+            ),
             DocumentError::ExplodeSessionNestedGroup => write!(
                 f,
                 "cannot open a nested group for editing directly — enter its \
@@ -2654,6 +2713,15 @@ pub struct LoopImprintReport {
     pub route: LoopImprintRoute,
 }
 
+/// What [`Document::purge_unused`] removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PurgeReport {
+    /// Palette materials tombstoned because nothing referenced them.
+    pub materials: usize,
+    /// Component definitions hidden because nothing placed them.
+    pub definitions: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InsertReport {
     /// The created top-level nodes, in the item's own root order.
@@ -2706,6 +2774,13 @@ pub struct Document {
     /// instance visibility lives on their `*Record` wrappers rather than the
     /// payload type.
     hidden_sketches: BTreeSet<SketchId>,
+    /// Palette materials the user DELETED ([`Document::delete_material`]):
+    /// tombstoned, never removed, so the [`MaterialId`] stays valid for
+    /// undo (a slotmap cannot re-insert at a key). Invariant, checked by
+    /// the validator: no object row — live or tombstoned — and no
+    /// definition member references a deleted material. `save()` drops
+    /// them; a loaded document starts with this empty.
+    deleted_materials: BTreeSet<MaterialId>,
     /// The `SketchOwner` of every DEFINITION-owned sketch (component-edit-
     /// parity.md phase K1): sketch id → the owning definition. Absence means
     /// `SketchOwner::World` — the common case, and every sketch before this
@@ -2966,7 +3041,7 @@ impl Document {
             EntityRef::Component(id) => self.components.get(*id).is_some_and(|r| !r.hidden),
             EntityRef::Instance(id) => self.instances.get(*id).is_some_and(|r| !r.hidden),
             EntityRef::Guide(id) => self.guides.get(*id).is_some_and(|r| !r.hidden),
-            EntityRef::Material(id) => self.materials.contains_key(*id),
+            EntityRef::Material(id) => self.material_is_live(*id),
             EntityRef::Tag(path) => self.tag_meta.contains_key(path),
         };
         if live {
@@ -3216,6 +3291,7 @@ impl Document {
         let materials: Vec<(MaterialId, Material)> = self
             .materials
             .iter()
+            .filter(|(id, _)| !self.deleted_materials.contains(id))
             .map(|(id, m)| (id, m.clone()))
             .collect();
 
@@ -4963,6 +5039,7 @@ impl Document {
                 let existing = self
                     .materials
                     .iter()
+                    .filter(|(id, _)| !self.deleted_materials.contains(id))
                     .find(|(_, m)| **m == mat)
                     .map(|(id, _)| id);
                 existing.unwrap_or_else(|| {
@@ -4993,6 +5070,7 @@ impl Document {
             .map(|mat| {
                 self.materials
                     .iter()
+                    .filter(|(id, _)| !self.deleted_materials.contains(id))
                     .find(|(_, m)| *m == mat)
                     .map(|(id, _)| id)
             })
@@ -5748,6 +5826,9 @@ impl Document {
         id: MaterialId,
         alpha: u8,
     ) -> Result<DocChange, DocumentError> {
+        if !self.material_is_live(id) {
+            return Err(DocumentError::UnknownMaterial);
+        }
         let mat = self
             .materials
             .get_mut(id)
@@ -5769,12 +5850,203 @@ impl Document {
 
     /// A palette material by handle, or `None` if stale.
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
+        if self.deleted_materials.contains(&id) {
+            return None;
+        }
         self.materials.get(id)
+    }
+
+    /// True for a palette handle that names a material the user can still
+    /// see and paint with: present and not deleted. Every mutation that
+    /// takes a material handle checks this, so a tombstoned material is
+    /// exactly as unreachable as a stale one.
+    fn material_is_live(&self, id: MaterialId) -> bool {
+        self.materials.contains_key(id) && !self.deleted_materials.contains(&id)
+    }
+
+    /// Rename a palette material, recording an undoable
+    /// [`DocAction::MaterialRenamed`]. Renaming to the current name is a
+    /// no-op (no undo entry) — consistent with
+    /// [`Document::set_component_name`]. Returns an empty [`DocChange`]:
+    /// a name is palette metadata, resolved live by whoever lists the
+    /// palette, never baked into render buffers.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownMaterial`] — stale or deleted handle.
+    pub fn set_material_name(
+        &mut self,
+        id: MaterialId,
+        name: String,
+    ) -> Result<DocChange, DocumentError> {
+        if !self.material_is_live(id) {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        let prev = self.materials[id].name.clone();
+        if prev == name {
+            return Ok(DocChange::default());
+        }
+        self.materials[id].name = name.clone();
+        self.undo.push(DocAction::MaterialRenamed {
+            material: id,
+            prev,
+            next: name,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange::default())
+    }
+
+    /// Delete a palette material: every face and object-base reference to
+    /// it — over EVERY object row, tombstoned (undone/deleted, restorable)
+    /// rows included, so no reference can ever come back dangling through
+    /// an undo — is cleared to "unpainted", then the material is
+    /// tombstoned (hide-not-delete: the handle stays valid for undo). One
+    /// undoable [`DocAction::MaterialDeleted`]; undo restores every
+    /// reference bit-exactly and brings the material back.
+    ///
+    /// The returned [`DocChange`] names the LIVE objects (and the
+    /// definitions/instances that render them) whose appearance changed.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownMaterial`] — stale or already deleted.
+    pub fn delete_material(&mut self, id: MaterialId) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "delete_material");
+        if !self.material_is_live(id) {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        let (faces, defaults) = self.clear_material_references(id);
+        self.deleted_materials.insert(id);
+        let change = self.material_delete_change(&faces, &defaults);
+        self.undo.push(DocAction::MaterialDeleted {
+            material: id,
+            faces,
+            defaults,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// Clears every reference to `id` over every object row (live or
+    /// tombstoned) and returns exactly what was cleared, in slotmap order,
+    /// so a replay can restore or re-clear the same set.
+    fn clear_material_references(
+        &mut self,
+        id: MaterialId,
+    ) -> (Vec<(ObjectId, FaceId)>, Vec<ObjectId>) {
+        let mut faces = Vec::new();
+        let mut defaults = Vec::new();
+        for (oid, rec) in self.objects.iter_mut() {
+            if rec.object.default_material == Some(id) {
+                rec.object.default_material = None;
+                defaults.push(oid);
+            }
+            for (fid, face) in rec.object.faces.iter_mut() {
+                if face.material == Some(id) {
+                    face.material = None;
+                    faces.push((oid, fid));
+                }
+            }
+        }
+        (faces, defaults)
+    }
+
+    /// [`Document::replace_material_change`] restricted to the rows that
+    /// are live — a tombstoned row has nothing rendering it.
+    fn material_delete_change(
+        &self,
+        faces: &[(ObjectId, FaceId)],
+        defaults: &[ObjectId],
+    ) -> DocChange {
+        let live_faces: Vec<(ObjectId, FaceId)> = faces
+            .iter()
+            .copied()
+            .filter(|(oid, _)| self.objects.get(*oid).is_some_and(|r| !r.hidden))
+            .collect();
+        let live_defaults: Vec<ObjectId> = defaults
+            .iter()
+            .copied()
+            .filter(|oid| self.objects.get(*oid).is_some_and(|r| !r.hidden))
+            .collect();
+        self.replace_material_change(&live_faces, &live_defaults)
+    }
+
+    /// Every recorded row of a [`DocAction::MaterialDeleted`] still exists
+    /// (tombstoned or not — a hidden row keeps its faces). A row a later
+    /// structural op consumed refuses the whole replay typed, mirroring
+    /// [`Document::replace_material_targets_live`].
+    fn material_delete_targets_exist(
+        &self,
+        faces: &[(ObjectId, FaceId)],
+        defaults: &[ObjectId],
+    ) -> Result<(), DocumentError> {
+        for &(oid, fid) in faces {
+            if !self
+                .objects
+                .get(oid)
+                .is_some_and(|r| r.object.faces.contains_key(fid))
+            {
+                return Err(DocumentError::ReplaceMaterialReplayStale);
+            }
+        }
+        for &oid in defaults {
+            if !self.objects.contains_key(oid) {
+                return Err(DocumentError::ReplaceMaterialReplayStale);
+            }
+        }
+        Ok(())
+    }
+
+    /// How many LIVE faces and object bases carry `id` — the count a
+    /// Materials panel shows and a delete confirmation quotes. Zero for a
+    /// stale/deleted handle.
+    pub fn material_usage(&self, id: MaterialId) -> usize {
+        if !self.material_is_live(id) {
+            return 0;
+        }
+        self.objects
+            .iter()
+            .filter(|(_, r)| !r.hidden)
+            .map(|(_, r)| {
+                usize::from(r.object.default_material == Some(id))
+                    + r.object
+                        .faces
+                        .iter()
+                        .filter(|(_, f)| f.material == Some(id))
+                        .count()
+            })
+            .sum()
+    }
+
+    /// Palette materials nothing references — over EVERY object row, live
+    /// or tombstoned, so purging one can never leave a reference dangling
+    /// even through an undo that revives a deleted object. Conservative by
+    /// design: a material only a deleted-but-undoable object still carries
+    /// is NOT unused.
+    pub fn unused_materials(&self) -> Vec<MaterialId> {
+        let mut referenced: BTreeSet<MaterialId> = BTreeSet::new();
+        for (_, rec) in self.objects.iter() {
+            if let Some(m) = rec.object.default_material {
+                referenced.insert(m);
+            }
+            for (_, face) in rec.object.faces.iter() {
+                if let Some(m) = face.material {
+                    referenced.insert(m);
+                }
+            }
+        }
+        self.material_ids()
+            .into_iter()
+            .filter(|id| !referenced.contains(id))
+            .collect()
     }
 
     /// All palette material handles, in unspecified but stable order.
     pub fn material_ids(&self) -> Vec<MaterialId> {
-        self.materials.keys().collect()
+        self.materials
+            .keys()
+            .filter(|id| !self.deleted_materials.contains(id))
+            .collect()
     }
 
     /// The whole material palette, for the tessellator to resolve face
@@ -5830,7 +6102,7 @@ impl Document {
         material: Option<MaterialId>,
     ) -> Result<DocChange, DocumentError> {
         if let Some(id) = material
-            && !self.materials.contains_key(id)
+            && !self.material_is_live(id)
         {
             return Err(DocumentError::UnknownMaterial);
         }
@@ -5872,7 +6144,7 @@ impl Document {
         material: Option<MaterialId>,
     ) -> Result<DocChange, DocumentError> {
         if let Some(id) = material
-            && !self.materials.contains_key(id)
+            && !self.material_is_live(id)
         {
             return Err(DocumentError::UnknownMaterial);
         }
@@ -6010,12 +6282,12 @@ impl Document {
         to: Option<MaterialId>,
     ) -> Result<DocChange, DocumentError> {
         if let Some(id) = from
-            && !self.materials.contains_key(id)
+            && !self.material_is_live(id)
         {
             return Err(DocumentError::UnknownMaterial);
         }
         if let Some(id) = to
-            && !self.materials.contains_key(id)
+            && !self.material_is_live(id)
         {
             return Err(DocumentError::UnknownMaterial);
         }
@@ -7628,6 +7900,307 @@ impl Document {
         self.commit_new_action();
         self.debug_validate();
         Ok(self.component_change(component))
+    }
+
+    /// Delete a component definition together with every instance that
+    /// places it: each world instance goes through the exact
+    /// [`Document::delete_node`] path (its own [`DocAction::Deleted`]),
+    /// then the definition is hidden ([`DocAction::DefinitionDeleted`]) —
+    /// all bundled into ONE undo entry, so one undo brings the definition
+    /// and every instance back. Hide-not-delete throughout: every handle
+    /// stays stable.
+    ///
+    /// Instances owned by a HIDDEN definition (one already deleted, or one
+    /// whose creation was undone) are unreachable and are left alone; they
+    /// come back together with their owner, and their definition with
+    /// them, in the same undo order.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownComponent`] — stale or hidden handle.
+    /// - [`DocumentError::DefinitionNestedInDefinition`] — a live
+    ///   definition still places this one as a member; deleting it would
+    ///   edit that definition's shared geometry. Untouched.
+    pub fn delete_definition(
+        &mut self,
+        component: ComponentId,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "delete_definition");
+        if self.components.get(component).is_none_or(|c| c.hidden) {
+            return Err(DocumentError::UnknownComponent);
+        }
+        // A definition on loan to an open component-edit session has its
+        // members deliberately World-owned for the session's duration and
+        // its instances hidden by the bake; tombstoning it out from under
+        // the session would let the close fold fresh geometry into a hidden
+        // definition. Same refusal every other structural op gives a live
+        // session (`refuse_during_component_session`), scoped to this
+        // definition.
+        if self.defs_on_loan().contains(&component) {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        let nested_in_live_def = self.instances.iter().any(|(_, r)| {
+            !r.hidden
+                && r.def == component
+                && r.owner_def
+                    .is_some_and(|o| self.components.get(o).is_some_and(|c| !c.hidden))
+        });
+        if nested_in_live_def {
+            return Err(DocumentError::DefinitionNestedInDefinition);
+        }
+        let world_instances: Vec<InstanceId> = self
+            .instances
+            .iter()
+            .filter(|(_, r)| !r.hidden && r.def == component && r.owner_def.is_none())
+            .map(|(id, _)| id)
+            .collect();
+        let checkpoint = self.clone();
+        let undo_start = self.undo.actions.len();
+        let mut change = DocChange::default();
+        for inst in world_instances {
+            // An instance inside a group that an EARLIER iteration's delete
+            // already hid (a group holding two chairs) is no longer live;
+            // skip it rather than refuse — it is already gone with its
+            // container and comes back with it.
+            if !self.node_is_live(NodeId::Instance(inst)) {
+                continue;
+            }
+            match self.delete_node(NodeId::Instance(inst)) {
+                Ok(c) => merge_doc_change(&mut change, c),
+                Err(e) => {
+                    *self = checkpoint;
+                    return Err(e);
+                }
+            }
+        }
+        // Tombstone the definition's whole member subtree, then whatever
+        // live instances OF it remain (member instances owned by a HIDDEN
+        // definition — the live-owner case was refused above, and world
+        // instances were just deleted), so a hidden definition owns no
+        // live row and no live instance references it.
+        let members = self.components[component].members.clone();
+        let mut hidden_nodes = Vec::new();
+        for m in members {
+            self.collect_def_subtree(m, &mut hidden_nodes);
+        }
+        hidden_nodes.extend(
+            self.instances
+                .iter()
+                .filter(|(_, r)| !r.hidden && r.def == component)
+                .map(|(id, _)| NodeId::Instance(id)),
+        );
+        let hidden_sketches: Vec<SketchId> = self
+            .def_sketches
+            .iter()
+            .filter(|(sid, c)| **c == component && !self.hidden_sketches.contains(sid))
+            .map(|(sid, _)| *sid)
+            .collect();
+        self.set_definition_hidden(component, &hidden_nodes, &hidden_sketches, true);
+        self.undo.push(DocAction::DefinitionDeleted {
+            component,
+            hidden_nodes,
+            hidden_sketches,
+        });
+        let actions: Vec<DocAction> = self.undo.actions.drain(undo_start..).collect();
+        self.undo.push(DocAction::Compound {
+            actions,
+            meta: None,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        merge_doc_change(
+            &mut change,
+            DocChange {
+                components_touched: vec![component],
+                ..Default::default()
+            },
+        );
+        Ok(change)
+    }
+
+    /// [`Document::collect_subtree`] for a definition's members: the same
+    /// pre-order walk, keyed on the per-row `hidden` flag alone — a
+    /// definition-owned row is never "live" in the world sense that walk
+    /// checks, but it is exactly what a definition delete must tombstone.
+    fn collect_def_subtree(&self, node: NodeId, out: &mut Vec<NodeId>) {
+        let visible = match node {
+            NodeId::Object(id) => self.objects.get(id).is_some_and(|r| !r.hidden),
+            NodeId::Group(id) => self.groups.get(id).is_some_and(|r| !r.hidden),
+            NodeId::Instance(id) => self.instances.get(id).is_some_and(|r| !r.hidden),
+        };
+        if !visible {
+            return;
+        }
+        out.push(node);
+        if let NodeId::Group(id) = node {
+            let members = self.groups[id].members.clone();
+            for m in members {
+                self.collect_def_subtree(m, out);
+            }
+        }
+    }
+
+    /// Flips the tombstone state of a definition and the rows
+    /// [`DocAction::DefinitionDeleted`] recorded with it — the one place
+    /// delete, undo, and redo all go through, so they cannot disagree.
+    fn set_definition_hidden(
+        &mut self,
+        component: ComponentId,
+        nodes: &[NodeId],
+        sketches: &[SketchId],
+        hidden: bool,
+    ) {
+        for &n in nodes {
+            match n {
+                NodeId::Object(id) => self.objects[id].hidden = hidden,
+                NodeId::Group(id) => self.groups[id].hidden = hidden,
+                NodeId::Instance(id) => self.instances[id].hidden = hidden,
+            }
+        }
+        for &sid in sketches {
+            if hidden {
+                self.hidden_sketches.insert(sid);
+            } else {
+                self.hidden_sketches.remove(&sid);
+            }
+        }
+        self.components[component].hidden = hidden;
+    }
+
+    /// How many live instances place `component` directly — world
+    /// instances plus member instances of LIVE definitions. The count a
+    /// Components panel shows; zero for a stale/hidden handle.
+    pub fn definition_usage(&self, component: ComponentId) -> usize {
+        if self.components.get(component).is_none_or(|c| c.hidden) {
+            return 0;
+        }
+        self.instances
+            .iter()
+            .filter(|(_, r)| !r.hidden && r.def == component)
+            .filter(|(_, r)| {
+                r.owner_def
+                    .is_none_or(|o| self.components.get(o).is_some_and(|c| !c.hidden))
+            })
+            .count()
+    }
+
+    /// Copies `component`'s own geometry (not any instance's placement) into
+    /// a fresh standalone document, wrapped in a single identity-posed
+    /// instance of it — just enough content for a renderer to have something
+    /// to frame and draw. This is [`Document::extract_item`]'s single-
+    /// instance branch minus needing a LIVE instance to select: it works
+    /// even for a currently-unused definition (`definition_usage() == 0`),
+    /// which `extract_item` cannot handle (nothing to select from an
+    /// unplaced definition) — the Components panel thumbnail's whole reason
+    /// for existing. Read-only on `self`.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownComponent`] — stale or hidden component.
+    /// - [`DocumentError::ExplodeSessionScope`] — a component session is
+    ///   open (the definition's own member list may not reflect the
+    ///   session's in-progress edits yet).
+    pub fn definition_preview(&self, component: ComponentId) -> Result<Document, DocumentError> {
+        self.refuse_during_component_session()?;
+        if self.components.get(component).is_none_or(|c| c.hidden) {
+            return Err(DocumentError::UnknownComponent);
+        }
+        let mut item = Document::new();
+        let mut ctx = LibraryCopy::new(None);
+        let new_cid = library_copy_def(&mut item, self, component, &mut ctx);
+        item.insert_instance_record(InstanceRecord {
+            def: new_cid,
+            pose: Transform::IDENTITY,
+            parent: None,
+            owner_def: None,
+            hidden: false,
+            name: None,
+            tags: Vec::new(),
+        });
+        Ok(item)
+    }
+
+    /// Live definitions nothing reachable places: not by a live world
+    /// instance, and not (transitively) by a member instance of a
+    /// definition that is itself reachable. A definition placed only inside
+    /// another unused definition is unused too — both are listed, in an
+    /// order [`Document::delete_definition`] accepts (a definition before
+    /// the definitions it contains).
+    pub fn unused_definitions(&self) -> Vec<ComponentId> {
+        let mut reachable: BTreeSet<ComponentId> = self
+            .instances
+            .iter()
+            .filter(|(_, r)| !r.hidden && r.owner_def.is_none())
+            .map(|(_, r)| r.def)
+            .collect();
+        loop {
+            let before = reachable.len();
+            let more: Vec<ComponentId> = self
+                .instances
+                .iter()
+                .filter(|(_, r)| !r.hidden)
+                .filter(|(_, r)| r.owner_def.is_some_and(|o| reachable.contains(&o)))
+                .map(|(_, r)| r.def)
+                .collect();
+            reachable.extend(more);
+            if reachable.len() == before {
+                break;
+            }
+        }
+        // A definition on loan to an open session looks unplaced (the bake
+        // hides its instances) but is anything but unused.
+        let on_loan = self.defs_on_loan();
+        let mut unused: Vec<ComponentId> = self
+            .component_ids()
+            .into_iter()
+            .filter(|c| !reachable.contains(c) && !on_loan.contains(c))
+            .collect();
+        // Containers first: a definition that (transitively) contains
+        // another unused one must be deleted before it, so the contained
+        // one's member instance is owned by a hidden definition by then.
+        unused.sort_by_key(|&c| std::cmp::Reverse(self.def_depth(c)));
+        unused
+    }
+
+    /// Delete every unused definition ([`Document::unused_definitions`])
+    /// and every unused material ([`Document::unused_materials`]) as ONE
+    /// undo entry labeled "Purge unused". Nothing to purge records
+    /// nothing and reports zeros.
+    pub fn purge_unused(&mut self) -> Result<PurgeReport, DocumentError> {
+        info!(target: "kernel::op", op = "purge_unused");
+        let definitions = self.unused_definitions();
+        let checkpoint = self.clone();
+        let undo_start = self.undo.actions.len();
+        let mut report = PurgeReport::default();
+        for component in definitions {
+            if let Err(e) = self.delete_definition(component) {
+                *self = checkpoint;
+                return Err(e);
+            }
+            report.definitions += 1;
+        }
+        // Materials after definitions: a purged definition's members are
+        // tombstoned rows and still count as references, so this only
+        // frees materials nothing at all carries.
+        for material in self.unused_materials() {
+            if let Err(e) = self.delete_material(material) {
+                *self = checkpoint;
+                return Err(e);
+            }
+            report.materials += 1;
+        }
+        if self.undo.actions.len() == undo_start {
+            return Ok(report);
+        }
+        let actions: Vec<DocAction> = self.undo.actions.drain(undo_start..).collect();
+        self.undo.push(DocAction::Compound {
+            actions,
+            meta: Some(CompoundMeta {
+                label: "Purge unused".to_string(),
+                origin: HistoryOrigin::User,
+            }),
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(report)
     }
 
     /// Build a [`DocChange`] for a definition-metadata change: the component
@@ -14606,6 +15179,9 @@ impl Document {
                 count_label(faces.len() + defaults.len(), "face")
             ),
             DocAction::SetMaterialAlpha { .. } => "Change material opacity".to_string(),
+            DocAction::MaterialRenamed { .. } => "Rename material".to_string(),
+            DocAction::MaterialDeleted { .. } => "Delete material".to_string(),
+            DocAction::DefinitionDeleted { .. } => "Delete component".to_string(),
             DocAction::NodeMetaChanged {
                 prev_name,
                 next_name,
@@ -16801,6 +17377,41 @@ impl Document {
                 }
                 DocChange::default()
             }
+            DocAction::MaterialRenamed { material, prev, .. } => {
+                if let Some(mat) = self.materials.get_mut(*material) {
+                    mat.name = prev.clone();
+                }
+                DocChange::default()
+            }
+            DocAction::MaterialDeleted {
+                material,
+                faces,
+                defaults,
+            } => {
+                let material = *material;
+                let (faces, defaults) = (faces.clone(), defaults.clone());
+                if let Err(e) = self.material_delete_targets_exist(&faces, &defaults) {
+                    self.undo.push(action);
+                    return Err(e);
+                }
+                self.deleted_materials.remove(&material);
+                for &(oid, fid) in &faces {
+                    self.objects[oid].object.faces[fid].material = Some(material);
+                }
+                for &oid in &defaults {
+                    self.objects[oid].object.default_material = Some(material);
+                }
+                self.material_delete_change(&faces, &defaults)
+            }
+            DocAction::DefinitionDeleted {
+                component,
+                hidden_nodes,
+                hidden_sketches,
+            } => {
+                let component = *component;
+                self.set_definition_hidden(component, hidden_nodes, hidden_sketches, false);
+                self.component_change(component)
+            }
             DocAction::NodeMetaChanged {
                 node,
                 prev_name,
@@ -18001,6 +18612,41 @@ impl Document {
                 }
                 DocChange::default()
             }
+            DocAction::MaterialRenamed { material, next, .. } => {
+                if let Some(mat) = self.materials.get_mut(*material) {
+                    mat.name = next.clone();
+                }
+                DocChange::default()
+            }
+            DocAction::MaterialDeleted {
+                material,
+                faces,
+                defaults,
+            } => {
+                let material = *material;
+                let (faces, defaults) = (faces.clone(), defaults.clone());
+                if let Err(e) = self.material_delete_targets_exist(&faces, &defaults) {
+                    self.redo.push(action);
+                    return Err(e);
+                }
+                for &(oid, fid) in &faces {
+                    self.objects[oid].object.faces[fid].material = None;
+                }
+                for &oid in &defaults {
+                    self.objects[oid].object.default_material = None;
+                }
+                self.deleted_materials.insert(material);
+                self.material_delete_change(&faces, &defaults)
+            }
+            DocAction::DefinitionDeleted {
+                component,
+                hidden_nodes,
+                hidden_sketches,
+            } => {
+                let component = *component;
+                self.set_definition_hidden(component, hidden_nodes, hidden_sketches, true);
+                self.component_change(component)
+            }
             DocAction::NodeMetaChanged {
                 node,
                 next_name,
@@ -18149,6 +18795,33 @@ impl Document {
             }
             self.debug_validate_tree();
             self.debug_validate_sids();
+            self.debug_validate_materials();
+        }
+    }
+
+    /// No object row — live or tombstoned — references a deleted material
+    /// ([`Document::delete_material`]'s invariant): a dangling reference
+    /// would render as the default color silently, exactly the kind of
+    /// quiet repair rule 4 forbids, so it is a bug here, not a fallback.
+    fn debug_validate_materials(&self) {
+        if self.deleted_materials.is_empty() {
+            return;
+        }
+        for (oid, rec) in self.objects.iter() {
+            if let Some(m) = rec.object.default_material {
+                debug_assert!(
+                    !self.deleted_materials.contains(&m),
+                    "object {oid:?} base references a deleted material"
+                );
+            }
+            for (fid, face) in rec.object.faces.iter() {
+                if let Some(m) = face.material {
+                    debug_assert!(
+                        !self.deleted_materials.contains(&m),
+                        "face {fid:?} of {oid:?} references a deleted material"
+                    );
+                }
+            }
         }
     }
 
@@ -18750,6 +19423,7 @@ fn library_copy_object(
         let existing = dst
             .materials
             .iter()
+            .filter(|(id, _)| !dst.deleted_materials.contains(id))
             .find(|(_, m)| **m == mat)
             .map(|(id, _)| id);
         let new_mid = match existing {

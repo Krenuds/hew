@@ -1,4 +1,9 @@
-//! Entity lifecycle + transforms: hew.entity.* (docs/agents/HEW_API.md §7).
+//! Entity lifecycle + transforms: hew.entity.* (docs/agents/HEW_API.md §7),
+//! plus hew.doc.purge_unused — the palette/definition housekeeping
+//! counterpart of `delete`, sharing this module's `EntityRef`-kind
+//! dispatch and material/component delete paths rather than living in
+//! `doc.rs` (which is Host-served document lifecycle only; purge is a
+//! plain kernel mutation).
 //!
 //! Rename/delete dispatch on the resolved [`kernel::EntityRef`]'s kind;
 //! the transform trio (move/rotate/scale) share the pivot/anchor
@@ -21,6 +26,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.entity.move" => move_,
         "hew.entity.rotate" => rotate,
         "hew.entity.scale" => scale,
+        "hew.doc.purge_unused" => purge_unused,
         _ => return None,
     })
 }
@@ -71,10 +77,21 @@ fn rename(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         EntityRef::Group(g) => ctx.doc.set_node_name(NodeId::Group(g), p.name)?,
         EntityRef::Instance(i) => ctx.doc.set_node_name(NodeId::Instance(i), p.name)?,
         EntityRef::Component(c) => ctx.doc.set_component_name(c, p.name)?,
-        EntityRef::Sketch(_) | EntityRef::Material(_) | EntityRef::Guide(_) | EntityRef::Tag(_) => {
+        EntityRef::Material(m) => {
+            // Unlike node display names, a palette material's name is a
+            // required `String` (kernel::Material::name), never `Option` —
+            // there is no "unnamed, falls back to a positional label"
+            // state for a swatch. `name: null` is therefore a params error,
+            // not a kernel refusal.
+            let name = p.name.ok_or_else(|| {
+                CmdError::Params("a material's name cannot be cleared to null".into())
+            })?;
+            ctx.doc.set_material_name(m, name)?
+        }
+        EntityRef::Sketch(_) | EntityRef::Guide(_) | EntityRef::Tag(_) => {
             return Err(CmdError::Refusal(Refusal::api(
                 "rename_unsupported",
-                "Only objects, groups, instances, and component definitions can be renamed today.",
+                "Only objects, groups, instances, component definitions, and materials can be renamed today.",
             )));
         }
     };
@@ -127,20 +144,25 @@ fn delete(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         EntityRef::Sketch(s) => ctx.doc.delete_sketch(s)?,
         EntityRef::Guide(g) => ctx.doc.delete_guide(g)?,
         EntityRef::Tag(path) => ctx.doc.delete_tag(&path)?,
-        EntityRef::Material(_) => {
-            return Err(CmdError::Refusal(Refusal::api(
-                "delete_unsupported",
-                "Materials cannot be deleted from the palette today — the kernel has no material delete.",
-            )));
-        }
-        EntityRef::Component(_) => {
-            return Err(CmdError::Refusal(Refusal::api(
-                "delete_unsupported",
-                "A component definition cannot be deleted directly — it dies with its last instance. Delete or explode its instances instead.",
-            )));
-        }
+        EntityRef::Material(m) => ctx.doc.delete_material(m)?,
+        EntityRef::Component(c) => ctx.doc.delete_definition(c)?,
     };
     Ok(serde_json::json!({}))
+}
+
+// -------------------------------------------------------- hew.doc.purge_unused
+
+fn purge_unused(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+    let _: Empty =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let report = ctx.doc.purge_unused()?;
+    Ok(serde_json::json!({
+        "materials": report.materials,
+        "definitions": report.definitions,
+    }))
 }
 
 // ------------------------------------------------------------------ move

@@ -47,7 +47,7 @@ pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
     FollowMePath, HistoryEntries, HistoryEntryInfo, HistoryOrigin, InsertOptions, InsertReport,
     LibraryProvenance, LoopImprintReport, LoopImprintRoute, MAX_COMPONENT_DEPTH, MaterialScope,
-    NodeId, PendingActionKind,
+    NodeId, PendingActionKind, PurgeReport,
 };
 pub use error::TopologyError;
 pub use guide::Guide;
