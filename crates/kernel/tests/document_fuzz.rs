@@ -367,6 +367,15 @@ enum DocOp {
     },
     /// `purge_unused` — one labeled entry (or nothing when idle).
     PurgeUnused,
+    /// `reparent_nodes`: move the `node_sel`-th top-level node into the
+    /// `group_sel`-th live group (or out to the top level when `to_top`),
+    /// exercising the tree bookkeeping and its verbatim member-order
+    /// restoration against every other tree op here.
+    Reparent {
+        node_sel: usize,
+        group_sel: usize,
+        to_top: bool,
+    },
     Undo,
     Redo,
 }
@@ -507,6 +516,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => any::<usize>().prop_map(|mat_sel| DocOp::DeleteMaterial { mat_sel }),
         1 => any::<usize>().prop_map(|comp_sel| DocOp::DeleteDefinition { comp_sel }),
         1 => Just(DocOp::PurgeUnused),
+        1 => (any::<usize>(), any::<usize>(), proptest::bool::ANY).prop_map(
+            |(node_sel, group_sel, to_top)| DocOp::Reparent { node_sel, group_sel, to_top }
+        ),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
@@ -1881,6 +1893,29 @@ fn apply_doc_op(
         }
         DocOp::PurgeUnused => {
             let _ = doc.purge_unused();
+        }
+        DocOp::Reparent {
+            node_sel,
+            group_sel,
+            to_top,
+        } => {
+            // Any live world node, top-level or nested: a group's members
+            // are reachable through `group_members`, so pick from the union.
+            let mut nodes: Vec<NodeId> = doc.top_level_nodes();
+            for g in doc.group_ids() {
+                if let Some(members) = doc.group_members(g) {
+                    nodes.extend(members);
+                }
+            }
+            let Some(node) = nth(&nodes, *node_sel) else {
+                return Ok(true);
+            };
+            let parent = if *to_top {
+                None
+            } else {
+                nth(&doc.group_ids(), *group_sel)
+            };
+            let _ = doc.reparent_nodes(&[node], parent);
         }
         DocOp::Undo => {
             if doc.can_undo()

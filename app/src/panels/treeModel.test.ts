@@ -24,6 +24,7 @@ import {
   pruneDeadSelection,
   collectDescendants,
   filterTreeKeys,
+  dropTargetFor,
   type NodeRef,
 } from './treeModel'
 
@@ -778,5 +779,68 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
   it('an empty selection passes through untouched', () => {
     const sel: NodeRef[] = []
     expect(pruneDeadSelection(view({}), sel)).toBe(sel)
+  })
+})
+
+describe('dropTargetFor', () => {
+  // g contains b and h (nested); h contains c.
+  const a: NodeRef = { kind: 'object', id: 1n }
+  const b: NodeRef = { kind: 'object', id: 2n }
+  const c: NodeRef = { kind: 'object', id: 3n }
+  const g: NodeRef = { kind: 'group', id: 10n }
+  const h: NodeRef = { kind: 'group', id: 11n }
+  const inst: NodeRef = { kind: 'instance', id: 20n }
+  const sk: NodeRef = { kind: 'sketch-island', id: 30n, sketch: 5n }
+
+  const members: Record<string, NodeRef[]> = {
+    '10': [b, h],
+    '11': [c],
+  }
+  const getGroupMembers = (groupId: bigint): NodeRef[] => members[groupId.toString()] ?? []
+  const view = (sessionOpen = false) => ({ getGroupMembers, sessionOpen })
+
+  it('moving an object into a group resolves to that group', () => {
+    expect(dropTargetFor([a], g, view())).toEqual({ group: 10n })
+  })
+
+  it('moving to the Model root resolves to undefined (top level)', () => {
+    expect(dropTargetFor([a], 'root', view())).toEqual({ group: undefined })
+  })
+
+  it('refuses dropping a group onto itself', () => {
+    expect(dropTargetFor([g], g, view())).toBeNull()
+  })
+
+  it('refuses dropping a group onto its own descendant', () => {
+    expect(dropTargetFor([g], h, view())).toBeNull()
+  })
+
+  it('allows dropping an already-nested node back onto its current parent (a no-op move)', () => {
+    expect(dropTargetFor([h], g, view())).toEqual({ group: 10n })
+  })
+
+  it('refuses a target that is neither a group nor root (an instance row)', () => {
+    expect(dropTargetFor([a], inst, view())).toBeNull()
+  })
+
+  it('refuses a target that is a sketch row', () => {
+    expect(dropTargetFor([a], sk, view())).toBeNull()
+  })
+
+  it('refuses dragging a sketch-scoped node — it has no kernel NodeId', () => {
+    expect(dropTargetFor([sk], g, view())).toBeNull()
+  })
+
+  it('refuses every drop while a group/component session is open', () => {
+    expect(dropTargetFor([a], g, view(true))).toBeNull()
+    expect(dropTargetFor([a], 'root', view(true))).toBeNull()
+  })
+
+  it('refuses an empty drag', () => {
+    expect(dropTargetFor([], g, view())).toBeNull()
+  })
+
+  it('refuses a multi-node drag when one of the dragged groups would contain the target', () => {
+    expect(dropTargetFor([a, g], h, view())).toBeNull()
   })
 })

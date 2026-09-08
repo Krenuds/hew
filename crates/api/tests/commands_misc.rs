@@ -220,6 +220,122 @@ fn group_explode_dissolves_a_group_and_refuses_an_unknown_id() {
     assert_eq!(data["refusal"], "unknown_entity");
 }
 
+#[test]
+fn group_reparent_moves_a_node_into_a_group_and_refuses_an_unknown_id() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let b = build_box(&mut doc, 3.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(b)]).expect("group");
+    let a_pub = public_of(&doc, &EntityRef::Object(a));
+    let group_pub = public_of(&doc, &EntityRef::Group(group));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.group.reparent",
+        json!({ "ids": [a_pub], "parent": group_pub }),
+    );
+    assert_eq!(doc.node_parent(NodeId::Object(a)), Some(group));
+
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+    assert_eq!(doc.node_parent(NodeId::Object(a)), None);
+
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.group.reparent",
+        json!({ "ids": ["obj_ffffff"], "parent": group_pub }),
+    );
+    assert_eq!(data["refusal"], "unknown_entity");
+}
+
+#[test]
+fn group_reparent_refuses_an_empty_ids_list() {
+    // The kernel itself has no empty-list guard for `reparent_nodes` (an
+    // empty move is a harmless no-op there), but this entry point must not
+    // silently no-op — every sibling (the wasm boundary's `node_ids`,
+    // `hew.group.create`'s `empty_group`) refuses typed instead. Named
+    // `empty_ids`, not the kernel's own `empty_selection` (a different
+    // condition — "everything picked is hidden or gone," not "nothing was
+    // picked").
+    let mut doc = Document::new();
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.group.reparent",
+        json!({ "ids": [] }),
+    );
+    assert_eq!(data["refusal"], "empty_ids");
+}
+
+#[test]
+fn group_reparent_moves_a_node_back_to_the_top_level_with_a_null_parent() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
+    let a_pub = public_of(&doc, &EntityRef::Object(a));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    assert_eq!(doc.node_parent(NodeId::Object(a)), Some(group));
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.group.reparent",
+        json!({ "ids": [a_pub], "parent": null }),
+    );
+    assert_eq!(doc.node_parent(NodeId::Object(a)), None);
+}
+
+#[test]
+fn group_reparent_refuses_a_group_cycle_and_a_session_in_scope() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
+    let group_pub = public_of(&doc, &EntityRef::Group(group));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+
+    // A group can't be moved into itself.
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.group.reparent",
+        json!({ "ids": [group_pub.clone()], "parent": group_pub.clone() }),
+    );
+    assert_eq!(data["refusal"], "group_cycle");
+
+    // Nor can anything be reparented while a group-edit session is open —
+    // the tree is in its surfaced state, and membership is settled by the
+    // session's own close.
+    doc.open_group_session(group).expect("open group session");
+    // Blanket, node-independent refusal — `a` itself (the session's own
+    // surfaced member) is a fine target otherwise; it's the open session
+    // that refuses, not this particular node.
+    let a_pub = public_of(&doc, &EntityRef::Object(a));
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.group.reparent",
+        json!({ "ids": [a_pub], "parent": null }),
+    );
+    assert_eq!(data["refusal"], "explode_session_scope");
+    doc.close_innermost_session().expect("close session");
+}
+
 // ============================================================ hew.component
 
 #[test]

@@ -113,6 +113,55 @@ test('a group\'s "hide/show all children" control hides every member, including 
   await page.waitForFunction(() => window.__hew_test!.pickFace([3.5, 0.5, 5], [0, 0, -1]) !== null)
 })
 
+test('dragging an object row onto a group row moves it into the group; undo restores', async ({ page }) => {
+  await setup(page)
+  const ids = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const alpha = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const beta = h.drawBox([3, 0, 0], [4, 1, 0], 1)
+    const target = h.groupNodes([{ kind: 'object', id: beta }])
+    h.setNodeName('object', alpha, 'Alpha')
+    h.setNodeName('group', target, 'Target')
+    return { alpha, target }
+  })
+
+  // Before the drop: Alpha is top-level (no parent).
+  expect(
+    await page.evaluate((id) => window.__hew_test!.getNodeParent('object', id), ids.alpha),
+  ).toBeNull()
+
+  // Real mouse events, not the harness: press on the "Alpha" row, drag onto
+  // the "Target" group row, release.
+  const source = await rowFor(page, 'Alpha').boundingBox()
+  const target = await rowFor(page, 'Target').boundingBox()
+  if (source === null || target === null) throw new Error('rows not found')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 10 })
+  await page.mouse.up()
+
+  // The kernel tree changed: Alpha is now a member of Target.
+  await page.waitForFunction(
+    (id) => window.__hew_test!.getNodeParent('object', id) !== null,
+    ids.alpha,
+  )
+  expect(
+    await page.evaluate((id) => window.__hew_test!.getNodeParent('object', id), ids.alpha),
+  ).toBe(ids.target)
+  expect(
+    await page.evaluate(
+      (id) => window.__hew_test!.getGroupMembers(id).map((n) => n.id),
+      ids.target,
+    ),
+  ).toContain(ids.alpha)
+
+  // One undo restores it to the top level.
+  await page.evaluate(() => window.__hew_test!.undo())
+  expect(
+    await page.evaluate((id) => window.__hew_test!.getNodeParent('object', id), ids.alpha),
+  ).toBeNull()
+})
+
 test('the root Model row\'s eye hides the whole document and restores it', async ({ page }) => {
   await setup(page)
   await page.evaluate(() => {

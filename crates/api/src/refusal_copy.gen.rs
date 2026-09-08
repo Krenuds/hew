@@ -266,6 +266,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "MixedParents" => {
             "Only siblings can be grouped — everything selected must be top-level, or all inside the same group. Move them to one level first."
         }
+        "GroupCycle" => {
+            "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
+        }
         "GroupedOperand" => {
             "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
         }

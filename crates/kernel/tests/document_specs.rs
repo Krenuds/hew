@@ -9619,3 +9619,148 @@ fn downgrade_manifest_version_keeping_annotations(bytes: &[u8], to_version: u32)
     }
     new_zip.finish().unwrap().into_inner()
 }
+
+// ------------------------------------------------------------ reparent
+
+/// `reparent_nodes` is the Outliner's "drag into a group": pure tree
+/// bookkeeping, one undo entry, member order restored verbatim on undo.
+#[test]
+fn reparent_moves_nodes_into_and_out_of_groups_as_one_undo_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group");
+    let before = doc.save();
+    let depth = doc.undo_depth();
+
+    // Into the group: appended after the existing members.
+    doc.reparent_nodes(&[NodeId::Object(c)], Some(g))
+        .expect("move c into g");
+    assert_eq!(doc.undo_depth(), depth + 1, "one entry");
+    assert_eq!(doc.node_parent(NodeId::Object(c)), Some(g));
+    assert_eq!(
+        doc.group_members(g).unwrap(),
+        vec![NodeId::Object(a), NodeId::Object(b), NodeId::Object(c)]
+    );
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
+    // Geometry untouched: the object's vertices are exactly where they were.
+    assert_eq!(doc.object(c).unwrap().vertices().len(), 8);
+
+    doc.undo().expect("undo");
+    assert_eq!(doc.save(), before, "undo restores the tree byte-exactly");
+    doc.redo().expect("redo");
+    assert_eq!(doc.node_parent(NodeId::Object(c)), Some(g));
+
+    // Out of the group, back to the top level; the group keeps its order.
+    doc.reparent_nodes(&[NodeId::Object(a)], None)
+        .expect("move a out");
+    assert_eq!(doc.node_parent(NodeId::Object(a)), None);
+    assert_eq!(
+        doc.group_members(g).unwrap(),
+        vec![NodeId::Object(b), NodeId::Object(c)]
+    );
+    doc.undo().expect("undo out");
+    assert_eq!(
+        doc.group_members(g).unwrap(),
+        vec![NodeId::Object(a), NodeId::Object(b), NodeId::Object(c)],
+        "member order comes back verbatim"
+    );
+}
+
+#[test]
+fn reparent_batches_several_nodes_into_one_labeled_entry_and_skips_no_ops() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
+    doc.set_node_name(NodeId::Group(g), Some("Walls".to_string()))
+        .expect("name");
+    let depth = doc.undo_depth();
+    // `a` is already in `g`: skipped, not an error, not an entry.
+    doc.reparent_nodes(&[NodeId::Object(a)], Some(g))
+        .expect("no-op");
+    assert_eq!(doc.undo_depth(), depth);
+    doc.reparent_nodes(
+        &[NodeId::Object(a), NodeId::Object(b), NodeId::Object(c)],
+        Some(g),
+    )
+    .expect("batch");
+    assert_eq!(doc.undo_depth(), depth + 1);
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.as_str()),
+        Some("Move 2 items into 'Walls'")
+    );
+    assert_eq!(doc.group_members(g).unwrap().len(), 3);
+    doc.undo().expect("undo batch");
+    assert_eq!(doc.group_members(g).unwrap(), vec![NodeId::Object(a)]);
+}
+
+#[test]
+fn reparent_refuses_cycles_stale_nodes_and_open_sessions() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let (inner, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("inner");
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(b)])
+        .expect("outer");
+    // A group into its own descendant.
+    assert!(matches!(
+        doc.reparent_nodes(&[NodeId::Group(outer)], Some(inner)),
+        Err(DocumentError::GroupCycle)
+    ));
+    // A group into itself.
+    assert!(matches!(
+        doc.reparent_nodes(&[NodeId::Group(inner)], Some(inner)),
+        Err(DocumentError::GroupCycle)
+    ));
+    // A stale node.
+    doc.delete_node(NodeId::Object(b)).expect("delete b");
+    assert!(matches!(
+        doc.reparent_nodes(&[NodeId::Object(b)], Some(inner)),
+        Err(DocumentError::UnknownObject)
+    ));
+    doc.undo().expect("undo delete");
+    // During a group edit the tree is surfaced: refused.
+    doc.open_group_session(outer).expect("open");
+    assert!(matches!(
+        doc.reparent_nodes(&[NodeId::Object(b)], Some(inner)),
+        Err(DocumentError::ExplodeSessionScope)
+    ));
+    doc.close_group_session().expect("close");
+    // Nested move is fine once closed: b from outer into inner.
+    doc.reparent_nodes(&[NodeId::Object(b)], Some(inner))
+        .expect("nest deeper");
+    assert_eq!(doc.node_parent(NodeId::Object(b)), Some(inner));
+    assert_eq!(
+        doc.group_members(outer).unwrap(),
+        vec![NodeId::Group(inner)]
+    );
+    let loaded = Document::load(&doc.save()).expect("round trip");
+    let outer_loaded = loaded
+        .group_ids()
+        .into_iter()
+        .find(|&g| loaded.node_parent(NodeId::Group(g)).is_none())
+        .expect("the outer group survives the round trip");
+    let inner_loaded = loaded
+        .group_members(outer_loaded)
+        .expect("outer members")
+        .into_iter()
+        .find_map(|n| match n {
+            NodeId::Group(g) => Some(g),
+            _ => None,
+        })
+        .expect("inner group nested under outer");
+    assert_eq!(
+        loaded
+            .group_members(inner_loaded)
+            .expect("inner members")
+            .len(),
+        2,
+        "both objects sit in the inner group after the round trip"
+    );
+}

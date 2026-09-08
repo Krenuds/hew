@@ -314,6 +314,13 @@ below.
 
 - Document outliner with click-to-select and double-click to enter an
   object's editing context, with the rest of the scene dimmed for focus
+- Move an object, group, or component instance into a group, or back out
+  to the top level, without touching its geometry: drag its Outliner row
+  onto a group row (or the root Model row), or Cut it, edit the group, and
+  Paste In Place. One labeled undo entry either way (`reparent_nodes` /
+  `hew.group.reparent`); refused typed for a group-into-itself-or-descendant
+  cycle or
+  while a group/component session is open
 - Tags for organizing and toggling visibility of groups of objects,
   deletable without touching the geometry that carries them; clicking a
   tag selects everything it carries, and a tag is renamed in place

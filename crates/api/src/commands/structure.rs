@@ -9,6 +9,7 @@
 
 use super::entity::{resolve_node, unknown_entity};
 use super::{CmdError, Ctx, Handler};
+use crate::refusal::Refusal;
 use kernel::{EntityRef, NodeId, Transform};
 use serde_json::Value;
 
@@ -17,6 +18,7 @@ pub fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.group.create" => group_create,
         "hew.group.explode" => group_explode,
+        "hew.group.reparent" => group_reparent,
         "hew.component.create" => component_create,
         "hew.component.place" => component_place,
         "hew.component.make_unique" => component_make_unique,
@@ -64,6 +66,58 @@ fn group_explode(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         return Err(unknown_entity(&p.id));
     };
     ctx.doc.ungroup(group)?;
+    Ok(serde_json::json!({}))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReparentParams {
+    ids: Vec<String>,
+    /// The target group, or `null`/omitted for the top level.
+    #[serde(default)]
+    parent: Option<String>,
+}
+
+/// Moves live world nodes into `parent` (a live group) or out to the top
+/// level (`parent: null`), as ONE undo entry — [`kernel::Document::
+/// reparent_nodes`], the same op the Outliner's drag-and-drop calls
+/// through the wasm boundary. Geometry is untouched: a group is a
+/// pose-less container, so this is pure tree bookkeeping. A node already
+/// under `parent` is silently skipped.
+///
+/// # Errors
+/// - `empty_ids` — `ids` is empty. The kernel itself has no empty-list
+///   guard here (an empty move is a harmless no-op to it), but a silent
+///   no-op success would diverge from every sibling entry point for this
+///   op: the wasm boundary's `node_ids` refuses an empty list typed
+///   (`BadNodeList`), and `hew.group.create` refuses typed
+///   (`empty_group`) for the same reason. Named distinctly from the
+///   kernel's own `empty_selection` (`DocumentError::EmptySelection`,
+///   used by the transform commands) — that one means "everything
+///   picked is hidden or gone," a different condition from "nothing was
+///   picked at all."
+fn group_reparent(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: ReparentParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    if p.ids.is_empty() {
+        return Err(CmdError::Refusal(Refusal::api(
+            "empty_ids",
+            "Select at least one object, group, or component instance to move.",
+        )));
+    }
+    let nodes: Vec<NodeId> = p
+        .ids
+        .iter()
+        .map(|id| resolve_node(ctx, id))
+        .collect::<Result<_, _>>()?;
+    let parent = match &p.parent {
+        Some(id) => match ctx.resolver().resolve(id) {
+            Some(EntityRef::Group(g)) => Some(g),
+            _ => return Err(unknown_entity(id)),
+        },
+        None => None,
+    };
+    ctx.doc.reparent_nodes(&nodes, parent)?;
     Ok(serde_json::json!({}))
 }
 

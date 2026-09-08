@@ -462,6 +462,13 @@ impl Registry {
             "Dissolve a group, re-homing its members.",
         );
         add(
+            "hew.group.reparent",
+            M,
+            Kernel,
+            Std,
+            "Move live nodes into a group, or out to the top level, without touching their geometry.",
+        );
+        add(
             "hew.component.create",
             M,
             Kernel,
@@ -1933,6 +1940,35 @@ impl Registry {
                 "additionalProperties": false
             });
             cmd.refusals = vec!["unknown_entity", "unknown_group"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.group.reparent")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } },
+                    "parent": { "type": ["string", "null"] }
+                },
+                "required": ["ids"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "empty_ids",
+                "group_cycle",
+                "explode_session_scope",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+            ];
         }
         {
             let cmd = commands

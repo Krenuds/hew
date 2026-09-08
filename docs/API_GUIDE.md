@@ -312,6 +312,15 @@ copies. For geometry that repeats and should stay linked, make a
 component definition and place instances of it instead — see
 `hew.component.*` in the reference.
 
+To add something to that group later — a fifth part built afterward, say
+— use `hew.group.reparent` instead of re-grouping from scratch. It moves
+listed nodes into a group (or out to the top level with `parent: null`)
+without touching their geometry, as one undo entry:
+
+```json
+{"method": "hew.group.reparent", "params": {"ids": ["obj_8"], "parent": "grp_5"}}
+```
+
 **Faces and edges don't.** Under sticky geometry, a face that gets
 split or merged is not "the same face" in any way the kernel could
 honestly promise across edits, so there are no persistent face ids.

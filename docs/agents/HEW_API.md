@@ -660,7 +660,7 @@ for, not shipped.
 | `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me` | Required (`follow_me` Standard) |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
-| `hew.group` | `create`, `explode` | Required |
+| `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
 | `hew.component` | `create`, `place`, `make_unique`, `explode` | Standard |
 | `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity` | Standard |
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
@@ -743,6 +743,14 @@ Semantics notes, normative:
   derived-point locator (§5.3). `move`'s array form carries the UI's
   semantics (`count` copies at the committed step, multiplying or
   dividing the distance); exact schemas live in the registry.
+- `hew.group.reparent {ids, parent}` moves live world nodes into `parent`
+  (a live group) or out to the top level (`parent: null`) without
+  touching geometry — a group is a pose-less container, so this is pure
+  tree bookkeeping, the API counterpart of the Outliner's drag-and-drop.
+  A node already under `parent` is silently skipped; refused typed
+  `group_cycle` if `parent` is one of the moved nodes or lies inside one,
+  and `explode_session_scope` while any group- or component-edit session
+  is open, matching `hew.context.enter`'s own scoping.
 - Convenience/primitive commands (`create_box`, …) are deliberately
   absent from 1.0. If they are added later they will be composites defined
   over these core commands, adding no new kernel semantics; whether they

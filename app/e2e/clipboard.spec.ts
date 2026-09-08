@@ -75,6 +75,15 @@ async function clickWorld(page: Page, ctx: Ctx, x: number, y: number, z: number)
   await page.mouse.up()
 }
 
+/** A real double-click at a world point — opens a session (group or
+ *  component) on whatever it resolves to, mirroring group-session.spec.ts's
+ *  own helper of the same name. */
+async function dblClickWorld(page: Page, ctx: Ctx, x: number, y: number, z: number): Promise<void> {
+  const p = px(ctx, x, y, z)
+  await page.mouse.move(p.x, p.y)
+  await page.mouse.click(p.x, p.y, { clickCount: 2 })
+}
+
 /** Activate a tool with no rail slot via the web MenuBar's Tools dropdown —
  *  mirrors axes-tool.spec.ts's own helper (Drawing Axes lives here, not on
  *  the rail). Blurs afterward so a following `page.keyboard.press` reaches
@@ -252,4 +261,144 @@ test('Paste In Place overlaps the original even when the drawing axes are moved'
   for (let i = 0; i < 6; i++) {
     expect(pastedBounds[i]).toBeCloseTo(originalBounds[i], 5)
   }
+})
+
+test('Cut, enter a group, Paste In Place inside the session: the part folds in as a member on close', async ({ page }) => {
+  const ctx = await setup(page)
+
+  // The group's one member (box) plus the part to cut — well clear of it,
+  // so the cut/paste never touches the group's own geometry.
+  const setupIds = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [2, 1, 0], 1)
+    const group = h.groupNodes([{ kind: 'object', id: box }])
+    const part = h.drawBox([5, 5, 0], [6, 6, 0], 1)
+    return { box, group, part }
+  })
+  const { group, part } = setupIds
+  const originalPartBounds = await page.evaluate(
+    (oid) => window.__hew_test!.getObjectBounds(oid),
+    part,
+  )
+
+  // ---- 1. Select the part and Cut it (⌘X).
+  await page.evaluate((oid) => window.__hew_test!.selectObjects([oid]), part)
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('Control+x')
+  await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+  const hashAfterCut = await page.evaluate(() => window.__hew_test!.getStateHash())
+
+  // ---- 2. Double-click into the group to edit it — a real double-click,
+  // not the harness.
+  await dblClickWorld(page, ctx, 1, 0.5, 1)
+  await page.waitForTimeout(200)
+  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getStateHash())
+  expect(hashAfterOpen).not.toBe(hashAfterCut)
+
+  // ---- 3. Paste In Place (⇧⌘V) WHILE the session is open — `insert_item`
+  // is not refused during a group session (only a component session
+  // refuses ExplodeSessionScope): the pasted part lands surfaced, inside
+  // the session's own scope.
+  await page.keyboard.press('Control+Shift+v')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 2)
+  const selection = await page.evaluate(() => window.__hew_test!.getSelection())
+  expect(selection).toHaveLength(1)
+  const pastedId = selection[0].id
+  expect(pastedId).not.toBe(part)
+  const pastedBoundsInSession = await page.evaluate(
+    (oid) => window.__hew_test!.getObjectBounds(oid),
+    pastedId,
+  )
+  for (let i = 0; i < 6; i++) {
+    expect(pastedBoundsInSession[i]).toBeCloseTo(originalPartBounds[i], 5)
+  }
+  const hashAfterPaste = await page.evaluate(() => window.__hew_test!.getStateHash())
+  expect(hashAfterPaste).not.toBe(hashAfterOpen)
+
+  // ---- 4. Exit the edit (Escape) — every node surfaced since the session
+  // opened folds into the group at close (`exit_group_session` /
+  // `nodes_surfaced_since`), so the pasted part becomes a member, at its
+  // original (pasted) position — folding is pure tree bookkeeping, no
+  // geometry change.
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(200)
+  const membersAfter = await page.evaluate((g) => window.__hew_test!.getGroupMembers(g), group)
+  expect(membersAfter.map((m) => m.id).sort()).toEqual(
+    [setupIds.box, pastedId].sort(),
+  )
+  const pastedBoundsAfterClose = await page.evaluate(
+    (oid) => window.__hew_test!.getObjectBounds(oid),
+    pastedId,
+  )
+  for (let i = 0; i < 6; i++) {
+    expect(pastedBoundsAfterClose[i]).toBeCloseTo(originalPartBounds[i], 5)
+  }
+  const hashAfterClose = await page.evaluate(() => window.__hew_test!.getStateHash())
+  expect(hashAfterClose).not.toBe(hashAfterPaste)
+
+  // ---- 5. One undo per step restores each in turn: close → paste → open
+  // → cut, each a single labeled undo entry (DEVELOPMENT.md rule 9: undo
+  // is subject to the same replay contract inside a session as outside
+  // it).
+  await page.keyboard.press('Control+z') // undoes the close/fold
+  await page.waitForFunction(
+    (h) => window.__hew_test!.getStateHash() === h,
+    hashAfterPaste,
+  )
+  await page.keyboard.press('Control+z') // undoes the paste
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+  await page.keyboard.press('Control+z') // undoes opening the session
+  await page.waitForFunction(
+    (h) => window.__hew_test!.getStateHash() === h,
+    hashAfterCut,
+  )
+  await page.keyboard.press('Control+z') // undoes the cut
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 2)
+  const restoredPartId = (await page.evaluate(() => window.__hew_test!.getObjectIds())).find(
+    (id) => id !== setupIds.box,
+  )
+  expect(restoredPartId).toBeDefined()
+  const restoredBounds = await page.evaluate(
+    (oid) => window.__hew_test!.getObjectBounds(oid),
+    restoredPartId,
+  )
+  expect(restoredBounds).toEqual(originalPartBounds)
+})
+
+test('Paste In Place is refused with a clear toast while a component session is open', async ({ page }) => {
+  const ctx = await setup(page)
+
+  const setupIds = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const member = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const { instance } = h.makeComponent([member])
+    const part = h.drawBox([5, 5, 0], [6, 6, 0], 1)
+    return { instance, part }
+  })
+
+  // Copy a part, then double-click the instance to open its component
+  // session — a real double-click, not the harness.
+  await page.evaluate((oid) => window.__hew_test!.selectObjects([oid]), setupIds.part)
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('Control+c')
+  await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
+
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await page.waitForFunction(() => window.__hew_test!.getExplodeSessionInstance() !== null)
+
+  // `insert_document` refuses `ExplodeSessionScope` while a COMPONENT
+  // session is open (unlike a group session — see the test above) — a
+  // clear toast, and the document untouched.
+  const countBefore = await page.evaluate(() => window.__hew_test!.getObjectCount())
+  await page.keyboard.press('Control+Shift+v')
+  await expect(
+    page.getByText(/isn't available while a group or component is open for editing/),
+  ).toBeVisible()
+  expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(countBefore)
+  expect(await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance() !== null)).toBe(
+    true,
+  )
+
+  await page.keyboard.press('Escape')
 })

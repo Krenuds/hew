@@ -943,6 +943,24 @@ enum DocAction {
     },
     /// `ungroup` dissolved a group. The exact inverse of [`DocAction::Grouped`]:
     /// undo re-forms the group, redo dissolves it again.
+    /// [`Document::reparent_nodes`] moved a live world node between
+    /// containers — into a group, out to the top level, or from one group
+    /// to another — without touching its geometry (groups are pose-less,
+    /// so membership is pure tree bookkeeping). Both containers' member
+    /// lists are recorded before AND after, and undo/redo restore them
+    /// verbatim (member ORDER is part of what a user sees in the Outliner).
+    Reparented {
+        node: NodeId,
+        prev_parent: Option<GroupId>,
+        next_parent: Option<GroupId>,
+        /// `prev_parent`'s member list before and after the move (`None`
+        /// at the top level, whose order derives from the slotmap).
+        prev_parent_before: Option<Vec<NodeId>>,
+        prev_parent_after: Option<Vec<NodeId>>,
+        /// `next_parent`'s member list before and after the move.
+        next_parent_before: Option<Vec<NodeId>>,
+        next_parent_after: Option<Vec<NodeId>>,
+    },
     Ungrouped {
         group: GroupId,
         parent: Option<GroupId>,
@@ -1731,7 +1749,9 @@ impl DocAction {
             DocAction::Rescale { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
             DocAction::SetAxes { .. } | DocAction::MovedSketchVertex { .. } => Vec::new(),
             DocAction::SketchGesture { .. } => Vec::new(),
-            DocAction::Grouped { .. } | DocAction::Ungrouped { .. } => Vec::new(),
+            DocAction::Grouped { .. }
+            | DocAction::Ungrouped { .. }
+            | DocAction::Reparented { .. } => Vec::new(),
             DocAction::Deleted {
                 node,
                 hidden_subtree,
@@ -1856,6 +1876,7 @@ impl DocAction {
             DocAction::SketchGesture { sketch, .. } => vec![*sketch],
             DocAction::Grouped { .. }
             | DocAction::Ungrouped { .. }
+            | DocAction::Reparented { .. }
             | DocAction::Deleted { .. }
             | DocAction::MadeComponent { .. }
             | DocAction::PlacedInstance { .. }
@@ -2470,6 +2491,9 @@ pub enum DocumentError {
     /// back door; the parent's instances have to be made unique or
     /// exploded first (or the parent deleted). The document is untouched.
     DefinitionNestedInDefinition,
+    /// `reparent_nodes` refused: the target group is one of the moved
+    /// nodes or lies inside one — a group cannot contain itself. Untouched.
+    GroupCycle,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -2668,6 +2692,10 @@ impl std::fmt::Display for DocumentError {
             DocumentError::DefinitionNestedInDefinition => write!(
                 f,
                 "this component is used inside another component definition — make that component's instances unique or explode them first"
+            ),
+            DocumentError::GroupCycle => write!(
+                f,
+                "a group can't be moved into itself or into one of its own members"
             ),
             DocumentError::ExplodeSessionNestedGroup => write!(
                 f,
@@ -11224,6 +11252,137 @@ impl Document {
     /// hidden, so they stay live throughout) — the liveness pass runs over
     /// exactly `[NodeId::Group(group)]`, mirroring `delete_node`'s treatment
     /// of the same node kind.
+    /// Move live world `nodes` into `parent` (a live group) or out to the
+    /// top level (`None`), as ONE undo entry — the "Add to Group" the
+    /// Outliner's drag-and-drop performs. Geometry is untouched: a group
+    /// is a pose-less container, so membership is pure tree bookkeeping
+    /// and every handle stays stable. A node already under `parent` is
+    /// skipped; if nothing moves, nothing is recorded.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`]
+    ///   / [`DocumentError::UnknownInstance`] — a node is not a live world
+    ///   node (a definition member is edited through its session).
+    /// - [`DocumentError::UnknownGroup`] — `parent` is not a live group.
+    /// - [`DocumentError::GroupCycle`] — `parent` is one of the moved nodes
+    ///   or lies inside one (a group cannot contain itself).
+    /// - [`DocumentError::ExplodeSessionScope`] — a component-edit or
+    ///   group-edit session is open; the tree is in its surfaced state and
+    ///   membership is settled by the session's own close.
+    pub fn reparent_nodes(
+        &mut self,
+        nodes: &[NodeId],
+        parent: Option<GroupId>,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "reparent_nodes", count = nodes.len());
+        if !self.sessions.is_empty() {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        if let Some(pg) = parent
+            && !self.group_is_live(pg)
+        {
+            return Err(DocumentError::UnknownGroup);
+        }
+        for &node in nodes {
+            if !self.node_is_live(node) {
+                return Err(match node {
+                    NodeId::Object(_) => DocumentError::UnknownObject,
+                    NodeId::Group(_) => DocumentError::UnknownGroup,
+                    NodeId::Instance(_) => DocumentError::UnknownInstance,
+                });
+            }
+            if let Some(pg) = parent {
+                // A group cannot end up inside itself or inside its own
+                // descendant.
+                let mut subtree = Vec::new();
+                self.collect_subtree(node, &mut subtree);
+                if subtree.contains(&NodeId::Group(pg)) {
+                    return Err(DocumentError::GroupCycle);
+                }
+            }
+        }
+        let moving: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|&n| self.node_parent(n) != parent)
+            .collect();
+        if moving.is_empty() {
+            return Ok(DocChange::default());
+        }
+        let label = match parent {
+            Some(pg) => match self.group_name(pg) {
+                Some(name) => format!("Move {} into '{name}'", count_label(moving.len(), "item")),
+                None => format!("Move {} into group", count_label(moving.len(), "item")),
+            },
+            None => format!("Move {} out of group", count_label(moving.len(), "item")),
+        };
+        let txn = self.begin_transaction();
+        let mut merged = DocChange::default();
+        for node in moving {
+            let change = self.reparent_node(node, parent);
+            merge_doc_change(&mut merged, change);
+        }
+        self.commit_transaction(
+            txn,
+            CompoundMeta {
+                label,
+                origin: HistoryOrigin::User,
+            },
+        )?;
+        Ok(merged)
+    }
+
+    /// One node of [`Document::reparent_nodes`]; the caller has validated
+    /// everything and brackets the batch.
+    fn reparent_node(&mut self, node: NodeId, next_parent: Option<GroupId>) -> DocChange {
+        let prev_parent = self.node_parent(node);
+        let prev_parent_before = prev_parent.map(|pg| self.groups[pg].members.clone());
+        let next_parent_before = next_parent.map(|pg| self.groups[pg].members.clone());
+        if let Some(pg) = prev_parent {
+            self.splice_out_parent(pg, node, &[]);
+        }
+        self.set_node_parent(node, next_parent);
+        if let Some(pg) = next_parent {
+            self.groups[pg].members.push(node);
+        }
+        let prev_parent_after = prev_parent.map(|pg| self.groups[pg].members.clone());
+        let next_parent_after = next_parent.map(|pg| self.groups[pg].members.clone());
+        self.undo.push(DocAction::Reparented {
+            node,
+            prev_parent,
+            next_parent,
+            prev_parent_before,
+            prev_parent_after,
+            next_parent_before,
+            next_parent_after,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        reparent_change(node, prev_parent, next_parent)
+    }
+
+    /// Applies a recorded [`DocAction::Reparented`] in either direction:
+    /// `forward` re-plays the move, `!forward` reverses it — both by
+    /// restoring the recorded member lists verbatim, never by recomputing.
+    fn apply_reparent(
+        &mut self,
+        node: NodeId,
+        prev_parent: Option<GroupId>,
+        next_parent: Option<GroupId>,
+        prev_list: &Option<Vec<NodeId>>,
+        next_list: &Option<Vec<NodeId>>,
+        forward: bool,
+    ) -> DocChange {
+        self.set_node_parent(node, if forward { next_parent } else { prev_parent });
+        if let (Some(pg), Some(list)) = (prev_parent, prev_list) {
+            self.groups[pg].members = list.clone();
+        }
+        if let (Some(pg), Some(list)) = (next_parent, next_list) {
+            self.groups[pg].members = list.clone();
+        }
+        reparent_change(node, prev_parent, next_parent)
+    }
+
     pub fn ungroup(&mut self, group: GroupId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "ungroup");
         if !self.group_is_live(group) {
@@ -15347,6 +15506,10 @@ impl Document {
             DocAction::MaterialRenamed { .. } => "Rename material".to_string(),
             DocAction::MaterialDeleted { .. } => "Delete material".to_string(),
             DocAction::DefinitionDeleted { .. } => "Delete component".to_string(),
+            DocAction::Reparented { next_parent, .. } => match next_parent {
+                Some(_) => "Move into group".to_string(),
+                None => "Move out of group".to_string(),
+            },
             DocAction::NodeMetaChanged {
                 prev_name,
                 next_name,
@@ -17588,6 +17751,21 @@ impl Document {
                 self.apply_node_meta(node, prev_name.clone(), prev_tags.clone());
                 self.node_change(node)
             }
+            DocAction::Reparented {
+                node,
+                prev_parent,
+                next_parent,
+                prev_parent_before,
+                next_parent_before,
+                ..
+            } => self.apply_reparent(
+                *node,
+                *prev_parent,
+                *next_parent,
+                &prev_parent_before.clone(),
+                &next_parent_before.clone(),
+                false,
+            ),
             DocAction::ComponentRenamed {
                 component,
                 prev_name,
@@ -18823,6 +19001,21 @@ impl Document {
                 self.apply_node_meta(node, next_name.clone(), next_tags.clone());
                 self.node_change(node)
             }
+            DocAction::Reparented {
+                node,
+                prev_parent,
+                next_parent,
+                prev_parent_after,
+                next_parent_after,
+                ..
+            } => self.apply_reparent(
+                *node,
+                *prev_parent,
+                *next_parent,
+                &prev_parent_after.clone(),
+                &next_parent_after.clone(),
+                true,
+            ),
             DocAction::ComponentRenamed {
                 component,
                 next_name,
@@ -20023,6 +20216,19 @@ fn rescale_transform(factor: f64, anchor: Point3) -> Transform {
         .then(&Transform::translation(Vec3::new(
             anchor.x, anchor.y, anchor.z,
         )))
+}
+
+/// The [`DocChange`] for a reparent: the node itself plus both containers.
+fn reparent_change(node: NodeId, prev: Option<GroupId>, next: Option<GroupId>) -> DocChange {
+    let mut change = DocChange::default();
+    match node {
+        NodeId::Object(o) => change.objects_touched.push(o),
+        NodeId::Group(g) => change.groups_touched.push(g),
+        NodeId::Instance(i) => change.instances_touched.push(i),
+    }
+    change.groups_touched.extend(prev);
+    change.groups_touched.extend(next);
+    change
 }
 
 /// The [`DocChange`] for a group/ungroup: the group, its parent, and any member

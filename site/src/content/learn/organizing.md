@@ -16,6 +16,7 @@ The Outliner (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the documen
 
 - **Click** a row to select it, `Shift`/`⌘`/`Ctrl`-click for multi-select.
 - **Double-click** a row to enter that item's editing context, exactly like double-clicking it in the viewport. The breadcrumb at the top shows your current context and steps you back out.
+- **Drag** a row onto a group to move it in, or onto the Model row to pull it back out to the top level — see [Adding to an existing group](/learn/groups-and-components/#adding-to-an-existing-group).
 - **The dot at the row's right edge** toggles visibility: ● shown, ○ hidden. Hiding a group hides everything inside it — a child of a hidden group shows a fainter ○ to say "hidden because its parent is."
 - **Filter** the list with the search field above it: type a few letters and only matches (plus the collapsed groups standing between them and the top, shown dimmed) stay visible. Clear it to get everything back, including whatever you'd expanded or collapsed by hand.
 - **Hide or show everything at once** from the Model row's own eye, or hover a group row for a second, stacked-eye button that hides or shows every one of its members in one click, reaching into nested groups too.

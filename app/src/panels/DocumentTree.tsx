@@ -28,6 +28,7 @@ import {
   nodeKindToNumber,
   collectDescendants,
   filterTreeKeys,
+  dropTargetFor,
   type NodeRef,
   type NodeKind,
 } from './treeModel'
@@ -100,7 +101,21 @@ interface Props {
    *  One Set mutation + one kernel push for the whole batch, not N
    *  individual toggles. */
   onSetHiddenMany: (nodes: NodeRef[], hidden: boolean) => void
+  /** Outliner drag-and-drop: `nodes` (the dragged row, or the whole current
+   *  selection when the dragged row was part of it) dropped onto `group` —
+   *  a live group's id, or `undefined` for the Model root row (move to the
+   *  top level). Only ever called with a drop `dropTargetFor` (treeModel.ts)
+   *  already validated; the kernel's own refusal (a race with another
+   *  mutation, say) still surfaces as a toast from the caller. */
+  onReparent: (nodes: NodeRef[], group: bigint | undefined) => void
+  /** A drag ended somewhere it could not drop: the reason, for a toast.
+   *  Without it a refused drop (a group being edited, a group onto its own
+   *  member, a sketch row) is indistinguishable from a drag that never
+   *  registered. */
+  onDropRefused?: (reason: string) => void
 }
+
+const EMPTY_KEYS: ReadonlySet<string> = new Set()
 
 const ROW_BASE: React.CSSProperties = {
   display: 'flex',
@@ -180,6 +195,8 @@ export function DocumentTree({
   hiddenKeys,
   onToggleHidden,
   onSetHiddenMany,
+  onReparent,
+  onDropRefused,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -470,10 +487,195 @@ export function DocumentTree({
     })
   }, [])
 
+  // -----------------------------------------------------------------------
+  // Drag-and-drop reparenting: pointer events (this codebase's own drag
+  // convention — LibraryDialog's column-resize drag is the precedent, not
+  // the HTML5 DnD API), so a plain click/double-click keeps working
+  // unmodified — dragging only engages past a small movement threshold.
+  //
+  // The hovered row is resolved via `elementFromPoint` + a `data-drop-
+  // target` attribute (the row's own `nodeKey`, or `"root"` for the Model
+  // row) rather than per-row pointer-enter tracking, so it keeps working
+  // even though the dragged row never calls `setPointerCapture` (capturing
+  // would suppress every OTHER row's pointer-enter/leave while dragging).
+  // Only object/group/instance rows and the Model row carry the attribute;
+  // sketch rows deliberately don't, so hovering one resolves to "no
+  // target" — refused, with no drop highlight, exactly like an unmarked
+  // gap in the list.
+  // -----------------------------------------------------------------------
+  const sessionOpen = sessionStack.length > 0
+  const dragRef = useRef<{
+    dragged: NodeRef[]
+    startX: number
+    startY: number
+    active: boolean
+    lastHighlightKey: string | null
+    cleanup: () => void
+  } | null>(null)
+  const [dropHighlightKey, setDropHighlightKey] = useState<string | null>(null)
+  /** The drag ghost that follows the pointer while a row drag is active —
+   *  the dragged names, so it is visible that something is being carried —
+   *  plus the source rows' keys, dimmed in place. */
+  const [dragGhost, setDragGhost] = useState<{ x: number; y: number; labels: string[]; keys: Set<string> } | null>(null)
+  const dragSourceKeys = dragGhost?.keys ?? EMPTY_KEYS
+
+  const resolveDropTarget = (
+    clientX: number,
+    clientY: number,
+  ): { key: string; node: NodeRef | 'root' } | null => {
+    const el = document.elementFromPoint(clientX, clientY)
+    const rowEl = el instanceof Element ? el.closest('[data-drop-target]') : null
+    const key = rowEl?.getAttribute('data-drop-target') ?? null
+    if (key === null) return null
+    if (key === 'root') return { key, node: 'root' }
+    const sep = key.indexOf(':')
+    if (sep < 0) return null
+    return { key, node: { kind: key.slice(0, sep) as NodeKind, id: BigInt(key.slice(sep + 1)) } }
+  }
+
+  const endDrag = () => {
+    dragRef.current?.cleanup()
+    dragRef.current = null
+    setDropHighlightKey(null)
+    setDragGhost(null)
+    document.body.style.cursor = ''
+  }
+
+  const handlePointerMove = (e: PointerEvent) => {
+    const st = dragRef.current
+    if (st === null) return
+    if (!st.active) {
+      if (Math.hypot(e.clientX - st.startX, e.clientY - st.startY) < 4) return
+      st.active = true
+    }
+    setDragGhost({
+      x: e.clientX,
+      y: e.clientY,
+      labels: st.dragged.map(labelFor),
+      keys: new Set(st.dragged.map((n) => `${n.kind}:${n.id}`)),
+    })
+    const resolved = resolveDropTarget(e.clientX, e.clientY)
+    const valid =
+      resolved !== null &&
+      dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen }) !== null
+    const nextKey = valid ? (resolved as { key: string }).key : null
+    if (st.lastHighlightKey !== nextKey) {
+      st.lastHighlightKey = nextKey
+      setDropHighlightKey(nextKey)
+    }
+    document.body.style.cursor = valid ? 'grabbing' : 'not-allowed'
+  }
+
+  const handlePointerUp = (e: PointerEvent) => {
+    const st = dragRef.current
+    if (st !== null && st.active) {
+      const resolved = resolveDropTarget(e.clientX, e.clientY)
+      const result =
+        resolved !== null
+          ? dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen })
+          : null
+      if (result !== null) {
+        onReparent(st.dragged, result.group)
+      } else if (sessionOpen) {
+        onDropRefused?.('Close the group you are editing before moving items between groups.')
+      } else if (resolved !== null) {
+        onDropRefused?.(
+          resolved.node === 'root'
+            ? 'That is already at the top level.'
+            : 'Drop onto a group row, or onto Model to move to the top level — not into itself or its own member.',
+        )
+      }
+    }
+    endDrag()
+  }
+
+  const handlePointerCancel = () => endDrag()
+
+  // Stable identity (no external deps besides `startRowDrag`'s own
+  // closures, captured fresh per invocation) so this teardown only ever
+  // targets whatever listeners the CURRENTLY in-flight drag actually added.
+  // A collapsed TraySection unmounts its contents, so a drag in flight when
+  // the Outliner section itself collapses mid-drag must tear down through
+  // here rather than `endDrag` (never called — no more pointerup to reach
+  // it) — including the cursor, or `document.body`'s cursor is left stuck
+  // at 'grabbing'/'not-allowed' with nothing left to clear it.
+  useEffect(
+    () => () => {
+      if (dragRef.current !== null) {
+        dragRef.current.cleanup()
+        dragRef.current = null
+        document.body.style.cursor = ''
+      }
+    },
+    [],
+  )
+
+  const startRowDrag = (node: NodeRef, e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    // With a group open for editing the kernel refuses every reparent
+    // (ExplodeSessionScope), so nothing can be a valid target — but the
+    // drag still runs so the not-allowed cursor and the drop toast say so,
+    // instead of the row simply not moving.
+    if (nodeKindToNumber(node.kind) < 0) return // sketch-scoped: no kernel NodeId
+    // A text selection or the row's own image would start WebKit's native
+    // drag on mouse movement and cancel the pointer stream mid-drag.
+    e.preventDefault()
+    if (dragRef.current !== null) return
+    const dragged =
+      isSelected(node) && selectedIds.length > 1
+        ? selectedIds.filter((n) => nodeKindToNumber(n.kind) >= 0)
+        : [node]
+    if (dragged.length === 0) return
+    const onMove = (ev: PointerEvent) => handlePointerMove(ev)
+    const onUp = (ev: PointerEvent) => handlePointerUp(ev)
+    const onCancel = () => handlePointerCancel()
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+    dragRef.current = {
+      dragged,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+      lastHighlightKey: null,
+      cleanup: () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onCancel)
+      },
+    }
+  }
+
   const crumbs = breadcrumb(fullPath, labelFor)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      {dragGhost !== null && (
+        <div
+          data-testid="outliner-drag-ghost"
+          style={{
+            position: 'fixed',
+            left: dragGhost.x + 14,
+            top: dragGhost.y + 10,
+            pointerEvents: 'none',
+            zIndex: 1000,
+            padding: '3px 8px',
+            borderRadius: '4px',
+            background: 'var(--panel-bg, #2a2a2e)',
+            border: '1px solid var(--accent-base)',
+            color: 'var(--text-primary, #eee)',
+            fontSize: '12px',
+            fontFamily: 'var(--font-family-ui)',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+            whiteSpace: 'nowrap',
+            opacity: 0.95,
+          }}
+        >
+          {dragGhost.labels.length === 1
+            ? dragGhost.labels[0]
+            : `${dragGhost.labels[0]} +${dragGhost.labels.length - 1}`}
+        </div>
+      )}
       {/* Breadcrumb — every entry on `fullPath` gets a crumb, including
           every open session frame (docs/design/group-session.md). */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'var(--font-family-ui)' }}>
@@ -589,6 +791,7 @@ export function DocumentTree({
             toggleContainerVisibility(null, topNodes, getGroupMembers, hiddenKeys, onSetHiddenMany)
           }
           anyChildHidden={collectDescendants(topNodes, getGroupMembers).some((d) => hiddenKeys.has(nodeKey(d)))}
+          isDropTarget={dropHighlightKey === 'root'}
         />
         {sessionStack.map((frame, i) => (
           <Row
@@ -636,6 +839,9 @@ export function DocumentTree({
             filterResult={null}
             expandedMap={expandedMap}
             setNodeExpanded={setNodeExpanded}
+          dropHighlightKey={dropHighlightKey}
+          dragSourceKeys={dragSourceKeys}
+          onStartDrag={startRowDrag}
           />
         ))}
         {topNodes.map((node, index) => {
@@ -678,6 +884,9 @@ export function DocumentTree({
               filterResult={filterResult}
               expandedMap={expandedMap}
               setNodeExpanded={setNodeExpanded}
+          dropHighlightKey={dropHighlightKey}
+          dragSourceKeys={dragSourceKeys}
+          onStartDrag={startRowDrag}
             />
           )
         })}
@@ -727,19 +936,27 @@ function ModelRow({
   hidden,
   anyChildHidden,
   onToggleAllHidden,
+  isDropTarget,
 }: {
   hidden: boolean
   anyChildHidden: boolean
   onToggleAllHidden: () => void
+  /** Highlighted as the current VALID drag-and-drop target (move to the
+   *  top level) — see `DocumentTree`'s `dropHighlightKey`. */
+  isDropTarget?: boolean
 }) {
   return (
     <div
+      data-drop-target="root"
       style={{
         ...ROW_BASE,
         paddingLeft: '8px',
         paddingRight: '4px',
         cursor: 'default',
         fontWeight: 'bold',
+        outline: isDropTarget === true ? '2px solid var(--accent-base)' : 'none',
+        outlineOffset: '-2px',
+        background: isDropTarget === true ? 'var(--accent-tint-15)' : undefined,
       }}
     >
       <ModelIcon />
@@ -814,6 +1031,9 @@ const NodeRow = memo(function NodeRowInner({
   filterResult,
   expandedMap,
   setNodeExpanded,
+  dropHighlightKey,
+  dragSourceKeys,
+  onStartDrag,
 }: {
   node: NodeRef
   index: number
@@ -846,6 +1066,15 @@ const NodeRow = memo(function NodeRowInner({
   filterResult: { matches: Set<string>; ancestors: Set<string> } | null
   expandedMap: Map<string, boolean>
   setNodeExpanded: (key: string, value: boolean) => void
+  /** The `nodeKey` currently highlighted as a VALID drag-and-drop target
+   *  (`treeModel.ts`'s `dropTargetFor`), or `null` — an invalid hover
+   *  target deliberately shows no highlight (design), only a cursor
+   *  change, so this is never set for one. */
+  dropHighlightKey: string | null
+  /** Rows being dragged right now (`${kind}:${id}`), dimmed in place. */
+  dragSourceKeys: ReadonlySet<string>
+  /** Begins a row drag (DocumentTree's pointer-based DnD) for `node`. */
+  onStartDrag: (node: NodeRef, e: React.PointerEvent<HTMLDivElement>) => void
 }) {
   const key = nodeKey(node)
   // Auto-expand when this group is an ancestor of the primary selected node,
@@ -919,6 +1148,10 @@ const NodeRow = memo(function NodeRowInner({
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
         onToggleHidden={() => onToggleHidden(node)}
+        dropTargetKey={key}
+        isDragSource={dragSourceKeys.has(key)}
+        isDropTarget={dropHighlightKey === key}
+        onRowPointerDown={(e) => onStartDrag(node, e)}
       />
     )
   }
@@ -950,6 +1183,10 @@ const NodeRow = memo(function NodeRowInner({
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
         onToggleHidden={() => onToggleHidden(node)}
+        dropTargetKey={key}
+        isDragSource={dragSourceKeys.has(key)}
+        isDropTarget={dropHighlightKey === key}
+        onRowPointerDown={(e) => onStartDrag(node, e)}
       />
     )
   }
@@ -1002,6 +1239,10 @@ const NodeRow = memo(function NodeRowInner({
           toggleContainerVisibility(node, members, getGroupMembers, hiddenKeys, onSetHiddenMany)
         }
         anyChildHidden={anyChildHidden}
+        dropTargetKey={key}
+        isDragSource={dragSourceKeys.has(key)}
+        isDropTarget={dropHighlightKey === key}
+        onRowPointerDown={(e) => onStartDrag(node, e)}
       />
       {expanded && visibleMembers.map((child, childIdx) => (
         <NodeRow
@@ -1027,6 +1268,9 @@ const NodeRow = memo(function NodeRowInner({
           filterResult={filterResult}
           expandedMap={expandedMap}
           setNodeExpanded={setNodeExpanded}
+          dropHighlightKey={dropHighlightKey}
+          dragSourceKeys={dragSourceKeys}
+          onStartDrag={onStartDrag}
         />
       ))}
     </>
@@ -1131,6 +1375,10 @@ function Row({
   onToggleHidden,
   onToggleAllHidden,
   anyChildHidden,
+  dropTargetKey,
+  isDragSource,
+  isDropTarget,
+  onRowPointerDown,
 }: {
   label: string
   icon: React.ReactNode
@@ -1154,6 +1402,20 @@ function Row({
    *  hover/focus-visible eye-stack button, present on group rows only. */
   onToggleAllHidden?: () => void
   anyChildHidden?: boolean
+  /** This row's `nodeKey` — set on `data-drop-target` so a drag in
+   *  progress can resolve "what row is under the pointer" via
+   *  `elementFromPoint`. Only object/group/instance rows carry one; a
+   *  sketch row omits it, so hovering one resolves to no target. */
+  dropTargetKey?: string
+  /** This row is being dragged: dimmed in place while its ghost travels. */
+  isDragSource?: boolean
+  /** Highlighted as the current VALID drag-and-drop target — see
+   *  `DocumentTree`'s `dropHighlightKey`. An invalid hover target is
+   *  never passed `true` here (design: no highlight, cursor only). */
+  isDropTarget?: boolean
+  /** Begins a row drag (DocumentTree's pointer-based DnD), when this row
+   *  can be dragged. */
+  onRowPointerDown?: (e: React.PointerEvent<HTMLDivElement>) => void
 }) {
   // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
   // selected node is highlighted with accent/tint background + accent text"),
@@ -1178,18 +1440,22 @@ function Row({
   return (
     <div
       ref={rowRef}
+      data-drop-target={dropTargetKey}
       onClick={(e) => onClick(e.shiftKey || e.ctrlKey || e.metaKey)}
       onDoubleClick={onDoubleClick}
+      onPointerDown={onRowPointerDown}
       onMouseEnter={() => setRowHovered(true)}
       onMouseLeave={() => setRowHovered(false)}
       style={{
         ...ROW_BASE,
         paddingLeft: `${8 + indent * 16}px`,
         paddingRight: '4px',
-        background,
+        background: isDropTarget === true ? 'var(--accent-tint-15)' : background,
         boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
+        outline: isDropTarget === true ? '2px solid var(--accent-base)' : 'none',
+        outlineOffset: '-2px',
         color: anySelected ? 'var(--accent-text-on-tint)' : undefined,
-        opacity: dimmed ? 0.5 : 1,
+        opacity: dimmed ? 0.5 : isDragSource === true ? 0.4 : 1,
         fontWeight: active ? 'bold' : 'normal',
       }}
     >
@@ -1199,6 +1465,7 @@ function Row({
             e.stopPropagation()
             onToggleExpand?.()
           }}
+          onPointerDown={(e) => e.stopPropagation()}
           style={{
             background: 'none',
             border: 'none',
@@ -1221,6 +1488,7 @@ function Row({
             e.stopPropagation()
             onToggleAllHidden()
           }}
+          onPointerDown={(e) => e.stopPropagation()}
           onFocus={() => setAllHiddenFocused(true)}
           onBlur={() => setAllHiddenFocused(false)}
           aria-label={anyChildHidden === true ? 'Show all children' : 'Hide all children'}
@@ -1248,6 +1516,7 @@ function Row({
             e.stopPropagation()
             onToggleHidden()
           }}
+          onPointerDown={(e) => e.stopPropagation()}
           title={hidden === true ? 'Show' : 'Hide'}
           style={{
             background: 'none',

@@ -956,6 +956,18 @@ pub enum RecordedCall {
     /// replaces going forward) replays on older builds unchanged; one that
     /// does fails to parse there — loudly, never silently divergent.
     DeleteSelection { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `reparent_nodes(kinds, ids, group)` — the Outliner drag-and-drop
+    /// "Add to Group"/"Move to top level" (v1.1-cycle.md grouping lane):
+    /// every listed node moved as ONE undo step, `DeleteSelection`'s
+    /// labeled-compound shape. Additive variant: a recording that never
+    /// reparents (every recording captured before this shipped) replays
+    /// on older builds unchanged; one that does fails to parse there —
+    /// loudly, never silently divergent.
+    ReparentNodes {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        group: Option<u64>,
+    },
 }
 
 /// A [`kernel::UvFrame`]'s components, flattened for [`RecordedCall::SetFaceUvFrame`]

@@ -22,6 +22,15 @@ Moving, rotating, or scaling a group transforms everything inside it together, a
 
 Delete everything inside an open group and step out, and the group goes with it — undo brings it all back, same as a component left with nothing (below).
 
+### Adding to an existing group
+
+Two ways to move something into a group after the fact, without disturbing its geometry:
+
+- **Drag it in the Outliner.** Drag a row — or your whole current selection, if the row you grab is part of it — onto a group's row to add it there, or onto the Model row at the top to pull it back out to the top level. A group can't be dropped into itself or into one of its own members.
+- **Cut, edit the group, Paste In Place.** Select the thing, `⌘X`/`Ctrl+X` to cut it, double-click the group to open it, then `⇧⌘V`/`Ctrl+Shift+V` to paste it back at its original position. Step out and it's a member, right where it was.
+
+Either way it's pure reorganizing — the object itself, and everywhere else it might be referenced, is untouched.
+
 ## Components
 
 A component is shared geometry: one **definition**, any number of placed **instances**. Every instance has its own position, rotation, scale, and mirroring, but they all reference the same shape. Model one screw, place it eight times; fix the thread once, all eight update.

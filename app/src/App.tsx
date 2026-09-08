@@ -5349,6 +5349,21 @@ export default function App() {
     }
   }
 
+  // Outliner drag-and-drop (DocumentTree's `dropTargetFor` already vetted
+  // the drop before calling this — GroupCycle/ExplodeSessionScope are the
+  // kernel's own backstop, surfaced as a toast by `runReparent` if a race
+  // slips one through). Keeps the moved nodes selected — matches
+  // `handleGroup`'s "select what you just acted on" posture — which also
+  // auto-expands/reveals the target group via the existing
+  // `ancestorGroupKeys` machinery (DocumentTree.tsx).
+  const handleReparent = (nodes: NodeRef[], group: bigint | undefined) => {
+    const ok = viewportApi.current?.runReparent(nodes, group)
+    if (ok === true) {
+      setSelectedIds(nodes)
+      setDocRev((r) => r + 1)
+    }
+  }
+
   const handleUngroup = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'group') {
       viewportApi.current?.runUngroup(selectedIds[0].id)
@@ -5966,6 +5981,8 @@ export default function App() {
               hiddenKeys={hiddenKeys}
               onToggleHidden={handleToggleHidden}
               onSetHiddenMany={handleSetHiddenMany}
+              onReparent={handleReparent}
+              onDropRefused={(reason) => handleToast(reason)}
             />
           </TraySection>
           <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>

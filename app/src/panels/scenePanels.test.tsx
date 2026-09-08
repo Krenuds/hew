@@ -1652,6 +1652,7 @@ const docTreeBase = {
   hiddenKeys: new Set<string>(),
   onToggleHidden: vi.fn(),
   onSetHiddenMany: vi.fn(),
+  onReparent: vi.fn(),
 }
 
 describe('DocumentTree', () => {

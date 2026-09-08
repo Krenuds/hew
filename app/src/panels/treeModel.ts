@@ -543,6 +543,64 @@ export function canBooleanInComponent(
 }
 
 /**
+ * Where an Outliner drag from `dragged` may drop onto `target`, or `null`
+ * if the drop is refused — a pure gate the row's pointer handlers consult
+ * before highlighting a drop target and before firing `reparent_nodes`.
+ * Mirrors `Document::reparent_nodes`'s own refusals (`GroupCycle`,
+ * `ExplodeSessionScope`) so the UI never highlights a target the kernel
+ * would immediately refuse.
+ *
+ * `dragged` is every row being moved — the single dragged row, or the
+ * whole current selection when the dragged row is part of it. `target` is
+ * the row the pointer is over: a group row to move into, or `'root'` for
+ * the Model row (move to the top level).
+ *
+ * Refused (`null`) when:
+ * - `dragged` is empty, or any dragged node lacks a kernel NodeId (a
+ *   sketch-scoped ref never reaches `reparent_nodes`; see
+ *   `structuralSelection`).
+ * - `view.sessionOpen` — a group/component edit session is open; the
+ *   kernel refuses `ExplodeSessionScope` regardless of target.
+ * - `target` is neither a group row nor `'root'` (an instance row, a
+ *   sketch row, an object row — none can contain other nodes).
+ * - `target` names a group that IS one of the dragged nodes, or lies
+ *   inside one of the dragged groups' own subtree (dropping a group onto
+ *   itself, or onto one of its own descendants) — the kernel's
+ *   `GroupCycle`.
+ *
+ * Returns the resolved parent to pass to `reparent_nodes`: the target
+ * group's id, or `undefined` for the top level. A target every dragged
+ * node already sits directly under is still a valid (if no-op) drop —
+ * `reparent_nodes` itself silently skips already-there nodes.
+ */
+export function dropTargetFor(
+  dragged: readonly NodeRef[],
+  target: NodeRef | 'root',
+  view: {
+    getGroupMembers: (groupId: bigint) => NodeRef[]
+    sessionOpen: boolean
+  },
+): { group: bigint | undefined } | null {
+  if (dragged.length === 0) return null
+  if (view.sessionOpen) return null
+  if (dragged.some((n) => nodeKindToNumber(n.kind) < 0)) return null
+
+  if (target === 'root') return { group: undefined }
+  if (target.kind !== 'group') return null
+
+  // A group cannot end up inside itself or inside one of its own
+  // descendants — mirrors the kernel's subtree walk (GroupCycle).
+  const subtreeContains = (root: NodeRef, needle: bigint): boolean => {
+    if (root.kind === 'group' && root.id === needle) return true
+    if (root.kind !== 'group') return false
+    return view.getGroupMembers(root.id).some((child) => subtreeContains(child, needle))
+  }
+  if (dragged.some((n) => subtreeContains(n, target.id))) return null
+
+  return { group: target.id }
+}
+
+/**
  * Whether the selection can be ungrouped: exactly one selected node that is
  * a group.
  */

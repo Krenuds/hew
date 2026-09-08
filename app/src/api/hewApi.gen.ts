@@ -403,6 +403,18 @@ export interface GroupExplodeParams {
 export interface GroupExplodeResult {}
 
 /**
+ * `hew.group.reparent` (v1) — Move live nodes into a group, or out to the top level, without touching their geometry.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, empty_ids, group_cycle, explode_session_scope, unknown_object, unknown_group, unknown_instance
+ */
+export interface GroupReparentParams {
+  ids: string[]
+  parent?: string | null
+}
+
+export interface GroupReparentResult {}
+
+/**
  * `hew.guide.angular` (v1) — Add an angular construction guide.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: degenerate_guide, unknown_entity, locator_missed, ambiguous_locator, no_such_point
@@ -1447,6 +1459,7 @@ export class HewApiClient {
   readonly group = {
     create: (params: GroupCreateParams): Promise<GroupCreateResult> => this.mutate('hew.group.create', params),
     explode: (params: GroupExplodeParams): Promise<GroupExplodeResult> => this.mutate('hew.group.explode', params),
+    reparent: (params: GroupReparentParams): Promise<GroupReparentResult> => this.mutate('hew.group.reparent', params),
   }
 
   readonly guide = {

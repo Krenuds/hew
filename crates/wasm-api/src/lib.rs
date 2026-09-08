@@ -4212,6 +4212,49 @@ impl Scene {
         Ok(())
     }
 
+    /// Moves a whole selection of live world nodes into `group` (a live
+    /// group) or out to the top level (`undefined`/`None`) as ONE undo
+    /// step — the Outliner drag-and-drop "Add to Group"/"Move to top
+    /// level" (`kinds`/`ids` parallel, `delete_selection`'s convention).
+    /// Geometry is untouched: a group is a pose-less container, so this is
+    /// pure tree bookkeeping and every handle stays stable. A node already
+    /// under `group` is silently skipped; if nothing moves, no undo step
+    /// appears (the call is still captured into the replay log on success,
+    /// matching every other recorded call here — replaying a no-op is
+    /// itself a no-op).
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds`/`ids` differ in length, or the list is
+    ///   empty.
+    /// - `BadNodeKind` — an entry names a kind other than 0/1/2.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance` — a listed node
+    ///   is not a live world node.
+    /// - `UnknownGroup` — `group` is not a live group.
+    /// - `GroupCycle` — `group` is one of the moved nodes or lies inside
+    ///   one (a group can't end up inside itself).
+    /// - `ExplodeSessionScope` — a component-edit or group-edit session is
+    ///   open; the tree is in its surfaced state and membership is settled
+    ///   by the session's own close.
+    pub fn reparent_nodes(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        group: Option<u64>,
+    ) -> Result<(), ApiError> {
+        let nodes = node_ids(kinds, ids)?;
+        let change = self
+            .doc
+            .reparent_nodes(&nodes, group.map(group_id))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ReparentNodes {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            group,
+        });
+        Ok(())
+    }
+
     /// Deletes (hides) one free-standing sketch in one undoable step —
     /// whole-sketch granularity, mirroring `delete_guide`. The handle stays
     /// valid for redo. A sketch is a distinct FFI concept from a tree node
@@ -9555,6 +9598,9 @@ impl Scene {
                     DeleteSelection { kinds, ids } => {
                         self.delete_selection(&kinds, &ids)?;
                     }
+                    ReparentNodes { kinds, ids, group } => {
+                        self.reparent_nodes(&kinds, &ids, group)?;
+                    }
                 }
             }
             Ok(())
@@ -13471,6 +13517,44 @@ mod tests {
 
         let err = scene.group_nodes(&[7], &[o]).unwrap_err();
         assert!(err.0.starts_with("BadNodeKind"), "got {}", err.0);
+    }
+
+    /// `reparent_nodes` moves a live node into a group across the FFI as
+    /// ONE undo step, and refuses a group-into-itself cycle with the
+    /// kernel's typed `GroupCycle` code.
+    #[test]
+    fn reparent_nodes_moves_into_group_as_one_undo_step_and_refuses_cycle() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[o2]).unwrap();
+
+        assert_eq!(scene.node_parent(0, o1).unwrap(), None);
+        let hash_before = scene.state_hash();
+        scene.reparent_nodes(&[0], &[o1], Some(g)).unwrap();
+        assert_ne!(scene.state_hash(), hash_before, "the object moved");
+        assert_eq!(scene.node_parent(0, o1).unwrap(), Some(g));
+
+        // One undo restores the whole move, including the group's member order.
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.state_hash(),
+            hash_before,
+            "one undo restores the move"
+        );
+        assert_eq!(scene.node_parent(0, o1).unwrap(), None);
+
+        // Moving a group into itself is a cycle, refused before anything changes.
+        let hash_before_cycle = scene.state_hash();
+        let err = scene.reparent_nodes(&[1], &[g], Some(g)).unwrap_err();
+        assert!(err.0.starts_with("GroupCycle"), "got {}", err.0);
+        assert_eq!(
+            scene.state_hash(),
+            hash_before_cycle,
+            "a refused move touches nothing"
+        );
     }
 
     /// Make a component, stamp a second instance, and confirm they share one

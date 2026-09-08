@@ -152,6 +152,13 @@ export interface HewTestHarness {
    * and copy structure without the Outliner DOM.
    */
   getGroupMembers(id: string): { kind: string; id: string }[]
+  /**
+   * The containing group of a tree node (`node_parent`), or `null` at the
+   * top level — for asserting Outliner drag-and-drop reparenting
+   * (`reparent_nodes`) without the DOM. `kind` is `'object' | 'group' |
+   * 'instance'`.
+   */
+  getNodeParent(kind: string, id: string): string | null
   /** Whether an object is currently a watertight solid (`object_solid`). */
   isObjectSolid(id: string): boolean
   /**
@@ -1194,6 +1201,13 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       query((s) =>
         s.group_members(BigInt(id)).map((n) => ({ kind: n.kind, id: n.id.toString() })),
       ),
+
+    getNodeParent: (kind, id) =>
+      query((s) => {
+        const kindNum = kind === 'group' ? 1 : kind === 'instance' ? 2 : 0
+        const parent = s.node_parent(kindNum, BigInt(id))
+        return parent === undefined ? null : parent.toString()
+      }),
 
     isObjectSolid: (id) => query((s) => s.object_solid(BigInt(id))),
 
