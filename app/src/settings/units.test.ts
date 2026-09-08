@@ -366,6 +366,80 @@ describe('parseLengthToMeters — explicit metric suffixes work in ANY mode', ()
   })
 })
 
+describe('parseLengthToMeters — leading-dot decimals ("0.75" without the leading zero)', () => {
+  it('parses a bare leading-dot decimal in every metric format', () => {
+    expect(parseLengthToMeters('.75', 'm')).toBeCloseTo(0.75, 12)
+    expect(parseLengthToMeters('.75', 'cm')).toBeCloseTo(0.0075, 12)
+    expect(parseLengthToMeters('.75', 'mm')).toBeCloseTo(0.00075, 12)
+  })
+
+  it('parses a bare leading-dot decimal in every imperial format, as inches', () => {
+    for (const format of ['arch', 'frac_in', 'dec_in'] as const) {
+      expect(parseLengthToMeters('.75', format)).toBeCloseTo(0.75 * 0.0254, 12)
+    }
+  })
+
+  it('parses a negative leading-dot decimal', () => {
+    expect(parseLengthToMeters('-.5', 'm')).toBeCloseTo(-0.5, 12)
+    expect(parseLengthToMeters('-.5', 'arch')).toBeCloseTo(-0.5 * 0.0254, 12)
+  })
+
+  it('parses a leading-dot decimal with an explicit inch mark', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('.75"', format)).toBeCloseTo(0.75 * 0.0254, 12)
+      expect(parseLengthToMeters('-.5"', format)).toBeCloseTo(-0.5 * 0.0254, 12)
+    }
+  })
+
+  it('parses a leading-dot decimal with an explicit foot mark', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters(".5'", format)).toBeCloseTo(0.5 * 0.3048, 12)
+    }
+  })
+
+  it('parses a leading-dot decimal with an explicit metric suffix', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('.5cm', format)).toBeCloseTo(0.005, 12)
+      expect(parseLengthToMeters('-.5cm', format)).toBeCloseTo(-0.005, 12)
+    }
+  })
+
+  it('matches exactly what "0.75"/"0.5" would parse to', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('.75', format)).toBeCloseTo(
+        parseLengthToMeters('0.75', format)!,
+        12,
+      )
+      expect(parseLengthToMeters('.75"', format)).toBeCloseTo(
+        parseLengthToMeters('0.75"', format)!,
+        12,
+      )
+    }
+  })
+
+  it('still rejects a bare dot with no digits', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('.', format)).toBeNull()
+      expect(parseLengthToMeters('."', format)).toBeNull()
+      expect(parseLengthToMeters("-.", format)).toBeNull()
+    }
+  })
+
+  it('still rejects a doubled leading dot', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('..5', format)).toBeNull()
+      expect(parseLengthToMeters('..5"', format)).toBeNull()
+    }
+  })
+
+  it('still rejects two decimal points in one number', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('.75.5', format)).toBeNull()
+      expect(parseLengthToMeters('.75.5"', format)).toBeNull()
+    }
+  })
+})
+
 describe('parseLengthToMeters — ft/in word suffixes work in ANY mode', () => {
   it('parses "ft" and "in" suffixes regardless of the active format', () => {
     for (const format of ALL_FORMATS) {

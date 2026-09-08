@@ -32,7 +32,7 @@ import {
   type PrintRenderOptions,
   type ViewPlaneExtent,
 } from './printPass'
-import { prefersReducedMotion } from '../platform'
+import { prefersReducedMotion, isMac } from '../platform'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
@@ -2917,6 +2917,7 @@ export default function Viewport({
         : null
       const { snap, fromKernel } = snapService.resolve(
         ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints,
+        undefined, constraint?.facesOnly,
       )
       loupePressSnap = snap
       loupePressRay = ray
@@ -7328,13 +7329,16 @@ export default function Viewport({
     window.addEventListener('blur', onWindowBlurClearsShiftLock)
 
     // Ctrl toggles the active tool's durable center-anchor (Scale's
-    // `toggleCenterAnchor`). Like Shift above, a BARE Control keydown reports
-    // ctrlKey:true, so the generic key path in onKeyDown (gated on `!isMod`)
-    // never carries it — hence a dedicated listener. Fire on a CLEAN TAP only:
-    // Control pressed and released with NO other key in between. Toggling on
-    // the leading keydown would also flip the anchor as a side effect of every
-    // Ctrl chord (Ctrl+Z undo, Ctrl+A select-all, …), which the clean-tap
-    // guard prevents.
+    // `toggleCenterAnchor`) and, on Windows/Linux only, Move's/Rotate's
+    // durable copy toggle (`toggleCopyMode` — macOS uses Option instead, via
+    // each tool's own `onKey`; see `platform.ts`'s `COPY_MODIFIER_KEY` and
+    // MoveTool's module doc). Like Shift above, a BARE Control keydown
+    // reports ctrlKey:true, so the generic key path in onKeyDown (gated on
+    // `!isMod`) never carries it — hence a dedicated listener. Fire on a
+    // CLEAN TAP only: Control pressed and released with NO other key in
+    // between. Toggling on the leading keydown would also flip the anchor
+    // (or the copy mode) as a side effect of every Ctrl chord (Ctrl+Z undo,
+    // Ctrl+A select-all, …), which the clean-tap guard prevents.
     //
     // This listener and the Push/Pull one just below both live at window
     // scope and both watch the SAME bare Ctrl/Meta keydown, regardless of
@@ -7362,6 +7366,14 @@ export default function Viewport({
       if ('toggleCenterAnchor' in armedTool) {
         (armedTool as { toggleCenterAnchor(): void }).toggleCenterAnchor()
         scheduleRender()
+      } else if (!isMac && 'toggleCopyMode' in armedTool) {
+        // Move/Rotate on Windows/Linux: macOS keeps this on Option instead
+        // (each tool's own `onKey`), so this branch is gated off there —
+        // without it, a clean Control tap on macOS would ALSO flip copy
+        // mode alongside a deliberate Option tap.
+        (armedTool as { toggleCopyMode(): void }).toggleCopyMode()
+        scheduleRender()
+        reportToolHint()
       }
     }
     // Capture phase: dialogs/menus/the palette stopPropagation() Escape's
@@ -7518,12 +7530,13 @@ export default function Viewport({
     // Why a CHORD and not a bare modifier: all four bare modifiers are taken,
     // and a bare Alt would be actively wrong. Shift is the axis lock across
     // Move/Rotate/Scale/Line (`onShiftKeyDown` above) plus OrbitControls' pan
-    // inversion; a bare Control/Meta keydown arms Scale's center-anchor tap
-    // (`onCtrlKeyDown` above) or, while Push/Pull is active, its
-    // extrude-as-new toggle (`onPushPullModifierKeyDown` above); a bare Alt
-    // keydown is MoveTool's and RotateTool's durable copy toggle
-    // (`MoveTool.onKey` / `RotateTool.onKey`) and ArcTool's completion-mode
-    // cycle (`ArcTool.onKey`), all reached through onKeyDown's unconditional
+    // inversion; a bare Control/Meta keydown arms Scale's center-anchor tap,
+    // Move's/Rotate's copy toggle on Windows/Linux (`onCtrlKeyDown` above),
+    // or, while Push/Pull is active, its extrude-as-new toggle
+    // (`onPushPullModifierKeyDown` above); a bare Alt keydown is Move's and
+    // Rotate's durable copy toggle on macOS (`MoveTool.onKey` /
+    // `RotateTool.onKey`) and ArcTool's completion-mode cycle
+    // (`ArcTool.onKey`), all reached through onKeyDown's unconditional
     // `if (!isMod) activeTool.onKey(ev)` fallback; and the arrow keys are
     // the draw-plane / axis locks.
     //
@@ -7572,14 +7585,15 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
           : null
-        const { snap: rawSnap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+        const { snap: rawSnap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
         // Same Select-only axis exclusion as the pointer-move path — see
         // `excludeAxisSnapForSelect`'s doc.
         const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
         activeTool.onPointerMove(snap, cached.ray)
-        cueLayer.update(snap, readOnlyRef.current)
+        const cueSnap = toolSnapForCues(snap, activeTool)
+        cueLayer.update(cueSnap, readOnlyRef.current)
         drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
-        publishSnapCues(snap, activeTool)
+        publishSnapCues(cueSnap, activeTool)
       }
       scheduleRender()
     }
@@ -8100,7 +8114,7 @@ export default function Viewport({
         : null
       const resolved = isRawDragTool
         ? { snap: null, fromKernel: false }
-        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
       const rawSnap = resolved.snap
       // Select-only axis-kind exclusion under `readOnly` (shop-mode round-3
       // playtest finding 2) — see `excludeAxisSnapForSelect`'s doc. A no-op
@@ -8120,11 +8134,12 @@ export default function Viewport({
       // snap is already null by this point when it was axis-kind; Tape
       // Measure's isn't, so this is what actually hides ITS line while
       // leaving the snap — and therefore its SnapDot/tooltip — intact).
-      cueLayer.update(snap, readOnlyRef.current)
+      const cueSnap = toolSnapForCues(snap, activeTool)
+      cueLayer.update(cueSnap, readOnlyRef.current)
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
       scheduleRender()
 
-      publishSnapCues(snap, activeTool)
+      publishSnapCues(cueSnap, activeTool)
 
       // Tape loupe (round-3 playtest finding 4): keep the latest probe live
       // for whichever commit outcome eventually applies (armTapeLoupe's own
@@ -8160,16 +8175,35 @@ export default function Viewport({
       }
     }
 
+    /** The effective snap for cue rendering (dashed guide line, chip, dot):
+     * an active tool's own `lastSnap` (set inside the `onPointerMove` just
+     * called) when it provides one and it's non-null, else the raw resolved
+     * `snap`. A tool sometimes re-interprets the cursor after SnapService
+     * hands it back a snap — DimensionTool's dimension-row alignment snap,
+     * LineTool's from-point closing inference (LineTool.ts's module doc) —
+     * and the cue must track what the tool actually used/drew, not
+     * wherever SnapService originally landed. Every `lastSnap` producer
+     * before LineTool's kept the SAME x/y/z as the raw snap (only
+     * relabeling `kind`), so this was a no-op for them; it starts
+     * mattering only for a tool whose `lastSnap` genuinely MOVES the point.
+     */
+    function toolSnapForCues(snap: Snap | null, activeTool: Tool): Snap | null {
+      if ('lastSnap' in activeTool) {
+        const ls = (activeTool as { lastSnap: Snap | null }).lastSnap
+        if (ls !== null) return ls
+      }
+      return snap
+    }
+
     /** Status-bar text + the cursor-anchored inference chip/dot for a freshly
      * resolved snap. Shared by the pointer-move path and by anything that
      * re-resolves at the cached ray without a pointer move (the precision-mode
      * toggle) — those must refresh the readouts too, or the chip goes stale
-     * and reports a snap that is no longer the winner. */
+     * and reports a snap that is no longer the winner. `snap` is expected to
+     * already be the tool-preferred one (`toolSnapForCues`, applied by the
+     * caller so it can share the same value with `cueLayer.update`). */
     function publishSnapCues(snap: Snap | null, activeTool: Tool): void {
-      const snapKind = 'lastSnap' in activeTool && (activeTool as { lastSnap: unknown }).lastSnap !== null
-        ? ((activeTool as { lastSnap: { kind: string } }).lastSnap).kind
-        : (snap !== null ? snap.kind : null)
-      onStatusChangeRef.current?.(toolController.activeToolName, snapKind)
+      onStatusChangeRef.current?.(toolController.activeToolName, snap !== null ? snap.kind : null)
 
       // Inference tooltip chip + snap dot (Refinement B) —
       // container-relative screen coords so App.tsx can position DOM overlays
@@ -8183,10 +8217,8 @@ export default function Viewport({
         onInferenceChangeRef.current?.(null)
       } else {
         const p = worldToPixels(new THREE.Vector3(snap.x, snap.y, snap.z))
-        // Read AFTER the tool's own onPointerMove (both callers order it that
-        // way), so this reflects what the tool just did with this very snap.
         onInferenceChangeRef.current?.({
-          kind: snapKind ?? snap.kind,
+          kind: snap.kind,
           screenX: p.x,
           screenY: p.y,
           direction: snap.direction,
@@ -8548,13 +8580,14 @@ export default function Viewport({
       if (activeTool instanceof FollowMeTool) {
         activeTool.setMergeModifier(ev.metaKey || ev.ctrlKey)
       }
-      // (Move's copy mode is a durable Alt TOGGLE handled in MoveTool.onKey —
-      // no live Alt-modifier tracking here.)
+      // (Move's/Rotate's copy mode is a durable Option/Ctrl TOGGLE handled in
+      // MoveTool.onKey/onCtrlKeyUp (see `toggleCopyMode`) — no live
+      // Alt/Ctrl-modifier tracking here.)
 
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
       activeTool.onPointerDown(snap, ray)
       // Shop-mode playtest finding 3: touch has no hover, so `onPointerMove`
       // (the only other `publishSnapCues` caller) never runs before a plain
@@ -8642,7 +8675,7 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
           : null
-        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
         const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
         if (handled) {
           scheduleRender()
@@ -8845,13 +8878,13 @@ export default function Viewport({
             const constraint = 'snapConstraint' in activeTool
               ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
               : null
-            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
             activeTool.onPointerMove(snap, cached.ray)
             // Only Tape Measure's VCB reaches this under `readOnly` (Select
             // has none) — `suppressAxisLine` keeps its on-axis snap fully
             // functional while hiding the incoherent guide line, same as
             // the pointer-move path.
-            cueLayer.update(snap, readOnlyRef.current)
+            cueLayer.update(toolSnapForCues(snap, activeTool), readOnlyRef.current)
             drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
           }
           return
@@ -9022,7 +9055,7 @@ export default function Viewport({
           const constraint = 'snapConstraint' in activeTool
             ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
@@ -9067,7 +9100,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in tool
               ? (tool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
               : null
-            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
             tool.onPointerDown(snap, ray)
           }
           // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended

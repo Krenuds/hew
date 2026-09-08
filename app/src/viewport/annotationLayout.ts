@@ -578,6 +578,89 @@ export function buildRadialGeometry(center: V3, anchor: V3, kind: 'radius' | 'di
 /** Half-extent (world units) of a radial dimension's centre tick mark. */
 export const CENTER_TICK_HALF = 0.03
 
+// ------------------------------------------------------- §5: alignment snap
+
+/** Angle tolerance (as a cosine) for the dimension-row alignment snap's two
+ *  parallel tests — a candidate's own LINE direction against the new
+ *  baseline, and its PLANE normal against the new working plane — SketchUp
+ *  parity: dragging a new dimension's offset near an existing, parallel,
+ *  coplanar dimension's line snaps the new one collinear with it. */
+const ALIGNMENT_ANGLE_TOL_COS = Math.cos((1 * Math.PI) / 180)
+
+/** True iff (unit-agnostic, non-zero) directions `a`/`b` are parallel OR
+ *  antiparallel within 1 degree — a plain direction, either sign counts the
+ *  same, since neither a candidate dimension's line nor its plane normal
+ *  carries a meaningful polarity for this test. A degenerate (zero-length)
+ *  direction never matches. */
+export function directionsParallel(a: V3, b: V3): boolean {
+  const ua = normalizeV3(a)
+  const ub = normalizeV3(b)
+  if (ua === null || ub === null) return false
+  return Math.abs(dotV3(ua, ub)) > ALIGNMENT_ANGLE_TOL_COS
+}
+
+/** An existing linear dimension's own drawn LINE — `a1`/`b1`, the anchor
+ *  points already offset out, the SAME convention the test harness's
+ *  `getLinearDimensionEndpoints` reports — plus its working-plane normal.
+ *  The shape `findAlignmentSnap` needs from each candidate; built by the
+ *  caller (`DimensionTool`) from the wasm-api's existing read-only
+ *  `annotation_anchor_point`/`annotation_offset`/`annotation_plane`
+ *  accessors (no new wasm-api surface). */
+export interface DimensionLineCandidate {
+  a1: V3
+  b1: V3
+  planeNormal: V3
+}
+
+/**
+ * The offset that lands a NEW dimension's line (through `aPoint`, unit
+ * direction `base`) exactly on an existing candidate's own line (`a1`-`b1`)
+ * — for a baseline already known to be parallel to it (`directionsParallel`):
+ * the component of `a1 - aPoint` perpendicular to `base`. Because the two
+ * directions are parallel, this same vector is the needed offset everywhere
+ * along the line — a rigid perpendicular translation — so `bPoint` lands on
+ * the candidate's line too, with no separate computation.
+ */
+export function collinearOffset(aPoint: V3, base: V3, a1: V3): V3 {
+  return perpComponentV3(subV3(a1, aPoint), base)
+}
+
+/**
+ * Dimension-row alignment snap (SketchUp parity): while dragging a new
+ * linear dimension's offset (`have-b`), an existing linear dimension whose
+ * own line is parallel to the new baseline (`base`, within 1 degree) AND
+ * whose working-plane normal matches `workingPlaneNormal` (also within 1
+ * degree) snaps the new dimension collinear with it, once the drag's
+ * current offset point (`currentA1 = aPoint + offset`, the caller's own
+ * `have-b.offset`) passes within `toleranceWorld` of the candidate's line
+ * — so a row of dimensions along the same wall lines up exactly.
+ *
+ * Returns the offset to COMMIT TO (not a delta) for the nearest qualifying
+ * candidate by that pass-by distance, or `null` if none qualifies. Pure and
+ * stateless — no hysteresis of its own: callers re-run this from scratch on
+ * every pointer move, so moving the cursor away (or Escape cancelling the
+ * gesture entirely) releases the snap immediately, exactly like every other
+ * inference snap.
+ */
+export function findAlignmentSnap(
+  aPoint: V3,
+  base: V3,
+  currentA1: V3,
+  workingPlaneNormal: V3,
+  candidates: readonly DimensionLineCandidate[],
+  toleranceWorld: number,
+): V3 | null {
+  let best: { offset: V3; dist: number } | null = null
+  for (const c of candidates) {
+    if (!directionsParallel(subV3(c.b1, c.a1), base)) continue
+    if (!directionsParallel(c.planeNormal, workingPlaneNormal)) continue
+    const dist = distPointToLine(currentA1, c.a1, c.b1)
+    if (dist > toleranceWorld) continue
+    if (best === null || dist < best.dist) best = { offset: collinearOffset(aPoint, base, c.a1), dist }
+  }
+  return best?.offset ?? null
+}
+
 /** Appends a small "+" cross-tick centred at `center`, lying in the plane
  * with unit normal `planeNormal` — the "small centre cross/tick" a Radius
  * dimension draws at the true centre (docs/design/dimensions-playtest2.md

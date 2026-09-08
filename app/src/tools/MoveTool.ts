@@ -19,19 +19,23 @@
  *   Shift (held) → lock to the axis the drag is currently moving along;
  *                  releasing Shift clears that lock (an arrow lock overrides it).
  *
- * Copy: tapping Option/Alt toggles copy mode — a DURABLE toggle, not
- * hold-to-copy, so an exact distance can be typed with the modifier long
- * released (SketchUp's Ctrl/Option semantics). While on, the readout is
- * prefixed "Copy ·", the cursor grows a `+` badge, and the commit becomes a
- * duplicate: one `duplicate_selection_array` call (count 1, ONE undo step for
- * the whole selection's copies), the clones becoming the new selection so
- * follow-up moves chain copies. Object/group copies are independent baked
- * geometry; an instance copy shares its definition at the offset pose.
- * Sketch selections copy too: each planned island replays into its sketch at
- * the offset (`duplicateSketchSelection`) — one gesture per sketch, one undo
- * step per sketch, curve identity preserved. Tapping Alt again returns to
- * plain Move. Holding Alt through a drag still works: the keydown on entry
- * toggles copy on.
+ * Copy: tapping the platform copy modifier toggles copy mode — a DURABLE
+ * toggle, not hold-to-copy, so an exact distance can be typed with the
+ * modifier long released (SketchUp's own Ctrl/Option split, see
+ * `platform.ts`'s `COPY_MODIFIER_KEY`): Option on macOS (`onKey`'s bare
+ * keydown toggle below), Ctrl on Windows/Linux (a Viewport-level Control
+ * clean tap that calls `toggleCopyMode` directly, so a Ctrl+Z/Ctrl+C chord
+ * never triggers it). While on, the readout is prefixed "Copy ·", the cursor
+ * grows a `+` badge, and the commit becomes a duplicate: one
+ * `duplicate_selection_array` call (count 1, ONE undo step for the whole
+ * selection's copies), the clones becoming the new selection so follow-up
+ * moves chain copies. Object/group copies are independent baked geometry; an
+ * instance copy shares its definition at the offset pose. Sketch selections
+ * copy too: each planned island replays into its sketch at the offset
+ * (`duplicateSketchSelection`) — one gesture per sketch, one undo step per
+ * sketch, curve identity preserved. Tapping the modifier again returns to
+ * plain Move. Holding it through a drag still works: the keydown/clean-tap
+ * on entry toggles copy on.
  *
  * Array copy (SketchUp's N× / N÷): immediately after a copy commits, typing
  * `3x` (or `x3`, `*3` — both token orders are accepted) + Enter re-resolves
@@ -86,6 +90,7 @@ import {
 import type { NodeRef } from '../panels/treeModel'
 import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
+import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 
 export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
@@ -126,12 +131,12 @@ export class MoveTool implements Tool {
         return 'Click the object you want to move.'
       }
       return this.copyMode
-        ? 'Copy is on — click a base point to start the copy. Tap Alt to move instead.'
+        ? `Copy is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to move instead.`
         : 'Click a base point to start the move.'
     }
     return this.copyMode
-      ? 'Click where the copy lands — type an exact distance, arrow keys lock an axis, tap Alt to move instead.'
-      : 'Click the destination — type an exact distance, arrow keys lock an axis, tap Alt to place a copy.'
+      ? `Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to move instead.`
+      : `Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -145,7 +150,8 @@ export class MoveTool implements Tool {
   private lockAxis: 0 | 1 | 2 | null = null
   /** True when the *current* axis lock was set by holding Shift (vs. an arrow). */
   private shiftAxisLock: boolean = false
-  /** Durable copy toggle (tap Option/Alt) — while true, commits duplicate. */
+  /** Durable copy toggle (tap Option on macOS, Ctrl elsewhere — see
+   *  `toggleCopyMode`) — while true, commits duplicate. */
   private copyMode: boolean = false
   /** VCB buffer — raw string being typed by the user */
   private typed: string = ''
@@ -245,6 +251,23 @@ export class MoveTool implements Tool {
     this.instanceGroupGetter = instanceGroupGetter
     this.onCopyModeChange = onCopyModeChange
     this.onArrayCommit = onArrayCommit ?? onCommit
+  }
+
+  /**
+   * Flip the durable copy toggle. Called from `onKey`'s bare Option/Alt tap
+   * on macOS, and — duck-typed by method name — from the Viewport's
+   * window-scope Control clean tap on Windows/Linux (see `platform.ts`'s
+   * `COPY_MODIFIER_KEY`). Same effect either way: flips `copyMode`, notifies
+   * the cursor badge, and refreshes the mid-gesture measurement readout so
+   * the "Copy · " prefix appears/disappears immediately rather than waiting
+   * for the next pointer move.
+   */
+  toggleCopyMode(): void {
+    this.copyMode = !this.copyMode
+    this.onCopyModeChange(this.copyMode)
+    if (this.stage.kind === 'base') {
+      this._reportMeasurement(this.stage.base, this.stage.dest)
+    }
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
@@ -444,18 +467,23 @@ export class MoveTool implements Tool {
       return
     }
 
-    // ── Durable copy toggle: TAP Alt/Option to flip, any stage ──
+    // ── Durable copy toggle: TAP Option to flip, any stage — macOS only ──
     // A toggle rather than hold-to-copy so an exact distance can be typed
     // afterwards (macOS Option+digit would otherwise mangle the keystrokes).
     // Modifier keys don't autorepeat everywhere, but guard anyway.
-    if (ev.key === 'Alt') {
+    // Windows/Linux use Ctrl instead (SketchUp's own split): a bare Control
+    // keydown reports `ctrlKey: true` on itself, so the generic dispatch that
+    // reaches `onKey` never carries it (see Viewport's `onKeyDown`, gated on
+    // `!isMod`) — that platform's toggle is armed/fired entirely from the
+    // Viewport's window-scope Control clean tap instead, which calls
+    // `toggleCopyMode` directly (see `platform.ts`'s `COPY_MODIFIER_KEY` and
+    // `cleanModifierTap.ts` — the clean tap is also what makes a Ctrl+Z/
+    // Ctrl+C chord safe there, which a bare keydown toggle like this one
+    // cannot guarantee).
+    if (isMac && ev.key === 'Alt') {
       if (!ev.repeat) {
         ev.preventDefault() // keep the browser's Alt menu-focus behavior out
-        this.copyMode = !this.copyMode
-        this.onCopyModeChange(this.copyMode)
-        if (this.stage.kind === 'base') {
-          this._reportMeasurement(this.stage.base, this.stage.dest)
-        }
+        this.toggleCopyMode()
       }
       return
     }
@@ -788,7 +816,7 @@ export class MoveTool implements Tool {
     this.onMeasurementCb(this._decorate(formatLength(dist)))
   }
 
-  /** Prefix a "Copy" tag onto the readout while Option/Alt is held. */
+  /** Prefix a "Copy" tag onto the readout while the copy toggle is on. */
   private _decorate(text: string): string {
     return this.copyMode ? `Copy · ${text}` : text
   }

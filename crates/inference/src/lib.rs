@@ -324,6 +324,14 @@ pub const SOFT_AXIS_APERTURE_DEG: f64 = 5.0;
 /// [`SOFT_AXIS_APERTURE_DEG`] in radians — [`cone_test`]'s native unit.
 pub const SOFT_AXIS_APERTURE: f64 = SOFT_AXIS_APERTURE_DEG * std::f64::consts::PI / 180.0;
 
+/// Candidates whose weighted distances differ by no more than this fraction
+/// of the query aperture rank as EQUALLY distant, so the nearest-depth
+/// tie-break decides between them (see the ranking sort in `resolve_impl`).
+/// One millionth of an 8 px aperture is a hundredth of a pixel's worth of
+/// angle at any zoom — far below anything a hand can aim, far above the
+/// ~1e-12 noise a placed instance's pose composition introduces.
+pub const RANK_TIE_FRACTION: f64 = 1e-6;
+
 /// Below this angle (degrees) between the pick ray and a candidate soft-axis
 /// direction, the axis is treated as too EDGE-ON to trust and no candidate
 /// is generated for it at all.
@@ -552,6 +560,13 @@ pub struct Snap {
     /// The inference direction for directional snaps (axis / parallel /
     /// perpendicular), for drawing the dashed guide line.
     pub direction: Option<Vec3>,
+    /// Under an axis lock, the candidate's own position BEFORE it was
+    /// projected onto the locked line (`position` is the projection). The
+    /// UI draws the tie between the two so a "Midpoint on red axis" reads
+    /// as the midpoint it came from, not a point that happens to lie on
+    /// the lock. `None` for every unprojected snap and for the bare lock
+    /// fallback.
+    pub projected_from: Option<Point3>,
 }
 
 /// Internal candidate provenance: an Object element, a committed sketch edge,
@@ -2629,6 +2644,23 @@ impl InferenceScene {
         //     using the scaled value here, not the bare constant, so reach
         //     the scale itself bought in still never steals from a candidate
         //     genuinely inside the normal aperture either. ---
+        // Two candidates whose weighted distances differ by less than
+        // RANK_TIE_FRACTION of the aperture are the SAME distance for
+        // ranking: the difference is float noise (a placed instance's
+        // corner composed through its pose vs. a world vertex read
+        // exactly), and letting it decide would make the tie-break below
+        // — nearest depth first — meaningless exactly where it matters
+        // most: a Top view of a framed wall stacks the slab corner, the
+        // sole plate, the stud top, and both top plates on ONE pixel, and
+        // the user pointing at the wall top means the nearest one.
+        //
+        // The tie is a QUANTIZATION (`rank_distance_bucket`), never an
+        // epsilon comparison: "equal when within `tie`" is not transitive,
+        // so it is not a total order, and the standard sort detects that
+        // on a dense candidate set (a framed floor plan under a Top view)
+        // and panics — which poisoned the whole resolver. Integer buckets
+        // and `f64::total_cmp` make the ordering total by construction.
+        let tie = aperture * RANK_TIE_FRACTION;
         let rank_key = |c: &Candidate| {
             let ref_aperture = if c.0 == SnapKind::OnAxis {
                 soft_axis_aperture.max(aperture)
@@ -2636,16 +2668,20 @@ impl InferenceScene {
                 aperture
             };
             let extended = u8::from(c.1 > ref_aperture);
-            (extended, c.0.rank_group(), c.1 / weights.weight(c.0))
+            (
+                extended,
+                c.0.rank_group(),
+                rank_distance_bucket(c.1 / weights.weight(c.0), tie),
+            )
         };
         candidates.sort_by(|a, b| {
             let (ea, ga, da) = rank_key(a);
             let (eb, gb, db) = rank_key(b);
             ea.cmp(&eb)
                 .then(ga.cmp(&gb))
-                .then(da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal))
+                .then(da.cmp(&db))
                 .then(a.0.cmp(&b.0))
-                .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                .then(a.2.total_cmp(&b.2))
         });
 
         // --- Resolve the lock (direction + anchor) BEFORE picking a winner:
@@ -2894,6 +2930,7 @@ impl InferenceScene {
                         sketch_region_source,
                         sketch_curve_source,
                         direction: Some(lock_dir),
+                        projected_from: Some(*pos),
                     })
                 } else {
                     // Nothing snapped: the directional fallback (`fall`, the
@@ -2917,6 +2954,7 @@ impl InferenceScene {
                         sketch_region_source: None,
                         sketch_curve_source: None,
                         direction: Some(lock_dir),
+                        projected_from: None,
                     })
                 }
             }
@@ -2934,6 +2972,7 @@ impl InferenceScene {
                         sketch_region_source,
                         sketch_curve_source,
                         direction: snap_dir,
+                        projected_from: None,
                     }
                 })
             }
@@ -3201,6 +3240,26 @@ type Candidate = (SnapKind, f64, f64, Point3, Option<Provenance>, Option<Vec3>);
 /// never mix within one query, so the unit only needs to be self-consistent.
 ///
 /// `dir` must already be normalized.
+/// The ranking distance quantized to `tie`-wide buckets: candidates in the
+/// same bucket rank as equally distant and fall through to the nearest-depth
+/// tie-break (see [`RANK_TIE_FRACTION`]). A bucket is an integer, so the
+/// order it induces is total — an "equal within epsilon" comparison is not,
+/// and `sort_by` panics on one. A non-finite or non-positive `tie` (a zero
+/// aperture) degrades to plain distance order rather than dividing by zero.
+/// Saturates at the `i64` range for absurd inputs instead of wrapping.
+pub fn rank_distance_bucket(distance: f64, tie: f64) -> i64 {
+    let usable_tie = tie.is_finite() && tie > 0.0;
+    if !usable_tie {
+        return distance.to_bits() as i64 & i64::MAX;
+    }
+    let q = (distance / tie).round();
+    if q.is_nan() {
+        i64::MAX
+    } else {
+        q.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    }
+}
+
 fn cone_test(
     origin: Point3,
     dir: Vec3,

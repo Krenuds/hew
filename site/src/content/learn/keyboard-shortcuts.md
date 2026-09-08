@@ -67,7 +67,7 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | `Shift` | Lock to the dominant axis (Line, Move, Tape Measure) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool, held) |
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice, Tape Measure); `↓` clears |
 | `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) |
-| `Option`/`Alt` (tap) | Move toggles between moving and copying (stays on until tapped again) |
+| `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate toggles between moving/rotating and copying (stays on until tapped again) |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |
 | `Shift`-click | Add to / remove from the selection (Select tool) |

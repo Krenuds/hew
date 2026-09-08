@@ -458,10 +458,14 @@ const EXPLICIT_SUFFIX_RE = /^(-?(?:\d+\.?\d*|\.\d+))\s*(km|cm|mm|m|ft|in)$/i
 // A hyphen is ONLY valid as the digit-fraction separator ("3-1/2"): dangling
 // or doubled hyphens ("24-", "3--1/2") do not match, so incomplete input is
 // rejected instead of silently committing.
+// The feet and inches components each also accept a leading-dot decimal
+// with no integer part ("-.5\"", ".75\""), parsed exactly as "0.75" would
+// be — matching what a numeric VCB buffer can produce. A bare "." (no
+// digits at all) is not a number and is rejected, same as today.
 // Groups: 1 = feet, 2 = inches, 3/4 = fraction after inches, 5/6 = fraction
 // with no inches part.
 const FEET_INCHES_RE =
-  /^(?:(\d+(?:\.\d+)?)\s*'\s*)?(?:(?:(\d+(?:\.\d+)?)(?:(?:\s+|-)(\d+)\/(\d+))?|(\d+)\/(\d+))\s*"?)?\s*$/
+  /^(?:(\d+\.?\d*|\.\d+)\s*'\s*)?(?:(?:(\d+\.?\d*|\.\d+)(?:(?:\s+|-)(\d+)\/(\d+))?|(\d+)\/(\d+))\s*"?)?\s*$/
 
 /** Parse the feet-inch-fraction grammar to meters, or null if it doesn't
  * match. Shared by the explicit-mark path (any mode) and the imperial
@@ -510,6 +514,9 @@ function parseFeetInchesToMeters(input: string): number | null {
  *     inches for imperial formats). Bare fractions ("1/2", "3 1/2",
  *     "6-3/4") are accepted as bare numbers in EVERY display mode, so
  *     "3 1/2" is 3.5 m in meters mode and 3.5" in the imperial modes.
+ * A leading-dot decimal with no integer part (".75", ".75\"", "-.5",
+ * ".5cm") parses exactly as "0.75"/"0.5" would, in every one of the forms
+ * above — a plain "." with no digits at all is still not a number.
  * Returns null on empty/invalid input — including a dangling fraction
  * hyphen ("24-"), which is incomplete input and must not silently commit
  * as 24. Sign convention: ONE optional leading '-' negates the WHOLE value
@@ -543,10 +550,10 @@ export function parseLengthToMeters(
     return n * METERS_PER_UNIT[format]
   }
 
-  // Imperial: bare-number fast path first (covers "60", "60.125", "-3.5" —
-  // including forms the feet/inch regex below would also accept, but
-  // parseFloat is simpler and exact for this common case).
-  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+  // Imperial: bare-number fast path first (covers "60", "60.125", "-3.5",
+  // "-.5" — including forms the feet/inch regex below would also accept,
+  // but parseFloat is simpler and exact for this common case).
+  if (/^-?(?:\d+\.?\d*|\.\d+)$/.test(trimmed)) {
     const n = parseFloat(trimmed)
     return n * METERS_PER_INCH
   }

@@ -40,6 +40,23 @@ export const isWindows: boolean =
 export const modLabel: string = isMac ? '⌘' : 'Ctrl+'
 
 /**
+ * The platform-appropriate "tap to toggle copy mode" modifier key — SketchUp's
+ * own split: Option on macOS, Control on Windows and Linux (and the web build
+ * running on those platforms). Move and Rotate share this one source of
+ * truth: on macOS the tool's own `onKey` toggles on a bare Option/Alt
+ * keydown (see `MoveTool.toggleCopyMode`/`RotateTool.toggleCopyMode`); on
+ * every other platform the Viewport arms/fires the toggle from a Control
+ * clean tap (`cleanModifierTap.ts`) so a Ctrl+Z/Ctrl+C chord never triggers
+ * it. Only `'Alt'` or `'Control'` — the two forms `KeyboardEvent.key`
+ * reports for these keys everywhere Hew ships.
+ */
+export const COPY_MODIFIER_KEY: 'Alt' | 'Control' = isMac ? 'Alt' : 'Control'
+
+/** Human-readable label for `COPY_MODIFIER_KEY`, for status hints and docs:
+ *  "Option" on macOS, "Ctrl" elsewhere. */
+export const COPY_MODIFIER_LABEL: string = isMac ? 'Option' : 'Ctrl'
+
+/**
  * True on a coarse-pointer input device — touch, with no precise mouse —
  * per the `(pointer: coarse)` media feature. Two independent, unrelated
  * consumers key off this ONE test rather than each rolling their own:

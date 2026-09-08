@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { segmentLength, directionBetween, crossV3, dotV3, rehomePlaneNormal, type V3 } from './lineInput'
+import { segmentLength, directionBetween, crossV3, dotV3, rehomePlaneNormal, fromPointCandidate, type V3 } from './lineInput'
+
+/** The ground plane's own orthonormal basis — origin at world zero, u = red
+ *  (X), v = green (Y) — used by every `fromPointCandidate` test below. */
+const GROUND_ORIGIN: V3 = [0, 0, 0]
+const U: V3 = [1, 0, 0]
+const V: V3 = [0, 1, 0]
 
 describe('segmentLength', () => {
   it('computes Euclidean distance in 3D', () => {
@@ -173,5 +179,118 @@ describe('rehomePlaneNormal', () => {
     // ORTHOGONAL, dot ~ 0) between two inputs that are, for any practical
     // purpose, the same "continue straight" gesture.
     expect(dotV3(normalA, normalB)).toBeGreaterThan(0.9)
+  })
+})
+
+describe('fromPointCandidate', () => {
+  // The classic SketchUp square-close: A(0,0,0) -> B(0,2,0) [green, +Y] ->
+  // C(2,2,0) [red, +X], now heading back from C toward A along green (-Y).
+  // The closing point is (2,0,0): where the current (locked) segment meets
+  // the line through A along red.
+  const A: V3 = [0, 0, 0]
+
+  it('locked: intersects the current segment ray with the line through p', () => {
+    const segStart: V3 = [2, 2, 0] // C
+    const cursor: V3 = [2, 1, 0] // heading toward -Y, not there yet
+    const lockDir: V3 = [0, -1, 0] // locked toward -Y
+    const axisDir: V3 = [1, 0, 0] // red, through A
+    const candidate = fromPointCandidate(A, axisDir, segStart, cursor, lockDir, GROUND_ORIGIN, U, V)
+    expect(candidate).not.toBeNull()
+    expect(candidate![0]).toBeCloseTo(2, 9)
+    expect(candidate![1]).toBeCloseTo(0, 9)
+    expect(candidate![2]).toBeCloseTo(0, 9)
+  })
+
+  it('locked: rejects a candidate behind segStart (s <= 0)', () => {
+    const segStart: V3 = [2, 2, 0]
+    const cursor: V3 = [2, 3, 0] // heading the WRONG way (+Y, away from A's line)
+    const lockDir: V3 = [0, 1, 0]
+    const axisDir: V3 = [1, 0, 0]
+    expect(fromPointCandidate(A, axisDir, segStart, cursor, lockDir, GROUND_ORIGIN, U, V)).toBeNull()
+  })
+
+  it('locked: rejects parallel lines (no unique intersection)', () => {
+    const segStart: V3 = [2, 2, 0]
+    const cursor: V3 = [2, 1, 0]
+    const lockDir: V3 = [0, -1, 0]
+    const axisDir: V3 = [0, 1, 0] // parallel to lockDir
+    expect(fromPointCandidate(A, axisDir, segStart, cursor, lockDir, GROUND_ORIGIN, U, V)).toBeNull()
+  })
+
+  it('unlocked: the foot of the perpendicular from the cursor onto the line', () => {
+    const segStart: V3 = [2, 2, 0]
+    // p = A = (0,0,0), axisDir = Y (the line x=0): the foot of the
+    // perpendicular from any cursor is (0, cursor.y, 0).
+    const cursor: V3 = [2.1, 0.3, 0]
+    const axisDir: V3 = [0, 1, 0]
+    const candidate = fromPointCandidate(A, axisDir, segStart, cursor, null, GROUND_ORIGIN, U, V)
+    expect(candidate).not.toBeNull()
+    expect(candidate![0]).toBeCloseTo(0, 9)
+    expect(candidate![1]).toBeCloseTo(0.3, 9)
+    expect(candidate![2]).toBeCloseTo(0, 9)
+  })
+
+  it('rejects an axis direction with no usable in-plane component', () => {
+    // The plane basis here is the ground plane (u=X, v=Y); an axisDir along
+    // the plane's own NORMAL (Z) projects to zero in-plane and must be
+    // rejected — the same treatment as a literally parallel line.
+    const segStart: V3 = [2, 2, 0]
+    const cursor: V3 = [2, 1, 0]
+    const lockDir: V3 = [0, -1, 0]
+    const axisDir: V3 = [0, 0, 1] // blue, perpendicular to the ground plane
+    expect(fromPointCandidate(A, axisDir, segStart, cursor, lockDir, GROUND_ORIGIN, U, V)).toBeNull()
+  })
+
+  it('rejects an earlier vertex that is not on the current plane (a chain that re-homed after two segments)', () => {
+    // A(0,0,0) -> B(1,0,0) -> C(1,1,0) on the ground, then C -> D straight
+    // up re-homes the chain onto the plane x = 1. A is a metre off that
+    // plane; its shadow must not be offered as a closing point.
+    const origin: V3 = [1, 1, 0]
+    const u: V3 = [0, 0, 1]
+    const v: V3 = [0, -1, 0]
+    const segStart: V3 = [1, 1, 1] // D
+    const cursor: V3 = [1, 0.5, 1]
+    expect(fromPointCandidate(A, [0, 1, 0], segStart, cursor, null, origin, u, v)).toBeNull()
+    // B is on x = 1 and does qualify.
+    expect(fromPointCandidate([1, 0, 0], [0, 0, 1], segStart, cursor, null, origin, u, v)).not.toBeNull()
+  })
+
+  it('rejects a lock or axis direction that leaves the plane', () => {
+    // A tilted plane through the origin with normal (1,0,1)/sqrt2: the blue
+    // axis is oblique to it, so a segment locked to blue leaves the plane
+    // and the line through p along red does not lie in it either.
+    const s = Math.SQRT1_2
+    const u: V3 = [0, 1, 0]
+    const v: V3 = [-s, 0, s]
+    const segStart: V3 = [-1, 1, 1] // on the plane: x + z = 0
+    const cursor: V3 = [-1, 0.5, 1]
+    expect(fromPointCandidate(A, [0, 1, 0], segStart, cursor, [0, 0, 1], GROUND_ORIGIN, u, v)).toBeNull()
+    expect(fromPointCandidate(A, [1, 0, 0], segStart, cursor, null, GROUND_ORIGIN, u, v)).toBeNull()
+    // The same query with an in-plane lock (toward -Y) against the in-plane
+    // line through A along v has a real intersection at (-1, 0, 1).
+    const hit = fromPointCandidate(A, v, segStart, cursor, [0, -1, 0], GROUND_ORIGIN, u, v)
+    expect(hit).not.toBeNull()
+    expect(hit![0]).toBeCloseTo(-1, 9)
+    expect(hit![1]).toBeCloseTo(0, 9)
+    expect(hit![2]).toBeCloseTo(1, 9)
+  })
+
+  it('works on a non-ground plane via its own (u, v) basis', () => {
+    // A vertical plane: origin (0,0,0), u = X, v = Z (so "up" in this
+    // plane's 2D coordinates is world Z). A = (0,0,0); segment locked along
+    // v (world Z) from segStart (2,0,2), heading down (-Z); axisDir = u
+    // (world X) through A. Expected closing point: (2, 0, 0).
+    const planeU: V3 = [1, 0, 0]
+    const planeV: V3 = [0, 0, 1]
+    const origin: V3 = [0, 0, 0]
+    const segStart: V3 = [2, 0, 2]
+    const cursor: V3 = [2, 0, 1]
+    const lockDir: V3 = [0, 0, -1]
+    const axisDir: V3 = [1, 0, 0]
+    const candidate = fromPointCandidate(A, axisDir, segStart, cursor, lockDir, origin, planeU, planeV)
+    expect(candidate).not.toBeNull()
+    expect(candidate![0]).toBeCloseTo(2, 9)
+    expect(candidate![1]).toBeCloseTo(0, 9)
+    expect(candidate![2]).toBeCloseTo(0, 9)
   })
 })

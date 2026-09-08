@@ -225,3 +225,230 @@ describe('LineTool — instance editing context (component-edit-parity.md phase 
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
   })
 })
+
+/** Minimal fake `KeyboardEvent` — `onKey` only reads `.key`/`.repeat`/
+ *  `.preventDefault`. Mirrors MoveTool.test.ts's/RotateTool.test.ts's own
+ *  helper. */
+function makeKeyEvent(key: string, opts: { repeat?: boolean } = {}): KeyboardEvent {
+  return { key, repeat: opts.repeat ?? false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
+}
+
+// From-point closing inference (module doc — SketchUp's "draw three sides
+// of a square, the fourth snaps shut"): a chain A(0,0,0) -> B(2,2,0), so the
+// current segment starts at S=B with the only earlier vertex P=A. Every
+// candidate test below hovers near (2,0,0) — where a segment locked toward
+// -Y from B meets the line through A along red (X) — or near (0,1,0) —
+// where the foot of a perpendicular from an UNLOCKED cursor lands on the
+// line through A along green (Y). `makeWasmScene`'s default `axes()` is the
+// world-identity frame, so red=X/green=Y/blue=Z throughout.
+describe('LineTool — from-point closing inference', () => {
+  function startTwoPointChain(tool: LineTool): void {
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // A
+    tool.onPointerDown(makeSnap({ x: 2, y: 2, z: 0 }), rayThrough(2, 2)) // B — anchors S
+  }
+
+  it('locked: candidate is where the locked segment meets the line through the earlier vertex', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    startTwoPointChain(tool)
+    tool.onKey(makeKeyEvent('ArrowLeft')) // lock green (Y) — arrowToAxis: ArrowLeft -> 1
+
+    // A soft/weak resolve near the true closing point (2, 0, 0) — 5 mm off,
+    // well inside the 0.02 m fallback tolerance (no camera feed wired here).
+    tool.onPointerMove(makeSnap({ x: 2, y: 0.005, z: 0, kind: 'on-axis', direction: [0, -1, 0] }), rayThrough(2, 0.005))
+
+    expect(tool.lastSnap).not.toBeNull()
+    expect(tool.lastSnap!.kind).toBe('from-point')
+    expect(tool.lastSnap!.x).toBeCloseTo(2, 9)
+    expect(tool.lastSnap!.y).toBeCloseTo(0, 9)
+    expect(tool.lastSnap!.z).toBeCloseTo(0, 9)
+    // direction is the CANDIDATE axis (red, through A) — not the lock
+    // direction (green) the segment itself is traveling along.
+    expect(tool.lastSnap!.direction).toEqual([1, 0, 0])
+
+    // The click commits exactly at the candidate — never the raw 5 mm-off
+    // point underneath it (a click must land where the chip/preview showed
+    // it would).
+    tool.onPointerDown(makeSnap({ x: 2, y: 0.005, z: 0, kind: 'on-axis', direction: [0, -1, 0] }), rayThrough(2, 0.005))
+    const last = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls.at(-1)!
+    expect(last.slice(4, 7)).toEqual([2, 0, 0])
+  })
+
+  it('unlocked: candidate is the foot of the perpendicular from the cursor', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    startTwoPointChain(tool)
+    // No lock. Cursor sits 1 cm off the line x=0 through A (green axis).
+    tool.onPointerMove(makeSnap({ x: 0.01, y: 1, z: 0, kind: 'ground' }), rayThrough(0.01, 1))
+
+    expect(tool.lastSnap).not.toBeNull()
+    expect(tool.lastSnap!.kind).toBe('from-point')
+    expect(tool.lastSnap!.x).toBeCloseTo(0, 9)
+    expect(tool.lastSnap!.y).toBeCloseTo(1, 9)
+    expect(tool.lastSnap!.z).toBeCloseTo(0, 9)
+    expect(tool.lastSnap!.direction).toEqual([0, 1, 0])
+  })
+
+  it('precedence: a precise kernel snap (endpoint) always wins — never overridden', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    startTwoPointChain(tool)
+    tool.onKey(makeKeyEvent('ArrowLeft')) // lock green
+
+    // Same near-(2,0,0) position as the locked test above, but this time
+    // the kernel resolved a PRECISE point (e.g. an existing endpoint) —
+    // must pass through untouched.
+    tool.onPointerMove(makeSnap({ x: 2, y: 0.005, z: 0, kind: 'endpoint' }), rayThrough(2, 0.005))
+
+    expect(tool.lastSnap).not.toBeNull()
+    expect(tool.lastSnap!.kind).toBe('endpoint')
+    expect(tool.lastSnap!.y).toBeCloseTo(0.005, 9) // untouched — NOT snapped to (2,0,0)
+  })
+
+  it('out of tolerance: a weak snap kind far from any candidate line is left alone', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    startTwoPointChain(tool)
+    tool.onKey(makeKeyEvent('ArrowLeft')) // lock green
+
+    // Locked toward -Y, but 0.5 m off the (2,0,0) closing point — far
+    // outside the 0.02 m fallback tolerance.
+    tool.onPointerMove(makeSnap({ x: 2, y: 0.5, z: 0, kind: 'on-axis', direction: [0, -1, 0] }), rayThrough(2, 0.5))
+
+    expect(tool.lastSnap).not.toBeNull()
+    expect(tool.lastSnap!.kind).toBe('on-axis') // no from-point override
+  })
+
+  it('requires at least two committed points — a single anchored point never overrides', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // A only — no B yet
+    tool.onKey(makeKeyEvent('ArrowLeft'))
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 2, z: 0, kind: 'on-axis', direction: [0, 1, 0] }), rayThrough(0, 2))
+
+    expect(tool.lastSnap).not.toBeNull()
+    expect(tool.lastSnap!.kind).toBe('on-axis')
+  })
+})
+
+// Playtest item 7: the first click on an edge shared by two faces adopts
+// whichever face the pick hit; an arrow lock that leaves that face must
+// re-adopt the neighbour holding both the anchor and the lock.
+describe('LineTool — an axis lock that leaves the adopted face re-adopts the neighbouring face', () => {
+  const WEST = new Float64Array([-1, 0, 0])
+  const TOP = new Float64Array([0, 0, 1])
+  // Planes through the anchor (0, 0.5, 0.5): the west face x = 0 and the
+  // top face z = 0.5. `facePlane` may override a face's plane to move it
+  // away from the anchor.
+  const makeScene = (
+    faceNormal: (face: bigint) => Float64Array,
+    picks: bigint[],
+    facePlane?: (face: bigint) => Float64Array,
+  ) => {
+    let call = 0
+    const scene = makeWasmScene({ pick: () => makePick(7n, picks[Math.min(call++, picks.length - 1)]) })
+    ;(scene as unknown as { face_normal: unknown }).face_normal = vi.fn((_o: bigint, f: bigint) => faceNormal(f))
+    ;(scene as unknown as { face_plane: unknown }).face_plane = vi.fn((_o: bigint, f: bigint) => {
+      if (facePlane) return facePlane(f)
+      const n = faceNormal(f)
+      return new Float64Array([0, 0.5, 0.5, n[0], n[1], n[2]])
+    })
+    return scene
+  }
+  const anchorOnWestFace = (scene: WasmScene) => {
+    const { tool } = makeTool(scene)
+    tool.updateDiskScale({ position: { x: -2.2, y: -2.6, z: 2.4 } } as unknown as THREE.Camera, () => 0.001)
+    // The top/west edge midpoint of a unit box 0.5 high; the pick says "west face".
+    tool.onPointerDown(makeSnap({ x: 0, y: 0.5, z: 0.5, kind: 'midpoint' }), rayThrough(0, 0.5))
+    expect(tool.capturingInput()).toBe(true)
+    return tool
+  }
+  const constraintNormal = (tool: LineTool) => tool.snapConstraint(rayThrough(0.5, 0.5))?.constraintPlane?.normal
+
+  it('→ from a west-face anchor moves the chain onto the top face (the lock lies in it)', () => {
+    const scene = makeScene((f) => (f === 3n ? WEST : TOP), [3n, 9n])
+    const tool = anchorOnWestFace(scene)
+    expect(constraintNormal(tool)).toBeUndefined() // a bare anchor is not held to a face yet
+    tool.onKey({ key: 'ArrowRight' } as KeyboardEvent)
+    expect(constraintNormal(tool)).toEqual([0, 0, 1])
+    expect(scene.pick_face).toHaveBeenCalledTimes(2) // the anchor pick + the probe
+  })
+
+  it('↑ from a west-face anchor keeps the west face (blue lies in it)', () => {
+    const scene = makeScene((f) => (f === 3n ? WEST : TOP), [3n, 9n])
+    const tool = anchorOnWestFace(scene)
+    tool.onKey({ key: 'ArrowUp' } as KeyboardEvent)
+    expect(constraintNormal(tool)).toEqual([-1, 0, 0])
+    expect(scene.pick_face).toHaveBeenCalledTimes(1) // no probe needed
+  })
+
+  it('a probe that lands on a face which cannot hold the lock leaves the chain alone', () => {
+    const scene = makeScene(() => WEST, [3n, 9n])
+    const tool = anchorOnWestFace(scene)
+    tool.onKey({ key: 'ArrowRight' } as KeyboardEvent)
+    expect(constraintNormal(tool)).toEqual([-1, 0, 0])
+  })
+
+  it('a compatible face whose plane does not pass through the anchor is not the neighbour', () => {
+    // The probe ray hits a parallel floor 5 m below: right normal, wrong plane.
+    const scene = makeScene(
+      (f) => (f === 3n ? WEST : TOP),
+      [3n, 9n],
+      (f) => (f === 9n ? new Float64Array([0, 0, -5, 0, 0, 1]) : new Float64Array([0, 0.5, 0.5, -1, 0, 0])),
+    )
+    const tool = anchorOnWestFace(scene)
+    tool.onKey({ key: 'ArrowRight' } as KeyboardEvent)
+    expect(constraintNormal(tool)).toEqual([-1, 0, 0])
+  })
+
+  it('a chain with a committed segment never re-adopts', () => {
+    const scene = makeScene((f) => (f === 3n ? WEST : TOP), [3n, 9n])
+    const tool = anchorOnWestFace(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0.8, z: 0.5, kind: 'on-face' }), rayThrough(0, 0.8))
+    tool.onKey({ key: 'ArrowRight' } as KeyboardEvent)
+    expect(constraintNormal(tool)).toEqual([-1, 0, 0])
+  })
+})
+
+// Playtest III: the second point decides which of a shared edge's faces the
+// first click meant, with no lock involved.
+describe('LineTool — the second point of a face chain decides the face', () => {
+  const WEST = new Float64Array([-1, 0, 0])
+  const TOP = new Float64Array([0, 0, 1])
+  const makeScene = (picks: bigint[]) => {
+    let call = 0
+    const scene = makeWasmScene({ pick: () => makePick(7n, picks[Math.min(call++, picks.length - 1)]) })
+    ;(scene as unknown as { face_normal: unknown }).face_normal = vi.fn((_o: bigint, f: bigint) => (f === 3n ? WEST : TOP))
+    ;(scene as unknown as { face_plane: unknown }).face_plane = vi.fn((_o: bigint, f: bigint) =>
+      f === 3n ? new Float64Array([0, 0.5, 0.5, -1, 0, 0]) : new Float64Array([0, 0.5, 0.5, 0, 0, 1]),
+    )
+    return scene
+  }
+  const constraint = (tool: LineTool) => tool.snapConstraint(rayThrough(0.5, 0.5))
+
+  it('the first segment is not held to the adopted face; a second point on the neighbour moves the chain there', () => {
+    const scene = makeScene([3n, 9n])
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0.5, z: 0.5, kind: 'midpoint' }), rayThrough(0, 0.5))
+    expect(constraint(tool)?.constraintPlane).toBeUndefined() // free until the second point
+    expect(constraint(tool)?.anchor).toEqual([0, 0.5, 0.5])
+    // Hover a point on the TOP face (z = 0.5, x > 0): off the west plane.
+    tool.onPointerMove(makeSnap({ x: 0.6, y: 0.5, z: 0.5, kind: 'on-face' }), rayThrough(0.6, 0.5))
+    tool.onPointerDown(makeSnap({ x: 0.6, y: 0.5, z: 0.5, kind: 'on-face' }), rayThrough(0.6, 0.5))
+    // From the second segment on, the chain is held to the top face.
+    expect(constraint(tool)?.constraintPlane?.normal).toEqual([0, 0, 1])
+  })
+
+  it('a second point on neither face is projected onto the adopted face', () => {
+    const scene = makeScene([3n, 9n])
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0.5, z: 0.5, kind: 'midpoint' }), rayThrough(0, 0.5))
+    // A point on neither plane (x = 0.3, z = 0.2), seen along a ray that
+    // crosses the west face: the click lands on the west face instead.
+    const ray: Ray = { origin: [2, 0.8, 0.2], direction: [-1, 0, 0] }
+    tool.onPointerDown(makeSnap({ x: 0.3, y: 0.8, z: 0.2, kind: 'endpoint' }), ray)
+    expect(onToast).not.toHaveBeenCalled()
+    expect(constraint(tool)?.constraintPlane?.normal).toEqual([-1, 0, 0])
+  })
+})

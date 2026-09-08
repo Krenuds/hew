@@ -347,6 +347,8 @@ export interface HewTestHarness {
    * should render, without duplicating the offset arithmetic itself.
    */
   getLinearDimensionEndpoints(id: string): { a1: Vec3; b1: Vec3 } | null
+  /** The two snapped ANCHOR points of a linear dimension (before the offset). */
+  getLinearDimensionAnchors(id: string): { a: Vec3; b: Vec3 } | null
 
   /**
    * Add a linear dimension directly (free anchors, no node), bypassing
@@ -1428,6 +1430,15 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getAnnotationDetached: (id) => query((s) => s.annotation_detached(BigInt(id))),
     getAnnotationLabel: (id) => deps.getViewportApi()?.getAnnotationLabel(BigInt(id)) ?? null,
     getAnnotationTextWorldPosition: (id) => deps.getViewportApi()?.getAnnotationTextWorldPosition(BigInt(id)) ?? null,
+    getLinearDimensionAnchors: (id) =>
+      query((s) => {
+        const bid = BigInt(id)
+        if (s.annotation_kind(bid) !== 'linear') return null
+        const a = s.annotation_anchor_point(bid, 0)
+        const b = s.annotation_anchor_point(bid, 1)
+        if (a === undefined || b === undefined) return null
+        return { a: [a[0], a[1], a[2]] as Vec3, b: [b[0], b[1], b[2]] as Vec3 }
+      }),
     getLinearDimensionEndpoints: (id) =>
       query((s) => {
         const bid = BigInt(id)

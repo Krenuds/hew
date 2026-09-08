@@ -116,3 +116,107 @@ export function rehomePlaneNormal(segDir: V3, prevDir: V3 | null, viewDir: V3): 
   const alen = Math.hypot(arbitrary[0], arbitrary[1], arbitrary[2])
   return [arbitrary[0] / alen, arbitrary[1] / alen, arbitrary[2] / alen]
 }
+
+/** Below this magnitude, a direction's projection onto the plane (or two
+ *  projected directions' 2D cross product) is treated as degenerate by
+ *  `fromPointCandidate` — either "this axis has no usable in-plane
+ *  component" (near-perpendicular to the plane) or "these two projected
+ *  directions are parallel" (no unique intersection). A plain numerical
+ *  guard, not a kernel geometry tolerance. */
+const FROM_POINT_DEGENERATE_EPS = 1e-9
+
+/** Largest component along the plane normal a `fromPointCandidate` input may
+ *  have and still count as lying in the plane: for points, metres off the
+ *  plane (the kernel's own plane tolerance scale, `GROUND_PLANE_EPS`); for
+ *  unit directions, the sine of the angle out of the plane. Anything beyond
+ *  it is genuinely 3-D, and a 2-D intersection of its shadow would name a
+ *  point the real lines never meet at. */
+const FROM_POINT_PLANE_EPS = 1e-9
+
+/**
+ * The from-point closing-inference candidate (LineTool's module doc —
+ * SketchUp's classic "draw three sides of a square, the fourth snaps
+ * shut"): where the CURRENT segment, from `segStart`, meets an infinite
+ * line through an earlier chain vertex `p` drawn along `axisDir`.
+ *
+ * Everything is computed in the plane's own 2D (u, v) coordinates, so the
+ * inputs must really lie in it: `p` must be on the plane (a chain vertex
+ * committed before the chain re-homed onto this plane need not be), and
+ * `axisDir` and `lockDir` must run in the plane (a world axis oblique to a
+ * tilted plane, or a lock that leaves the plane, does not). Any input with
+ * a component along the plane normal beyond `FROM_POINT_PLANE_EPS` yields no
+ * candidate — projecting it would intersect shadows of lines that never
+ * meet in 3-D. An `axisDir` with (nearly) no component IN the plane (the
+ * blue axis on a ground-plane chain) is rejected the same way.
+ *
+ * - `lockDir` non-null (the current segment is axis-locked along it): the
+ *   candidate is the intersection of the ray `segStart + s * lockDir` (s >
+ *   0 — a segment can only close FORWARD, never behind where it started)
+ *   with the line `p + t * axisDir`. Null if the two projected directions
+ *   are parallel, or the solved `s` isn't positive.
+ * - `lockDir` null (unlocked): the candidate is the foot of the
+ *   perpendicular from `cursor` onto the line `p + t * axisDir`.
+ *
+ * Returns null whenever no well-defined candidate exists (see above) —
+ * never throws.
+ */
+export function fromPointCandidate(
+  p: V3,
+  axisDir: V3,
+  segStart: V3,
+  cursor: V3,
+  lockDir: V3 | null,
+  planeOrigin: V3,
+  planeU: V3,
+  planeV: V3,
+  epsilon = FROM_POINT_DEGENERATE_EPS,
+): V3 | null {
+  const toUv = (pt: V3): [number, number] => {
+    const dx = pt[0] - planeOrigin[0]
+    const dy = pt[1] - planeOrigin[1]
+    const dz = pt[2] - planeOrigin[2]
+    return [dx * planeU[0] + dy * planeU[1] + dz * planeU[2], dx * planeV[0] + dy * planeV[1] + dz * planeV[2]]
+  }
+  const dirUv = (dir: V3): [number, number] => [dotV3(dir, planeU), dotV3(dir, planeV)]
+
+  // In-plane guard: the plane normal is u × v for an orthonormal basis.
+  const n: V3 = crossV3(planeU, planeV)
+  const offPlane = (pt: V3): boolean =>
+    Math.abs((pt[0] - planeOrigin[0]) * n[0] + (pt[1] - planeOrigin[1]) * n[1] + (pt[2] - planeOrigin[2]) * n[2]) >
+    FROM_POINT_PLANE_EPS
+  if (offPlane(p)) return null
+  if (Math.abs(dotV3(axisDir, n)) > FROM_POINT_PLANE_EPS) return null
+  if (lockDir !== null && Math.abs(dotV3(lockDir, n)) > FROM_POINT_PLANE_EPS) return null
+
+  const pUv = toUv(p)
+  const dUv = dirUv(axisDir)
+  if (Math.hypot(dUv[0], dUv[1]) < epsilon) return null
+
+  let resultUv: [number, number]
+  if (lockDir !== null) {
+    const sUv = toUv(segStart)
+    const uUv = dirUv(lockDir)
+    if (Math.hypot(uUv[0], uUv[1]) < epsilon) return null
+    // Solve sUv + s*uUv = pUv + t*dUv for s (2×2 linear system; standard
+    // line-line intersection in 2D — see the doc comment above).
+    const denom = uUv[0] * dUv[1] - uUv[1] * dUv[0]
+    if (Math.abs(denom) < epsilon) return null // parallel
+    const rx = pUv[0] - sUv[0]
+    const ry = pUv[1] - sUv[1]
+    const s = (rx * dUv[1] - ry * dUv[0]) / denom
+    if (s <= epsilon) return null // must close FORWARD from segStart
+    resultUv = [sUv[0] + s * uUv[0], sUv[1] + s * uUv[1]]
+  } else {
+    const cUv = toUv(cursor)
+    const wx = cUv[0] - pUv[0]
+    const wy = cUv[1] - pUv[1]
+    const t = (wx * dUv[0] + wy * dUv[1]) / (dUv[0] * dUv[0] + dUv[1] * dUv[1])
+    resultUv = [pUv[0] + t * dUv[0], pUv[1] + t * dUv[1]]
+  }
+
+  return [
+    planeOrigin[0] + resultUv[0] * planeU[0] + resultUv[1] * planeV[0],
+    planeOrigin[1] + resultUv[0] * planeU[1] + resultUv[1] * planeV[1],
+    planeOrigin[2] + resultUv[0] * planeU[2] + resultUv[1] * planeV[2],
+  ]
+}

@@ -83,16 +83,82 @@ import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { planeFromSketch, SketchPickCache, type DrawPlane } from './drawPlane'
+import {
+  planeFromSketch,
+  axisDrawPlane,
+  isGroundPlane,
+  isPointOnDrawPlane,
+  groundDrawPlane,
+  SketchPickCache,
+  type DrawPlane,
+} from './drawPlane'
 import { formatLength } from '../settings/units'
 import { crossV3, normalizeV3, facePlaneBasis, rayPlaneIntersect, type V3 } from '../viewport/geoHelpers'
 import { friendlyErrorText } from '../kernelErrors'
-import { axisDimensionPlane, freshAxisPlaneDragState, lockedDimensionPlaneNormal, buildRadialGeometry, chordPassesNearCentre } from '../viewport/annotationLayout'
+import {
+  axisDimensionPlane,
+  freshAxisPlaneDragState,
+  lockedDimensionPlaneNormal,
+  buildRadialGeometry,
+  chordPassesNearCentre,
+  findAlignmentSnap,
+  type DimensionLineCandidate,
+} from '../viewport/annotationLayout'
 import { nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { worldFaceNormal } from './faceDraw'
+import { projectPointOntoPlane } from './tapeOffset'
+import { axisColorsForTheme } from '../viewport/axisColors'
+import { getResolvedTheme } from '../settings/theme'
 
 /** Rubber-band preview color — matches `fatLine.ts`'s `PREVIEW_LINE_STYLE`
  * blue used by the draw tools' own gesture previews. */
-const PREVIEW_COLOR = 0x4d90ff
+export const PREVIEW_COLOR = 0x4d90ff
+
+/** Snap kinds eligible to be honored OFF the `have-a` gesture plane, once
+ *  one is frozen (design v1.1 Lane E "Dimensions on-plane") — deliberate,
+ *  precise point inferences the user aimed at directly. Every other kind
+ *  (`on-edge`, `on-face`, `on-axis`, `on-guide`, and the `plane`/`ground`
+ *  synthetic fallbacks) is projected onto the frozen plane before use — see
+ *  `_haveAPoint`. Eligibility is necessary but not sufficient: a member of
+ *  this set is honored only when its own displacement off the plane is
+ *  actually VISIBLE from the current camera (`_offPlaneDisplacementVisible`)
+ *  — a maintainer playtest finding (a Top-view framed-wall corner has
+ *  several endpoints stacked straight down the view ray — slab, sole plate,
+ *  stud top, top plates — and the old rule honored whichever one the snap
+ *  happened to resolve, landing the dimension off-plane with no visible cue
+ *  that it had). */
+const HAVE_A_OFF_PLANE_KINDS = new Set(['endpoint', 'midpoint', 'center', 'intersection', 'quadrant'])
+
+/** Minimum angle (degrees) between a precise off-plane point's own
+ *  displacement (its raw position minus its projection onto the frozen
+ *  `have-a` plane) and the camera's view direction for that displacement to
+ *  count as VISIBLE (`_offPlaneDisplacementVisible`) — below this the
+ *  displacement reads as coplanar on screen no matter how large it is in
+ *  world space (the stacked-corner defect: a stud top 7cm under the top
+ *  plates, viewed from directly above, has its ENTIRE displacement running
+ *  along the view ray). 2 degrees, not 0: floating-point/camera noise can
+ *  put a displacement a hair off exactly parallel even when the user's
+ *  intent (and every practical framing) is a dead-straight Top/Front/Right
+ *  view, and an honored point that then renders one pixel off-plane would
+ *  be worse than a projected one that renders exactly on it. */
+const OFF_PLANE_VISIBLE_MIN_DEG = 2
+const OFF_PLANE_VISIBLE_MIN_SIN = Math.sin((OFF_PLANE_VISIBLE_MIN_DEG * Math.PI) / 180)
+
+/** Screen-pixel radius (`ALIGN_SNAP_PX`) within which the have-b drag's
+ *  current offset point must pass a candidate dimension's own line for the
+ *  row-alignment snap to take it (`_alignmentTolerance`/`findAlignmentSnap`
+ *  in `annotationLayout.ts`) — the same acquire-radius SHAPE as ordinary
+ *  point snapping, just tool-local rather than routed through SnapService
+ *  (this is a dimension-to-dimension relationship SnapService's kernel-fed
+ *  candidates know nothing about). */
+const ALIGN_SNAP_PX = 12
+
+/** World-space alignment-snap tolerance used when no live pixel scale has
+ *  been fed in yet (`updateDiskScale` never called — every legacy unit
+ *  test, and the very first frame after this tool activates) — a fixed
+ *  fallback rather than skipping the snap outright, so it is still testable
+ *  and usable before the first `updateDiskScale` tick lands. */
+const ALIGN_FALLBACK_TOLERANCE_M = 0.15
 
 export type OnAnnotationCreated = () => void
 export type OnToast = (message: string, code?: string) => void
@@ -297,7 +363,21 @@ function isFullCircle(wasmScene: WasmScene, sketch: bigint, curveHandle: bigint)
 
 type LinearStage =
   | { kind: 'idle' }
-  | { kind: 'have-a'; aNode: { kind: number; id: bigint } | null; aPoint: V3; gesturePlane: DrawPlane | null }
+  | {
+      kind: 'have-a'
+      aNode: { kind: number; id: bigint } | null
+      aPoint: V3
+      gesturePlane: DrawPlane | null
+      /** Whether `gesturePlane` came from a hovered SKETCH's own plane
+       *  (`_resolveGesturePlane`), as opposed to the design v1.1 freeze's
+       *  lock/on-face/view-aligned fallback (`_freezeGesturePlane`). Only an
+       *  adopted plane carries forward as `have-b`'s hard override
+       *  (`_workingPlane`'s existing behavior, unchanged); a freeze-derived
+       *  plane instead just SEEDS `have-b`'s `axisDimensionPlane` latch so
+       *  the drag starts continuous with it, without pinning the drag to a
+       *  plane computed before any baseline existed. */
+      gesturePlaneAdopted: boolean
+    }
   | {
       kind: 'have-b'
       aNode: { kind: number; id: bigint } | null
@@ -381,6 +461,32 @@ export class DimensionTool implements Tool {
    * — see its doc comment) — reset whenever a new baseline starts and on
    * cancel, so latching never leaks across gestures. */
   private _axisDragState = freshAxisPlaneDragState()
+  /** Whether the snap most recently handed to `onPointerMove`/`onPointerDown`
+   *  was projected onto the frozen `have-a` gesture plane rather than used
+   *  as-is (`Tool.snapProjected`, TapeMeasureTool's own disclosure pattern)
+   *  — reset every event, set only by `_haveAPoint`. */
+  private _snapProjected = false
+
+  /** The snap last seen on hover — `Viewport.publishSnapCues`'s established
+   *  `'lastSnap' in activeTool` opt-in (PaintTool/OffsetTool/PushPullTool's
+   *  own pattern): reading the cue's kind from HERE instead of the raw
+   *  resolved snap lets this tool report a kind of its own (`'aligned'`,
+   *  the dimension-row alignment snap) without SnapService needing to know
+   *  anything about dimensions. Mirrors the raw snap exactly except while
+   *  the alignment snap is active, so every other cue stays byte-identical
+   *  to before this field existed. */
+  lastSnap: Snap | null = null
+
+  /** Live world-per-pixel feed (`Tool.updateDiskScale`'s doc — feature-
+   *  detected by the Viewport render loop, called once per frame before this
+   *  tool draws anything): the alignment snap's `ALIGN_SNAP_PX` acquire
+   *  radius is a SCREEN distance, and `onPointerMove` only ever carries a
+   *  per-pixel cursor ray, never the camera itself or its projection. `null`
+   *  until the first post-activation frame (every legacy unit test, which
+   *  never wires a camera in) — `_alignmentTolerance` falls back to
+   *  `ALIGN_FALLBACK_TOLERANCE_M` in that case. */
+  private _worldPerPixelFn: ((dist: number) => number) | null = null
+  private _cameraPos: V3 | null = null
 
   constructor(
     wasmScene: WasmScene,
@@ -408,14 +514,40 @@ export class DimensionTool implements Tool {
     this._viewDir = [dir.x, dir.y, dir.z]
   }
 
+  /** Live pixel-scale feed for the dimension-row alignment snap — see
+   *  `_worldPerPixelFn`'s doc. Not used to size any visible disk (unlike
+   *  every other implementor of this hook); this tool just needs the same
+   *  live `worldPerPixel(dist)` callback the on-screen-constant tools do. */
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this._worldPerPixelFn = worldPerPixel
+    this._cameraPos = [camera.position.x, camera.position.y, camera.position.z]
+  }
+
   capturingInput(): boolean {
     return this.stage.kind !== 'idle'
   }
 
-  snapConstraint(ray?: Ray): { constraintPlane?: { point: V3; normal: V3 } } | null {
+  /** See `_snapProjected`'s doc — `Tool.snapProjected`'s cue-label
+   *  disclosure. */
+  snapProjected(): boolean {
+    return this._snapProjected
+  }
+
+  snapConstraint(ray?: Ray): { constraintPlane?: { point: V3; normal: V3 }; offPlanePoints?: boolean } | null {
     if (this.stage.kind === 'have-a') {
-      const plane = this.stage.gesturePlane
-      if (plane !== null) return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+      // `_haveAPlane` is the LIVE lock (if pressed BETWEEN the two clicks,
+      // it wins immediately) over whatever `_freezeGesturePlane` computed
+      // at the first click — design v1.1 "Dimensions on-plane": the second
+      // point's snap search is constrained to it, with `offPlanePoints` so
+      // a precise point (endpoint/midpoint/center/quadrant/intersection)
+      // elsewhere in space is still reachable — `_haveAPoint` then projects
+      // everything else onto this same plane before it's used, so the
+      // committed baseline always lies in one plane no matter which
+      // candidate won the snap.
+      const plane = this._haveAPlane(this.stage)
+      if (plane !== null) {
+        return { constraintPlane: { point: plane.origin, normal: plane.normal }, offPlanePoints: true }
+      }
       return null
     }
     if (this.stage.kind === 'have-b') {
@@ -440,7 +572,15 @@ export class DimensionTool implements Tool {
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     if (snap === null) return
+    // Reset every event — only the `have-a` branch below (via `_haveAPoint`)
+    // ever sets this true, so a stale `true` from a prior have-a hover can
+    // never leak into another stage's inference-chip disclosure.
+    this._snapProjected = false
     const cursor: V3 = [snap.x, snap.y, snap.z]
+    // Mirrors `snap` exactly except when the have-b branch below overrides
+    // it to report the alignment snap's own `'aligned'` cue kind — see the
+    // field's own doc.
+    this.lastSnap = snap
 
     if (this.stage.kind === 'have-b') {
       const dir = sub(this.stage.bPoint, this.stage.aPoint)
@@ -458,6 +598,25 @@ export class DimensionTool implements Tool {
         const plane = this._workingPlane(this.stage, ray)
         if (plane !== null && plane.hit !== null) cursorForOffset = plane.hit
         this.stage.offset = perpComponent(sub(cursorForOffset, this.stage.aPoint), unit)
+
+        // Dimension-row alignment snap (SketchUp parity): if the drag's
+        // current offset point sits near an existing dimension's own line
+        // that is parallel to this baseline and shares this working plane,
+        // snap collinear with it — see `findAlignmentSnap`. Needs a real
+        // working plane to compare normals against; skipped entirely
+        // without one (the same rare ray-parallel-to-baseline degenerate
+        // case `_workingPlane` itself falls back for).
+        if (plane !== null) {
+          const currentA1 = add(this.stage.aPoint, this.stage.offset)
+          const tol = this._alignmentTolerance(currentA1)
+          const aligned = findAlignmentSnap(
+            this.stage.aPoint, unit, currentA1, plane.normal, this._alignmentCandidates(), tol,
+          )
+          if (aligned !== null) {
+            this.stage.offset = aligned
+            this.lastSnap = { ...snap, kind: 'aligned' }
+          }
+        }
       }
       this._updatePreview()
       const dist = length(sub(this.stage.bPoint, this.stage.aPoint))
@@ -484,12 +643,17 @@ export class DimensionTool implements Tool {
     }
 
     if (this.stage.kind === 'have-a') {
-      this._updatePreview(cursor)
+      // Precise off-plane point kinds are honored as-is; every other kind
+      // is projected onto the frozen gesture plane (design v1.1 "Dimensions
+      // on-plane" — see `_haveAPoint`), so the live rubber-band preview
+      // always matches what a click would actually commit.
+      this._updatePreview(this._haveAPoint(snap, this._haveAPlane(this.stage)))
     }
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
     if (snap === null) return
+    this._snapProjected = false
     const point: V3 = [snap.x, snap.y, snap.z]
 
     if (this.stage.kind === 'idle') {
@@ -509,26 +673,64 @@ export class DimensionTool implements Tool {
         this._updatePreview()
         return
       }
-      // An active arrow-key lock beats sketch-plane adoption (the draw
-      // tools' own "lock overrides adoption" rule) — the probe simply
-      // doesn't run while locked.
-      const gesturePlane = this.planeLock !== null ? null : this._resolveGesturePlane(ray)
-      this.stage = { kind: 'have-a', aNode: anchorNodeFromSnap(snap), aPoint: point, gesturePlane }
+      // The first click always freezes a gesture plane now (design v1.1
+      // "Dimensions on-plane" — see `_freezeGesturePlane`), not just when a
+      // sketch happens to be hovered: without one, the second point's snap
+      // search was unconstrained and could land on the ground plane behind
+      // whatever the user was actually aiming at (e.g. a wall top in Top
+      // view) — the Dimensions bug the design fixes.
+      const frozen = this._freezeGesturePlane(ray, snap, point)
+      this.stage = {
+        kind: 'have-a',
+        aNode: anchorNodeFromSnap(snap),
+        aPoint: point,
+        gesturePlane: frozen?.plane ?? null,
+        gesturePlaneAdopted: frozen?.adopted ?? false,
+      }
       this._updatePreview()
       return
     }
 
     if (this.stage.kind === 'have-a') {
-      if (length(sub(point, this.stage.aPoint)) < 1e-9) return // same point twice — ignore
+      // Same projection the live preview already showed (`_haveAPoint`) —
+      // the committed baseline can never land off the frozen gesture plane
+      // just because the raw snap did.
+      const bPoint = this._haveAPoint(snap, this._haveAPlane(this.stage))
+      if (length(sub(bPoint, this.stage.aPoint)) < 1e-9) return // same point twice — ignore
       this._axisDragState = freshAxisPlaneDragState() // a NEW baseline starts its drag unlatched
+      // Design v1.1 "Dimensions on-plane": only a genuinely ADOPTED sketch
+      // plane carries forward as `have-b`'s hard override (`_workingPlane`'s
+      // pre-existing behavior, unchanged). A lock/on-face/view-aligned
+      // freeze instead just SEEDS the fresh drag state's latch — so the
+      // offset drag starts continuous with the plane the second click was
+      // just constrained to — but ONLY when that click actually WAS
+      // constrained by it: an off-plane-honored precise point
+      // (`HAVE_A_OFF_PLANE_KINDS`, e.g. a real endpoint) never touched the
+      // frozen plane at all, so seeding from it would bias `have-b` toward
+      // a plane the second click had no real relationship to — purely
+      // incidental if the (camera-only, no-drag-information) freeze axis
+      // happens to be perpendicular to the resulting baseline. `_haveAPoint`
+      // already computed exactly this distinction; reusing its raw kind
+      // check here (rather than re-deriving one from the resolved point)
+      // is what keeps this in sync with it. No lock check needed either:
+      // while locked, `_workingPlane` reads `this.planeLock` directly,
+      // regardless of `gesturePlane`/the latch.
+      const frozenPlane = this.stage.gesturePlane
+      const adopted = this.stage.gesturePlaneAdopted
+      if (!adopted && frozenPlane !== null && !HAVE_A_OFF_PLANE_KINDS.has(snap.kind)) {
+        const baseDir = normalizeV3(sub(bPoint, this.stage.aPoint))
+        if (baseDir !== null && Math.abs(dot(baseDir, frozenPlane.normal)) < 1e-6) {
+          this._axisDragState.latched = frozenPlane.normal
+        }
+      }
       this.stage = {
         kind: 'have-b',
         aNode: this.stage.aNode,
         aPoint: this.stage.aPoint,
         bNode: anchorNodeFromSnap(snap),
-        bPoint: point,
+        bPoint,
         offset: [0, 0, 0],
-        gesturePlane: this.stage.gesturePlane,
+        gesturePlane: adopted ? frozenPlane : null,
       }
       this._updatePreview()
       return
@@ -615,6 +817,175 @@ export class DimensionTool implements Tool {
   }
 
   /**
+   * The gesture plane frozen at the FIRST click of a linear dimension
+   * (design v1.1 Lane E "Dimensions on-plane"). Without this, `have-a`'s
+   * `snapConstraint` offered no plane at all unless a sketch happened to be
+   * hovered, so the SECOND point's snap search — and its ground-plane
+   * fallback — was unconstrained: a Top-view dimension across a wall's top
+   * edge could resolve its second endpoint on the literal ground instead of
+   * at the wall's own height, the "Dimensions bug" this fixes.
+   *
+   * Priority, matching the have-b drag's own `_workingPlane` precedence:
+   *   0. An adopted sketch plane under the cursor (`_resolveGesturePlane`)
+   *      — skipped entirely while a lock is active, same "lock beats
+   *      adoption" rule the draw tools use.
+   *   1. An active arrow-key plane lock: the literal axis plane through
+   *      `aPoint` (`axisDrawPlane`, the draw tools' own idle-lock
+   *      convention). This is only a SNAP-SEARCH constraint for the second
+   *      click — once a real baseline exists, `_workingPlane` refines the
+   *      committed working plane into the baseline-perpendicular
+   *      `lockedDimensionPlaneNormal` instead, which this method has no
+   *      baseline yet to compute.
+   *   2. The first click's own snap landing `on-face` on a real object
+   *      face (never a sketch-region fill, which reports `elementKind ===
+   *      'sketch-region'` instead of `'face'`): that face's plane, through
+   *      `aPoint`.
+   *   3. The axis plane through `aPoint` whose normal is most face-on to
+   *      the current camera (Top → the horizontal plane at the click's own
+   *      height; Front → the XZ plane; ISO → whichever axis wins) — `null`
+   *      only when no camera has been wired in yet (every legacy unit test
+   *      that never calls `updateCamera`), mirroring `_workingPlane`'s own
+   *      "no camera → no computed plane" fallback.
+   *
+   * `adopted` is true only for case 0 (a real hovered sketch) — the ONLY
+   * case whose plane should carry forward as `have-b`'s hard override; the
+   * lock/on-face/view-aligned cases instead only SEED `have-b`'s
+   * `axisDimensionPlane` latch (see the `have-a` stage's own doc).
+   */
+  private _freezeGesturePlane(
+    ray: Ray,
+    snap: Snap,
+    aPoint: V3,
+  ): { plane: DrawPlane; adopted: boolean } | null {
+    if (this.planeLock !== null) return { plane: axisDrawPlane(this.planeLock, aPoint), adopted: false }
+
+    const adopted = this._resolveGesturePlane(ray)
+    if (adopted !== null) return { plane: adopted, adopted: true }
+
+    if (snap.elementKind === 'face' && snap.object !== undefined && snap.element !== undefined) {
+      const normal = worldFaceNormal(this.wasmScene, snap.object, snap.element, snap.instance ?? null)
+      if (normal !== null) {
+        const plane = this._planeThroughPoint(aPoint, normal)
+        if (plane !== null) return { plane, adopted: false }
+      }
+    }
+
+    const axis = this._viewAlignedAxis()
+    return axis !== null ? { plane: axisDrawPlane(axis, aPoint), adopted: false } : null
+  }
+
+  /** A `DrawPlane` through `origin` with unit `normal` — the general
+   *  point+normal constructor `axisDrawPlane` doesn't cover (its normal is
+   *  always a literal drawing axis). Mirrors `planeFromSketch`'s own tail:
+   *  the exact `groundDrawPlane()` when the result IS the ground plane, else
+   *  `null` for a degenerate normal. */
+  private _planeThroughPoint(origin: V3, normal: V3): DrawPlane | null {
+    if (isGroundPlane(origin, normal)) return groundDrawPlane()
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return null
+    return { origin, normal, u: basis.u, v: basis.v, ground: false }
+  }
+
+  /** The world axis (0=X, 1=Y, 2=Z) most nearly PARALLEL to the current
+   *  camera view direction — i.e. the axis the camera looks most straight
+   *  along, so the plane NORMAL to it is the most face-on candidate (Top
+   *  view looks down Z → the horizontal XY-normal plane; Front view looks
+   *  along Y → the XZ plane). `null` when no camera has been wired in
+   *  (`updateCamera` never called — every legacy unit test). */
+  private _viewAlignedAxis(): 0 | 1 | 2 | null {
+    if (this._viewDir === null) return null
+    const [ax, ay, az] = [Math.abs(this._viewDir[0]), Math.abs(this._viewDir[1]), Math.abs(this._viewDir[2])]
+    if (ax >= ay && ax >= az) return 0
+    if (ay >= az) return 1
+    return 2
+  }
+
+  /**
+   * The plane `have-a` uses RIGHT NOW, for both `snapConstraint`'s advertised
+   * constraint and `_haveAPoint`'s projection (design v1.1 "Dimensions
+   * on-plane"): a LIVE arrow-key lock always wins, even one pressed AFTER
+   * the first click ("between clicks", per the design) — never mind
+   * whatever `_freezeGesturePlane` computed at click time, exactly the same
+   * "lock beats adoption" precedence the draw tools use everywhere else.
+   * Absent a live lock, the plane frozen at the first click
+   * (`stage.gesturePlane`) stands.
+   */
+  private _haveAPlane(stage: Extract<LinearStage, { kind: 'have-a' }>): DrawPlane | null {
+    if (this.planeLock !== null) return axisDrawPlane(this.planeLock, stage.aPoint)
+    return stage.gesturePlane
+  }
+
+  /**
+   * Resolve the actual point a `have-a`-stage snap contributes (design v1.1
+   * "Dimensions on-plane", as corrected by the maintainer's stacked-corner
+   * playtest finding): a precise point kind (`HAVE_A_OFF_PLANE_KINDS`) is
+   * honored exactly as reported, even off `plane`, but ONLY when its own
+   * displacement off `plane` is actually VISIBLE from the current camera
+   * (`_offPlaneDisplacementVisible`) — mirrors `TapeMeasureTool`'s
+   * `_measureTarget`/`projectPointOntoPlane` pairing, gated by KIND *and*
+   * visibility rather than by plane-membership or kind alone. Every other
+   * kind, and every invisible-displacement precise point, is projected onto
+   * `plane`.
+   *
+   * `plane === null` (no gesture plane was frozen — no camera wired in yet,
+   * the legacy pre-Lane-E test path) returns the raw point unchanged, so
+   * every existing test that never calls `updateCamera` keeps its exact
+   * prior behavior.
+   *
+   * Sets `_snapProjected` to whether this call actually moved the point —
+   * the single write site for it, so `onPointerMove`/`onPointerDown`'s
+   * per-event reset (`this._snapProjected = false`) is the only other
+   * place that touches the field.
+   */
+  private _haveAPoint(snap: Snap, plane: DrawPlane | null): V3 {
+    const raw: V3 = [snap.x, snap.y, snap.z]
+    if (plane === null || isPointOnDrawPlane(raw, plane)) {
+      this._snapProjected = false
+      return raw
+    }
+    if (HAVE_A_OFF_PLANE_KINDS.has(snap.kind) && this._offPlaneDisplacementVisible(raw, plane)) {
+      this._snapProjected = false
+      return raw
+    }
+    this._snapProjected = true
+    return projectPointOntoPlane(raw, plane.origin, plane.normal)
+  }
+
+  /**
+   * Whether a precise point's displacement off `plane` (`raw` minus its own
+   * projection onto `plane`) would be VISIBLE from the current camera — the
+   * maintainer's stacked-corner playtest finding: in a Top view (parallel
+   * projection, looking straight down), every endpoint in a framed wall's
+   * corner — slab, sole plate, stud top, top plates — projects to the SAME
+   * screen pixel, so honoring whichever one the snap happens to resolve
+   * (off the frozen horizontal plane) commits a dimension that LOOKS
+   * coplanar on screen but isn't. Visible iff the angle between the
+   * displacement and `this._viewDir` is at least `OFF_PLANE_VISIBLE_MIN_DEG`
+   * — computed as `|cross(disp̂, vieŵ)| >= sin(that angle)` rather than a
+   * dot-product threshold, since it's the SINE of the angle-from-parallel
+   * that vanishes at both parallel AND antiparallel (a displacement running
+   * either straight toward or straight away from the camera along the view
+   * ray is equally invisible — that's exactly the depth axis).
+   *
+   * `this._viewDir === null` (no camera wired in yet) can't be scored at
+   * all — conservatively treated as NOT visible, so an off-plane precise
+   * point never gets honored on the strength of a camera this tool hasn't
+   * actually observed. `raw` already on `plane` is handled by the caller
+   * before this is ever reached, so a degenerate (near-zero) displacement
+   * here is unreachable in practice; if it somehow occurs, there is nothing
+   * to hide, so it counts as visible.
+   */
+  private _offPlaneDisplacementVisible(raw: V3, plane: DrawPlane): boolean {
+    if (this._viewDir === null) return false
+    const projected = projectPointOntoPlane(raw, plane.origin, plane.normal)
+    const dispDir = normalizeV3(sub(raw, projected))
+    if (dispDir === null) return true
+    const viewDir = normalizeV3(this._viewDir)
+    if (viewDir === null) return false
+    return length(crossV3(dispDir, viewDir)) >= OFF_PLANE_VISIBLE_MIN_SIN
+  }
+
+  /**
    * The linear gesture's WORKING plane for the current baseline — the plane
    * `snapConstraint` advertises and the have-b drag computes its offset in.
    * Priority: arrow-key lock > adopted sketch plane > best axis-aligned
@@ -661,6 +1032,46 @@ export class DimensionTool implements Tool {
     // one event's ray grazed every candidate.
     if (picked === null) return null
     return { point: stage.aPoint, normal: picked.normal, hit: picked.hit }
+  }
+
+  /** World-space alignment-snap tolerance at `atPoint` (`ALIGN_SNAP_PX`
+   *  converted via the live `updateDiskScale` feed, or `ALIGN_FALLBACK_
+   *  TOLERANCE_M` before the first tick of it has landed — see `_worldPer
+   *  PixelFn`'s doc). */
+  private _alignmentTolerance(atPoint: V3): number {
+    if (this._worldPerPixelFn === null || this._cameraPos === null) return ALIGN_FALLBACK_TOLERANCE_M
+    const dist = length(sub(atPoint, this._cameraPos))
+    return this._worldPerPixelFn(dist) * ALIGN_SNAP_PX
+  }
+
+  /** Every EXISTING linear dimension in the document, as the
+   *  `DimensionLineCandidate` shape `findAlignmentSnap` needs: its own drawn
+   *  line (anchor points already offset out — the same `a1`/`b1` convention
+   *  `getLinearDimensionEndpoints` reports) plus its working-plane normal.
+   *  Built fresh every have-b pointer move (no caching) — the document can
+   *  change between moves (undo, another dimension committed) and this list
+   *  is never large enough for that to matter. A candidate missing any
+   *  accessor (a stale/hidden id, or a test double that doesn't mock one) is
+   *  skipped rather than throwing. */
+  private _alignmentCandidates(): DimensionLineCandidate[] {
+    const scene = this.wasmScene
+    if (typeof scene.annotation_ids !== 'function') return []
+    const out: DimensionLineCandidate[] = []
+    for (const id of scene.annotation_ids()) {
+      if (scene.annotation_kind(id) !== 'linear') continue
+      const a = scene.annotation_anchor_point(id, 0)
+      const b = scene.annotation_anchor_point(id, 1)
+      const offset = scene.annotation_offset(id)
+      const plane = scene.annotation_plane(id)
+      if (a === undefined || b === undefined || offset === undefined || plane === undefined) continue
+      const off: V3 = [offset[0], offset[1], offset[2]]
+      out.push({
+        a1: add([a[0], a[1], a[2]], off),
+        b1: add([b[0], b[1], b[2]], off),
+        planeNormal: [plane[3], plane[4], plane[5]],
+      })
+    }
+    return out
   }
 
   /** The kind the off-curve-into-space row of the disambiguation table would
@@ -774,18 +1185,42 @@ export class DimensionTool implements Tool {
     this.cancel()
   }
 
+  /**
+   * The rubber-band preview's own color right now: the active plane lock's
+   * axis color (`AXIS_LOCK_COLOR_NAMES`'s same red/green/blue, sourced from
+   * `axisColorsForTheme` — the exact theme-aware color the draw tools'
+   * own locked previews use, NOT `MoveTool`'s hardcoded non-theme-aware
+   * `AXIS_COLOR`) while a lock is actually driving the working plane, else
+   * the neutral `PREVIEW_COLOR`. Deliberately keyed on `this.planeLock`
+   * alone (a LIVE lock), not on `gesturePlane`/`gesturePlaneAdopted` — a
+   * plane adopted from a hovered sketch, chosen by the camera's own
+   * view-aligned fallback, or seeded from an on-face freeze stays neutral;
+   * only the user's own explicit arrow-key choice gets colored, per the
+   * maintainer's playtest note. Only `have-a`/`have-b` use this (their
+   * baseline/dimension-and-extension-line previews are exactly what a plane
+   * lock affects); the radial gesture's preview stays neutral unconditionally
+   * (arrows are left alone in `have-curve` — see `onKey`).
+   */
+  private _previewColor(): number {
+    if (this.planeLock === null) return PREVIEW_COLOR
+    return axisColorsForTheme(getResolvedTheme())[this.planeLock]
+  }
+
   /** Rebuild the live rubber-band preview from the current stage. */
   private _updatePreview(hoverPoint?: V3): void {
     this._clearPreview()
     let positions: number[] | null = null
+    let color: number = PREVIEW_COLOR
 
     if (this.stage.kind === 'have-a' && hoverPoint !== undefined) {
       positions = [...this.stage.aPoint, ...hoverPoint]
+      color = this._previewColor()
     } else if (this.stage.kind === 'have-b') {
       const { aPoint, bPoint, offset } = this.stage
       const a1 = add(aPoint, offset)
       const b1 = add(bPoint, offset)
       positions = [...aPoint, ...a1, ...bPoint, ...b1, ...a1, ...b1]
+      color = this._previewColor()
     } else if (this.stage.kind === 'have-curve') {
       const cls = this._classify(this.stage, this.stage.lastSnap, this.stage.lastCursor)
       if (cls.kind === 'radius' || cls.kind === 'diameter') {
@@ -809,7 +1244,7 @@ export class DimensionTool implements Tool {
     // other tool's in-progress preview draws on top too; this is NOT the
     // overlay-depth bug findings 2/3 fix, and must not be "fixed" to match
     // the now-depth-tested committed annotations).
-    const mat = new THREE.LineBasicMaterial({ color: PREVIEW_COLOR, depthTest: false })
+    const mat = new THREE.LineBasicMaterial({ color, depthTest: false })
     this.previewLine = new THREE.LineSegments(geo, mat)
     this.preview.add(this.previewLine)
   }

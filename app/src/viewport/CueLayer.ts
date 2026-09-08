@@ -9,6 +9,9 @@
  *       on-face    → blue    #0055cc
  *       on-guide   → purple  #9933cc  (construction guide)
  *       on-axis    → axis color (X=red, Y=green, Z=blue; unknown=magenta)
+ *       from-point → axis color, same as on-axis (LineTool's from-point
+ *                    closing inference — a tool-local kind, never emitted
+ *                    by SnapService itself)
  *       ground     → gray    #888888  (fallback — no kernel snap)
  *       plane      → gray    #888888  (constraint-plane fallback, same role)
  *       other      → white   #ffffff
@@ -87,6 +90,37 @@ function buildGuideLine(
   return ls
 }
 
+/** The dotted tie from an axis-locked snap's source point (`projectedFrom`)
+ *  to its projection on the locked line — SketchUp's "projected inference"
+ *  visual: it says WHICH midpoint or corner the point on the lock came
+ *  from. Same dash rhythm as the guide line, solid-ish so it reads over
+ *  geometry. */
+function buildTieLine(from: THREE.Vector3, to: THREE.Vector3, color: number): THREE.LineSegments {
+  const d = to.clone().sub(from)
+  const len = d.length()
+  if (len < 1e-9) return new THREE.LineSegments()
+  const dashes = Math.max(4, Math.min(40, Math.round(len / TIE_DASH_LENGTH_M) * 2))
+  const pts: number[] = []
+  for (let i = 0; i < dashes; i += 2) {
+    const t0 = i / dashes
+    const t1 = (i + 1) / dashes
+    pts.push(
+      from.x + d.x * t0, from.y + d.y * t0, from.z + d.z * t0,
+      from.x + d.x * t1, from.y + d.y * t1, from.z + d.z * t1,
+    )
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
+  const mat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.8 })
+  const ls = new THREE.LineSegments(geo, mat)
+  ls.renderOrder = 998
+  return ls
+}
+
+/** Nominal dash length of the projection tie (metres, before the 4..40 dash
+ *  clamp) — short enough to read as dotted at drawing scale. */
+const TIE_DASH_LENGTH_M = 0.02
+
 export class CueLayer {
   readonly group: THREE.Group
 
@@ -128,7 +162,10 @@ export class CueLayer {
 
     // Determine color
     let color = snapColor(snap.kind)
-    if (snap.kind === 'on-axis' && snap.direction !== undefined) {
+    // `'from-point'` is LineTool's from-point closing inference (module
+    // doc, `_findFromPointCandidate`) — colored exactly like `'on-axis'`,
+    // by the dominant component of the axis it rides.
+    if ((snap.kind === 'on-axis' || snap.kind === 'from-point') && snap.direction !== undefined) {
       // Infer axis color from dominant direction component (—
       // theme-aware: light/dark axis colors differ, per 01_design_tokens.md).
       const [dx, dy, dz] = snap.direction
@@ -144,6 +181,13 @@ export class CueLayer {
     // layer can't do — it needs depth + world extent along the axis/edge).
     if (snap.direction !== undefined && !(suppressAxisLine && snap.kind === 'on-axis')) {
       this.group.add(buildGuideLine(pos, snap.direction, color))
+    }
+    // A locked snap projected from a real point: tie the two together in
+    // the snap's own kind colour (the axis colour above belongs to the
+    // guide line, not to the midpoint/corner the tie explains).
+    if (snap.projectedFrom !== undefined) {
+      const from = new THREE.Vector3(...snap.projectedFrom)
+      this.group.add(buildTieLine(from, pos, snapColor(snap.kind)))
     }
   }
 

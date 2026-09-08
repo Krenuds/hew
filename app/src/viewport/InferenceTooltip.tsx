@@ -23,6 +23,14 @@ const KIND_LABEL: Record<string, string> = {
   'on-axis': 'On Axis',
   ground: 'Ground',
   plane: 'On Plane',
+  /** `DimensionTool`'s dimension-row alignment snap (`have-b`'s
+   *  `findAlignmentSnap`) — a tool-local cue kind, never emitted by
+   *  SnapService itself (see `DimensionTool.lastSnap`'s doc). */
+  aligned: 'Aligned',
+  /** `LineTool`'s from-point closing inference (module doc,
+   *  `_findFromPointCandidate`) — another tool-local cue kind, same
+   *  `lastSnap` opt-in as `aligned` above, never emitted by SnapService. */
+  'from-point': 'From Point',
 }
 
 /** The human-readable label for a snap `kind` (`'on-edge'` → `'On Edge'`,

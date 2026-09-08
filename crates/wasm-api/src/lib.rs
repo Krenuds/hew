@@ -1913,6 +1913,13 @@ impl SnapJs {
     pub fn direction(&self) -> Option<Vec<f64>> {
         self.snap.direction.map(|d| vec![d.x, d.y, d.z])
     }
+
+    /// Where an axis-locked snap was projected FROM (the candidate's own
+    /// position), or `undefined` for an unprojected snap — see
+    /// `inference::Snap::projected_from`.
+    pub fn projected_from(&self) -> Option<Vec<f64>> {
+        self.snap.projected_from.map(|p| vec![p.x, p.y, p.z])
+    }
 }
 
 // ------------------------------------------------------------------- scene

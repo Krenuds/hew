@@ -31,6 +31,10 @@ import {
   chordPassesNearCentre,
   buildRadialGeometry,
   pushCenterTick,
+  directionsParallel,
+  collinearOffset,
+  findAlignmentSnap,
+  type DimensionLineCandidate,
 } from './annotationLayout'
 
 function perspCamera(pos: [number, number, number], target: [number, number, number], fov = 45): THREE.PerspectiveCamera {
@@ -437,5 +441,100 @@ describe('pushCenterTick', () => {
       expect(midY).toBeCloseTo(2, 9)
       expect(midZ).toBeCloseTo(3, 9)
     }
+  })
+})
+
+describe('directionsParallel — the alignment snap\'s shared parallel test', () => {
+  it('exactly parallel directions match', () => {
+    expect(directionsParallel([1, 0, 0], [2, 0, 0])).toBe(true)
+  })
+
+  it('exactly antiparallel directions also match — polarity is irrelevant', () => {
+    expect(directionsParallel([1, 0, 0], [-3, 0, 0])).toBe(true)
+  })
+
+  it('perpendicular directions do not match', () => {
+    expect(directionsParallel([1, 0, 0], [0, 1, 0])).toBe(false)
+  })
+
+  it('just inside 1 degree matches, just outside does not', () => {
+    const inside = 0.99 * (Math.PI / 180)
+    const outside = 1.01 * (Math.PI / 180)
+    expect(directionsParallel([1, 0, 0], [Math.cos(inside), Math.sin(inside), 0])).toBe(true)
+    expect(directionsParallel([1, 0, 0], [Math.cos(outside), Math.sin(outside), 0])).toBe(false)
+  })
+
+  it('a degenerate (zero) direction never matches', () => {
+    expect(directionsParallel([0, 0, 0], [1, 0, 0])).toBe(false)
+  })
+})
+
+describe('collinearOffset', () => {
+  it('returns the perpendicular offset that lands aPoint exactly on the candidate line', () => {
+    // Baseline along +X through the origin; candidate line's own point is
+    // (0, 3, 0) — offset (0,3,0) lands the new baseline exactly there.
+    const offset = collinearOffset([0, 0, 0], [1, 0, 0], [0, 3, 0])
+    expect(offset).toEqual([0, 3, 0])
+  })
+
+  it('discards any along-baseline component of the candidate point', () => {
+    // The candidate point is offset both along and perpendicular to the
+    // baseline; only the perpendicular part is a valid offset.
+    const offset = collinearOffset([0, 0, 0], [1, 0, 0], [5, 3, 0])
+    expect(offset[0]).toBeCloseTo(0, 9)
+    expect(offset[1]).toBeCloseTo(3, 9)
+    expect(offset[2]).toBeCloseTo(0, 9)
+  })
+})
+
+describe('findAlignmentSnap', () => {
+  const FLAT_NORMAL: [number, number, number] = [0, 0, 1]
+
+  function candidate(a1: [number, number, number], b1: [number, number, number], planeNormal = FLAT_NORMAL): DimensionLineCandidate {
+    return { a1, b1, planeNormal }
+  }
+
+  it('snaps collinear with a parallel, coplanar candidate within tolerance', () => {
+    const c = candidate([0, 1, 0], [4, 1, 0])
+    // Drag currently sits at (2, 1.02, 0) — 2cm off the candidate's line.
+    const offset = findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 1.02, 0], FLAT_NORMAL, [c], 0.15)
+    expect(offset).not.toBeNull()
+    expect(offset![1]).toBeCloseTo(1, 9)
+    expect(offset![0]).toBeCloseTo(0, 9)
+    expect(offset![2]).toBeCloseTo(0, 9)
+  })
+
+  it('does not snap when the drag point is farther than the tolerance from the candidate line', () => {
+    const c = candidate([0, 1, 0], [4, 1, 0])
+    const offset = findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 1.5, 0], FLAT_NORMAL, [c], 0.15)
+    expect(offset).toBeNull()
+  })
+
+  it('does not snap to a candidate whose own line is not parallel to the new baseline', () => {
+    // Candidate runs along +Y, new baseline runs along +X — perpendicular,
+    // even though the drag point sits right on the candidate's line.
+    const c = candidate([2, 0, 0], [2, 4, 0])
+    const offset = findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 0.01, 0], FLAT_NORMAL, [c], 0.15)
+    expect(offset).toBeNull()
+  })
+
+  it('does not snap to a candidate on a different working plane', () => {
+    // Same line, but the candidate's plane normal is Y (a vertical plane),
+    // not the new dimension's flat (Z-normal) working plane.
+    const c = candidate([0, 1, 0], [4, 1, 0], [0, 1, 0])
+    const offset = findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 1.02, 0], FLAT_NORMAL, [c], 0.15)
+    expect(offset).toBeNull()
+  })
+
+  it('picks the nearest of several qualifying candidates', () => {
+    const near = candidate([0, 1, 0], [4, 1, 0])
+    const far = candidate([0, 2, 0], [4, 2, 0])
+    const offset = findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 1.02, 0], FLAT_NORMAL, [far, near], 0.5)
+    expect(offset).not.toBeNull()
+    expect(offset![1]).toBeCloseTo(1, 9) // the near candidate's own line, not the far one
+  })
+
+  it('no candidates -> null', () => {
+    expect(findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 1.02, 0], FLAT_NORMAL, [], 0.15)).toBeNull()
   })
 })

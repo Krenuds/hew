@@ -6,12 +6,14 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
-import { DimensionTool } from './DimensionTool'
+import { DimensionTool, PREVIEW_COLOR } from './DimensionTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { kernelErrorMessage } from '../kernelErrors'
 import { antipodalTolerance, distPointToLine } from '../viewport/annotationLayout'
+import { axisColorsForTheme } from '../viewport/axisColors'
+import { getResolvedTheme } from '../settings/theme'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -69,6 +71,14 @@ function makeWasmScene() {
       radialCalls.push(args)
       return 2n
     }),
+    // Alignment-snap candidate accessors (`DimensionTool._alignmentCandidates`)
+    // — empty by default so no pre-existing test picks up a spurious
+    // candidate; the alignment-snap describe block below overrides these.
+    annotation_ids: vi.fn(() => new BigUint64Array()),
+    annotation_kind: vi.fn((_id: bigint) => undefined as string | undefined),
+    annotation_anchor_point: vi.fn((_id: bigint, _which: number) => undefined as Float64Array | undefined),
+    annotation_offset: vi.fn((_id: bigint) => undefined as Float64Array | undefined),
+    annotation_plane: vi.fn((_id: bigint) => undefined as Float64Array | undefined),
   }
   return { scene: scene as unknown as WasmScene, linearCalls, radialCalls }
 }
@@ -259,15 +269,29 @@ describe('DimensionTool — camera-aware working plane, no shared sketch (dimens
   it('degenerate guard: baseline nearly parallel to the view direction still commits a finite plane, never NaN', () => {
     const { scene, linearCalls } = makeWasmScene()
     const { tool } = makeTool(scene)
-    // Baseline runs along +Z; camera looks almost straight down (-Z) at it,
-    // and the test's fixed cursor ray runs along -Z too — parallel to every
-    // candidate plane, so `axisDimensionPlane` pierces none and returns
-    // null, exercising the raw-snapped-cursor fallback.
-    const camera = perspCamera([0, 0, 100], [0.001, 0, 0])
+    // Baseline runs along +Z; camera looks almost straight down (-Z) at it
+    // (tilted a few degrees off vertical — enough that the second click's
+    // vertical displacement clears `OFF_PLANE_VISIBLE_MIN_DEG` and is still
+    // honored, see below), and the test's fixed cursor ray (`RAY`) runs
+    // along -Z EXACTLY — parallel to every candidate plane, so
+    // `axisDimensionPlane` pierces none and returns null, exercising the
+    // raw-snapped-cursor fallback. The camera's own tilt and the fixed
+    // ray's exact verticality are independent: `axisDimensionPlane` only
+    // ever sees the ray, `_haveAPoint`'s visibility gate only ever sees the
+    // camera's view direction.
+    const camera = perspCamera([0, 0, 100], [6, 0, 0])
     tool.updateCamera(camera)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
-    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'ground' }), RAY)
+    // A real endpoint (design v1.1 "Dimensions on-plane": `have-a` now
+    // freezes a gesture plane from the first click — here the camera looks
+    // nearly straight down, so it freezes the ground plane — and projects
+    // any OTHER kind onto it; an actual second endpoint 2 units up stays
+    // honored off that plane because the camera's few-degree tilt makes the
+    // vertical displacement visible — see the stacked-corner tests below for
+    // the invisible case, where the same shape of endpoint gets projected
+    // instead).
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
     tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 1, kind: 'ground' }), RAY)
     tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 1, kind: 'ground' }), RAY)
 
@@ -308,6 +332,276 @@ describe('DimensionTool — camera-aware working plane, no shared sketch (dimens
     // snap point, exactly as before — (1,0,5) - (0,0,3) perpendicular to
     // (1,0,0) is (0,0,2).
     expect(offset[2]).toBeCloseTo(2, 9)
+  })
+})
+
+describe('DimensionTool — have-a gesture-plane freeze (design v1.1 Lane E "Dimensions on-plane")', () => {
+  function perspCamera(pos: [number, number, number], target: [number, number, number]): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(50, 1, 0.1, 1000)
+    cam.position.set(...pos)
+    cam.lookAt(...target)
+    cam.updateMatrixWorld(true)
+    return cam
+  }
+
+  it('snapProjected() reports true when a have-a snap is actually projected onto the frozen plane', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([1, 0, 50], [1, 0, 0]) // straight down — freezes the z=2 plane below
+    tool.updateCamera(camera)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(tool.snapProjected?.()).toBe(false) // the first click itself never projects anything
+
+    // A non-precise kind (`on-face`) reporting a DIFFERENT height (z=0) —
+    // must be projected onto the frozen z=2 plane, and disclosed as such.
+    tool.onPointerMove(makeSnap({ x: 3, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.snapProjected?.()).toBe(true)
+  })
+
+  it('a precise off-plane point whose displacement is INVISIBLE from this camera (straight down) gets projected, not honored — the stacked-corner playtest fix', () => {
+    // RED-CHECK (against the pre-fix code, which honored ANY off-plane
+    // precise point unconditionally): in a Top view every endpoint in a
+    // framed wall's corner is stacked straight down the view ray — slab,
+    // sole plate, stud top, top plates — and looks identical on screen no
+    // matter which one a snap resolves. Honoring one 7cm below the frozen
+    // plane (an ordinary stud-top-to-top-plate gap) commits a dimension
+    // that reads as coplanar but isn't, with no visible cue that it moved.
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([1, 0, 50], [1, 0, 0]) // straight down — freezes the z=2 plane below
+    tool.updateCamera(camera)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(tool.snapProjected?.()).toBe(false) // the first click itself never projects anything
+
+    // A genuine endpoint 7cm BELOW the frozen plane — its entire
+    // displacement runs straight along the view ray (0,0,-1), the sharpest
+    // possible invisible case.
+    tool.onPointerMove(makeSnap({ x: 3, y: 0, z: 1.93, kind: 'endpoint' }), RAY)
+    expect(tool.snapProjected?.()).toBe(true)
+  })
+
+  it('a precise off-plane point whose displacement IS visible from this camera (ISO) is still honored — an ISO height measurement is unaffected', () => {
+    // The paired case: from an oblique ISO camera, a top-corner endpoint
+    // well off the frozen plane reads clearly as a different point on
+    // screen (the maintainer's own "bottom corner -> top corner" height
+    // measurement, displacement well off the view direction) and must stay
+    // honored exactly, same as before this fix.
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([8, -8, 8], [1, 1, 1]) // standard ISO
+    tool.updateCamera(camera)
+
+    // First click freezes the Y-normal plane through the origin (the most
+    // view-aligned axis for this pose — see the "axis-aligned working
+    // plane" block below for the same camera's own axis pick).
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.snapProjected?.()).toBe(false)
+
+    // A "top corner" well off that plane in Y — its displacement sits at a
+    // steep angle from the ISO view direction, nowhere near the 2-degree
+    // invisibility band.
+    tool.onPointerMove(makeSnap({ x: 2, y: 3, z: 2, kind: 'endpoint' }), RAY)
+    expect(tool.snapProjected?.()).toBe(false)
+  })
+
+  it('Top view, stacked corner: a real endpoint below the frozen plane commits COPLANAR with the first click, not at its own raw height', () => {
+    // The full end-to-end version of the invisible-displacement test above:
+    // a framed-wall corner with several endpoints stacked straight down the
+    // view ray (a wall-top corner at z=2.4765, a stud top at z=2.4003 —
+    // 7.6cm lower). The second click's snap resolves the stud top (a real,
+    // precise `endpoint`) — it must still commit coplanar with the first
+    // click, not at its own different height.
+    const { scene, linearCalls } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([1, 1, 50], [1, 1, 0]) // Top view, straight down
+    tool.updateCamera(camera)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2.4765, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 2.4003, kind: 'endpoint' }), RAY)
+    expect(tool.statusHint()).toMatch(/drag/i) // reached have-b, not swallowed as a same-point click
+
+    const dragRay: Ray = { origin: [1, 1, 50], direction: [0, 0, -1] }
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 2.4765 }), dragRay)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2.4765 }), dragRay)
+
+    expect(linearCalls.length).toBe(1)
+    const [, , aPoint, , , bPoint] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array, Float64Array,
+    ]
+    expect(aPoint[2]).toBeCloseTo(2.4765, 9)
+    // Projected onto the frozen plane — NOT the stud top's own raw z.
+    expect(bPoint[2]).toBeCloseTo(2.4765, 9)
+    expect(bPoint[0]).toBeCloseTo(3, 9)
+  })
+
+  it('Top view (parallel projection): a second point that snaps to on-face/ground resolves at a.z, not the literal ground', () => {
+    // Straight-down camera — the same reading a Top-view Parallel Projection
+    // camera gives `updateCamera` (it only ever reads world direction).
+    const { scene, linearCalls } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([1, 0, 50], [1, 0, 0])
+    tool.updateCamera(camera)
+
+    // First click: a wall-top corner, 2m up.
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    // Second click: an ordinary on-face/ground hover on the OTHER wall top —
+    // its raw z happens to read 0 (an occluded-geometry ground read, or a
+    // genuine `on-face` snap whose reported point is still what the old
+    // ground-plane fallback would have used) — neither a precise point kind,
+    // so it must be projected onto the frozen (Top-view horizontal) plane
+    // through the first click's own height, landing at z=2 — never the
+    // literal ground.
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0, kind: 'on-face' }), RAY)
+    // Drag the offset out, then commit — a ray straight down through
+    // (1,1,*), matching the Top-view direction (unlike `RAY`, which points
+    // straight down through the ORIGIN and so would pierce the working
+    // plane at `a` itself, a degenerate zero offset).
+    const dragRay: Ray = { origin: [1, 1, 50], direction: [0, 0, -1] }
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 2 }), dragRay)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2 }), dragRay)
+
+    expect(linearCalls.length).toBe(1)
+    const [, , aPoint, , , bPoint] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array, Float64Array,
+    ]
+    expect(Array.from(aPoint)).toEqual([0, 0, 2])
+    // BOTH endpoints land at a.z = 2 — the old bug would have committed
+    // b.z = 0 (the literal ground the on-face/ground snap reported).
+    expect(bPoint[2]).toBeCloseTo(2, 9)
+  })
+
+  it('ISO camera: a real endpoint at a DIFFERENT height than the first click is still honored, off the frozen plane', () => {
+    const { scene, linearCalls } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([8, -8, 8], [1, 1, 1])
+    tool.updateCamera(camera)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    // A genuine endpoint at a DIFFERENT height (5, not 2) — a precise point
+    // kind, so `have-a` must honor it exactly, never project it down onto
+    // whatever plane the first click's own freeze happened to pick.
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 5, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 3.5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 3.5 }), RAY)
+
+    expect(linearCalls.length).toBe(1)
+    const [, , aPoint, , , bPoint] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array, Float64Array,
+    ]
+    expect(Array.from(aPoint)).toEqual([0, 0, 2])
+    expect(Array.from(bPoint)).toEqual([0, 0, 5]) // honored exactly, not projected
+  })
+
+  it('an arrow-key lock pressed BEFORE the first click freezes that axis plane immediately — the second click\'s own snap search is constrained to it', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    // No camera registered at all — the lock must win over the "no camera,
+    // no freeze" fallback, unlike the ordinary view-aligned case.
+    tool.onKey(makeKeyEvent('ArrowUp')) // locks the blue (Z-normal) plane
+    expect(tool.statusHint()).toMatch(/blue/i)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'ground' }), RAY)
+    const constraint = tool.snapConstraint(RAY)
+    expect(constraint?.constraintPlane).toEqual({ point: [1, 2, 3], normal: [0, 0, 1] })
+    expect(constraint?.offPlanePoints).toBe(true)
+  })
+
+  it('a lock pressed BETWEEN the two clicks (mid have-a) also changes the frozen plane for the still-pending second click', () => {
+    const { scene, linearCalls } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const camera = perspCamera([8, -8, 8], [1, 1, 1]) // would otherwise pick a view-aligned axis
+    tool.updateCamera(camera)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'ground' }), RAY)
+    // No lock yet: some view-aligned axis plane is frozen (whichever ISO
+    // picks) — then the user locks mid-gesture, before the second click.
+    tool.onKey(makeKeyEvent('ArrowRight')) // locks the red (X-normal) plane
+    expect(tool.statusHint()).toMatch(/red/i)
+    // The lock is reflected in the constraint IMMEDIATELY — a live check
+    // (`_haveAPlane`), not only at the next click.
+    expect(tool.snapConstraint(RAY)?.constraintPlane).toEqual({
+      point: [1, 2, 3],
+      normal: [1, 0, 0],
+    })
+
+    // A `'ground'` snap NOT already on the locked plane (x=1) — must be
+    // projected onto it, not honored as the raw (4,2,6).
+    tool.onPointerDown(makeSnap({ x: 4, y: 2, z: 6, kind: 'ground' }), RAY)
+    expect(tool.statusHint()).toMatch(/drag/i) // reached have-b — not a same-point refusal
+
+    tool.onPointerMove(makeSnap({ x: 1, y: 5, z: 8 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 5, z: 8 }), RAY)
+
+    expect(linearCalls.length).toBe(1)
+    const [, , aPoint, , , bPoint] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array, Float64Array,
+    ]
+    expect(Array.from(aPoint)).toEqual([1, 2, 3])
+    // The committed baseline's second point lies on the LOCKED plane
+    // (x = 1, the first click's own x) — projected from the raw (4,2,6) —
+    // not on whatever view-aligned axis plane had been frozen before the
+    // lock was pressed.
+    expect(bPoint[0]).toBeCloseTo(1, 9)
+    expect(bPoint[1]).toBeCloseTo(2, 9)
+    expect(bPoint[2]).toBeCloseTo(6, 9)
+  })
+})
+
+describe('DimensionTool — have-b plane continuity seeded from the have-a freeze (design v1.1 "Dimensions on-plane")', () => {
+  // Camera/baseline pinned empirically (searched, not hand-derived): with a
+  // FRESH (unseeded) drag state the natural best-scoring candidate for THIS
+  // ray is the vertical (Y-normal) plane, but the `have-a` freeze picks the
+  // flat (Z-normal) plane for the SAME camera (a different, baseline-
+  // independent formula — "most view-aligned axis" vs. the drag's own
+  // screen-projected score) — robust across a wide range of near-baseline
+  // ray offsets (0.001-0.05 NDC), not a knife's-edge tie.
+  const camera = new THREE.PerspectiveCamera(45, 800 / 600, 0.1, 1000)
+  camera.position.set(-5, -9, 12)
+  camera.lookAt(1, 0, 2)
+  camera.updateMatrixWorld(true)
+  camera.updateProjectionMatrix()
+
+  function normalKey(n: [number, number, number]): string {
+    const ax = Math.abs(n[0])
+    const ay = Math.abs(n[1])
+    const az = Math.abs(n[2])
+    return ax >= ay && ax >= az ? 'x' : ay >= az ? 'y' : 'z'
+  }
+
+  /** Same baseline (0,0,2)->(2,0,2), differing only in the SECOND click's
+   *  snap kind: `'endpoint'` bypasses the freeze/seed entirely (a precise
+   *  point, honored off-plane per `_haveAPoint`) — the pre-Lane-E, unseeded
+   *  behavior; `'on-face'` is projected, so it both lands on the SAME
+   *  committed point (already on the frozen plane by construction, since
+   *  the frozen plane's normal is ⟂ to this baseline) AND seeds the fresh
+   *  `have-b` drag state's latch with it. */
+  function haveBPlaneAt(kind: 'endpoint' | 'on-face', ndcX: number): string | undefined {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.updateCamera(camera)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0, z: 2, kind }), RAY)
+    expect(tool.statusHint()).toMatch(/drag/i) // sanity: really reached have-b
+
+    const raycaster = new THREE.Raycaster()
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, 0), camera)
+    const ray: Ray = {
+      origin: [raycaster.ray.origin.x, raycaster.ray.origin.y, raycaster.ray.origin.z],
+      direction: [raycaster.ray.direction.x, raycaster.ray.direction.y, raycaster.ray.direction.z],
+    }
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 3 }), ray)
+    const normal = tool.snapConstraint(ray)?.constraintPlane?.normal
+    return normal !== undefined ? normalKey(normal) : undefined
+  }
+
+  it('an off-plane-honored second click (endpoint) leaves have-b unseeded — the natural best-scoring plane wins', () => {
+    expect(haveBPlaneAt('endpoint', 0.01)).toBe('y')
+  })
+
+  it('a projected second click (on-face) seeds have-b with the have-a freeze\'s own plane — continuity, not the natural pick', () => {
+    expect(haveBPlaneAt('on-face', 0.01)).toBe('z')
   })
 })
 
@@ -1118,5 +1412,209 @@ describe('DimensionTool — wasm refusal toasts route through friendlyErrorText'
     expect(toasted).toContain(kernelErrorMessage('DegenerateAnnotation', 'annotation geometry is degenerate'))
     expect(toasted).not.toContain(rawMessage)
     expect(toasted).not.toContain('DegenerateAnnotation:')
+  })
+})
+
+describe('DimensionTool — plane-locked preview color (maintainer playtest: color in-progress lines by the active plane lock)', () => {
+  function previewMaterial(tool: DimensionTool): THREE.LineBasicMaterial | null {
+    const line = (tool as unknown as { previewLine: THREE.LineSegments | null }).previewLine
+    return line === null ? null : (line.material as THREE.LineBasicMaterial)
+  }
+
+  const NEUTRAL_HEX = new THREE.LineBasicMaterial({ color: PREVIEW_COLOR }).color.getHex()
+
+  function lockedHex(axis: 0 | 1 | 2): number {
+    return new THREE.LineBasicMaterial({ color: axisColorsForTheme(getResolvedTheme())[axis] }).color.getHex()
+  }
+
+  it('an unlocked have-a baseline preview uses the neutral color, same as before this fix', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0, kind: 'ground' }), RAY)
+    expect(previewMaterial(tool)?.color.getHex()).toBe(NEUTRAL_HEX)
+  })
+
+  it('a plane-locked have-a baseline preview uses the locked axis color (red = X)', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onKey(makeKeyEvent('ArrowRight')) // locks axis 0 (red)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0, kind: 'ground' }), RAY)
+    expect(previewMaterial(tool)?.color.getHex()).toBe(lockedHex(0))
+    expect(previewMaterial(tool)?.color.getHex()).not.toBe(NEUTRAL_HEX)
+  })
+
+  it('a plane-locked have-b dimension/extension-line preview uses the locked axis color (blue = Z)', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onKey(makeKeyEvent('ArrowUp')) // locks axis 2 (blue), mid-gesture
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+    expect(previewMaterial(tool)?.color.getHex()).toBe(lockedHex(2))
+  })
+
+  it('releasing the lock (same arrow again) reverts the have-b preview to the neutral color', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    tool.onKey(makeKeyEvent('ArrowUp')) // same arrow again -> unlock
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+    expect(previewMaterial(tool)?.color.getHex()).toBe(NEUTRAL_HEX)
+  })
+
+  it('a plane ADOPTED from a hovered sketch (no arrow lock) keeps the neutral preview color', () => {
+    const { scene } = makeWasmScene()
+    ;(scene as unknown as { pick_sketch: ReturnType<typeof vi.fn> }).pick_sketch = vi.fn(() => 21n)
+    ;(scene as unknown as { sketch_plane: ReturnType<typeof vi.fn> }).sketch_plane = vi.fn(
+      (_s: bigint) => new Float64Array([0, 0, 3, 0, 1, 0]),
+    )
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 3, kind: 'ground' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 3, kind: 'ground' }), RAY)
+    expect(previewMaterial(tool)?.color.getHex()).toBe(NEUTRAL_HEX)
+  })
+
+  it('the radial gesture preview stays neutral even with an idle-armed lock — arrows are left alone in have-curve', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    const CIRCLE_SNAP: Partial<Snap> = {
+      x: 2, y: 0, z: 0, kind: 'on-edge', elementKind: 'sketch-edge', sketch: 11n, element: 3n,
+    }
+    tool.onPointerDown(makeSnap(CIRCLE_SNAP), RAY)
+    tool.onPointerMove(makeSnap({ x: 4, y: 0, z: 0 }), RAY)
+    expect(previewMaterial(tool)?.color.getHex()).toBe(NEUTRAL_HEX)
+  })
+})
+
+describe('DimensionTool — dimension-row alignment snap (SketchUp parity, maintainer playtest)', () => {
+  /** One existing linear dimension the fake wasm scene reports: baseline
+   *  (0,0,0)->(4,0,0), offset (0,1,0) — its own drawn line runs
+   *  (0,1,0)->(4,1,0), on the flat (Z-normal) plane. */
+  function withExistingDimension(scene: WasmScene): void {
+    const s = scene as unknown as {
+      annotation_ids: ReturnType<typeof vi.fn>
+      annotation_kind: ReturnType<typeof vi.fn>
+      annotation_anchor_point: ReturnType<typeof vi.fn>
+      annotation_offset: ReturnType<typeof vi.fn>
+      annotation_plane: ReturnType<typeof vi.fn>
+    }
+    s.annotation_ids = vi.fn(() => new BigUint64Array([1n]))
+    s.annotation_kind = vi.fn((id: bigint) => (id === 1n ? 'linear' : undefined))
+    s.annotation_anchor_point = vi.fn((id: bigint, which: number) => {
+      if (id !== 1n) return undefined
+      return which === 0 ? new Float64Array([0, 0, 0]) : new Float64Array([4, 0, 0])
+    })
+    s.annotation_offset = vi.fn((id: bigint) => (id === 1n ? new Float64Array([0, 1, 0]) : undefined))
+    s.annotation_plane = vi.fn((id: bigint) => (id === 1n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined))
+  }
+
+  /** A ray hitting the flat (z=0) plane at `(x, y, 0)`, straight down —
+   *  matches `_workingPlane`'s locked-plane pierce-point computation. */
+  function downRayAt(x: number, y: number): Ray {
+    return { origin: [x, y, 5], direction: [0, 0, -1] }
+  }
+
+  it('a drag within tolerance of a parallel, coplanar existing dimension snaps collinear with it', () => {
+    const { scene, linearCalls } = makeWasmScene()
+    withExistingDimension(scene)
+    const { tool } = makeTool(scene)
+
+    tool.onKey(makeKeyEvent('ArrowUp')) // locks the flat (Z-normal) plane — no camera needed
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 0, kind: 'ground' }), RAY)
+    expect(tool.statusHint()).toMatch(/drag/i)
+
+    // Drag 2cm off the existing dimension's own line (y=1) — well within the
+    // no-camera fallback tolerance (`ALIGN_FALLBACK_TOLERANCE_M` = 0.15m).
+    tool.onPointerMove(makeSnap({ x: 2, y: 1.02, z: 0, kind: 'ground' }), downRayAt(2, 1.02))
+    expect(tool.lastSnap?.kind).toBe('aligned')
+
+    tool.onPointerDown(makeSnap({ x: 2, y: 1.02, z: 0, kind: 'ground' }), downRayAt(2, 1.02))
+    expect(linearCalls.length).toBe(1)
+    const [, , , , , , offset] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array,
+    ]
+    // Snapped to the EXISTING dimension's own offset (1), not the raw 1.02
+    // the cursor was actually at.
+    expect(offset[1]).toBeCloseTo(1, 9)
+  })
+
+  it('a drag farther than the tolerance does not snap — the natural offset is used as-is', () => {
+    const { scene, linearCalls } = makeWasmScene()
+    withExistingDimension(scene)
+    const { tool } = makeTool(scene)
+
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 0, kind: 'ground' }), RAY)
+
+    // 50cm off the existing dimension's line — outside the fallback tolerance.
+    tool.onPointerMove(makeSnap({ x: 2, y: 1.5, z: 0, kind: 'ground' }), downRayAt(2, 1.5))
+    expect(tool.lastSnap?.kind).not.toBe('aligned')
+
+    tool.onPointerDown(makeSnap({ x: 2, y: 1.5, z: 0, kind: 'ground' }), downRayAt(2, 1.5))
+    expect(linearCalls.length).toBe(1)
+    const [, , , , , , offset] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array,
+    ]
+    expect(offset[1]).toBeCloseTo(1.5, 9)
+  })
+
+  it('moving away releases the snap immediately — no hysteresis', () => {
+    const { scene } = makeWasmScene()
+    withExistingDimension(scene)
+    const { tool } = makeTool(scene)
+
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 0, kind: 'ground' }), RAY)
+
+    tool.onPointerMove(makeSnap({ x: 2, y: 1.02, z: 0, kind: 'ground' }), downRayAt(2, 1.02))
+    expect(tool.lastSnap?.kind).toBe('aligned')
+
+    // Move well away — the snap must release on THIS event, with no memory
+    // of having just been aligned.
+    tool.onPointerMove(makeSnap({ x: 2, y: 3, z: 0, kind: 'ground' }), downRayAt(2, 3))
+    expect(tool.lastSnap?.kind).not.toBe('aligned')
+  })
+
+  it('a candidate whose line is not parallel to the new baseline is never offered, however close the cursor sits', () => {
+    const { scene, linearCalls } = makeWasmScene()
+    const s = scene as unknown as {
+      annotation_ids: ReturnType<typeof vi.fn>
+      annotation_kind: ReturnType<typeof vi.fn>
+      annotation_anchor_point: ReturnType<typeof vi.fn>
+      annotation_offset: ReturnType<typeof vi.fn>
+      annotation_plane: ReturnType<typeof vi.fn>
+    }
+    // A PERPENDICULAR existing dimension: baseline (2,0,0)->(2,4,0), offset 0
+    // — its own line runs straight through where the new drag will sit.
+    s.annotation_ids = vi.fn(() => new BigUint64Array([1n]))
+    s.annotation_kind = vi.fn(() => 'linear')
+    s.annotation_anchor_point = vi.fn((_id: bigint, which: number) =>
+      which === 0 ? new Float64Array([2, 0, 0]) : new Float64Array([2, 4, 0]),
+    )
+    s.annotation_offset = vi.fn(() => new Float64Array([0, 0, 0]))
+    s.annotation_plane = vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1]))
+    const { tool } = makeTool(scene)
+
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 0, kind: 'ground' }), RAY) // new baseline along +X
+
+    tool.onPointerMove(makeSnap({ x: 2, y: 0.01, z: 0, kind: 'ground' }), downRayAt(2, 0.01))
+    expect(tool.lastSnap?.kind).not.toBe('aligned')
+
+    tool.onPointerDown(makeSnap({ x: 2, y: 0.01, z: 0, kind: 'ground' }), downRayAt(2, 0.01))
+    expect(linearCalls.length).toBe(1)
+    const [, , , , , , offset] = linearCalls[0] as [
+      number, bigint, Float64Array, number, bigint, Float64Array, Float64Array,
+    ]
+    expect(offset[1]).toBeCloseTo(0.01, 9) // natural offset, not snapped
   })
 })

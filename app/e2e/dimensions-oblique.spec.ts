@@ -209,3 +209,174 @@ test('ISO camera: ArrowUp mid-gesture locks the blue (flat) plane — the same d
   expect(extA, 'extension line inked flat past anchor A').toBeGreaterThan(30)
   expect(extB, 'extension line inked flat past anchor B').toBeGreaterThan(30)
 })
+
+// Design v1.1 Lane E "Dimensions on-plane": a Top-view/Parallel-Projection
+// dimension's SECOND point used to be free to fall through to the literal
+// ground plane (z=0) whenever nothing was under the cursor there — sliding
+// a wall-top measurement down to the ground underneath it. `have-a` now
+// freezes a gesture plane from the FIRST click (here, straight down, the
+// flat z-height plane through the wall's own top) and projects the second
+// point onto it.
+test('Top view (Parallel Projection): a dimension across a wall top has BOTH endpoints at the wall height, never the ground', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const t = window.__hew_test!
+    t.setGridVisible(false)
+    t.setAxesVisible(false)
+    // A "wall": a 3m x 0.3m slab, top at z = 2.
+    t.drawBox([0, 0, 0], [3, 0.3, 0], 2)
+    // Straight down, no view axis picking a lucky plane by coincidence —
+    // the exact pose this fix targets.
+    t.setCamera({ position: [1.5, 0.15, 50], target: [1.5, 0.15, 0], up: [0, 1, 0], fovDeg: 45 })
+  })
+  await page.getByRole('button', { name: 'Camera' }).click()
+  await page.getByText('Parallel Projection').click()
+  await nextFrame(page)
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  const click = async (pt: { x: number; y: number }) => {
+    await page.mouse.move(pt.x, pt.y)
+    await page.mouse.down()
+    await page.mouse.up()
+  }
+
+  await page.getByRole('radio', { name: 'Dimension' }).click()
+  // First click: the wall's own top-left corner, a real Endpoint.
+  await click(await toPage([0, 0, 2]))
+  await expect(page.getByText('Click the second point.')).toBeVisible()
+  // Second click: well PAST the wall's far end (x=3) — from directly
+  // overhead, nothing is under the cursor there at all, so the kernel snap
+  // misses entirely and SnapService falls back to the literal ground plane
+  // (z=0, pre-fix). The have-a freeze projects that fallback onto the
+  // wall's own z=2 plane instead.
+  await click(await toPage([4.5, 0.15, 2]))
+  await expect(page.getByText('Drag out the dimension line', { exact: false })).toBeVisible()
+  // Drag sideways, still in the SAME flat plane — the offset stays
+  // horizontal, so the drawn line's own endpoints (a1/b1) sit at exactly
+  // the anchors' own height too.
+  await click(await toPage([2, 1, 2]))
+
+  const id = await page.evaluate(() => window.__hew_test!.getAnnotationIds()[0])
+  expect(id).toBeTruthy()
+  const endpoints = await page.evaluate((i) => window.__hew_test!.getLinearDimensionEndpoints(i), id)
+  expect(endpoints).not.toBeNull()
+  expect(endpoints!.a1[2]).toBeCloseTo(2, 5)
+  expect(endpoints!.b1[2]).toBeCloseTo(2, 5)
+})
+
+// Maintainer playtest: a Top-view, Parallel-Projection dimension across a
+// framed wall's corner had every endpoint — slab, sole plate, stud top, top
+// plates — stacked straight down the view ray. The frozen have-a plane is
+// horizontal at the first click's height, but the old code honored ANY
+// precise (endpoint/midpoint/center/quadrant/intersection) snap off that
+// plane unconditionally — so the second click could resolve to a DIFFERENT
+// stacked point (invisible from directly overhead) and commit a
+// non-coplanar dimension with no visible cue. The fix: an off-plane precise
+// point is honored only when its own displacement off the plane is actually
+// VISIBLE from the camera (`DimensionTool._offPlaneDisplacementVisible`) —
+// a Top-view vertical displacement never is.
+test('Top view (Parallel Projection), stacked corner: a dimension aimed at a corner with several endpoints along the view ray stays coplanar at the first click\'s height', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const t = window.__hew_test!
+    t.setGridVisible(false)
+    t.setAxesVisible(false)
+    // Box A: a 3x3x1 slab, top at z=1.
+    t.drawBox([0, 0, 0], [3, 3, 0], 1)
+    // Box B: a 1x1x1 block floating ABOVE box A, sharing box A's (0,0) top
+    // corner's x/y — its own top corner (0,0,2.5) sits directly over box
+    // A's top corner (0,0,1), several endpoints stacked along one vertical
+    // column: box A's top (z=1), box B's base (z=1.5), box B's top (z=2.5).
+    const b = t.drawBox([0, 0, 0], [1, 1, 0], 1)
+    t.moveObject(b, 0, 0, 1.5)
+    // Straight down, world-Z up, eye a hair off the pole (harness convention
+    // for a stable Top-view pose under an orbit-style camera rig).
+    t.setCamera({ position: [1.5, 1.47, 30], target: [1.5, 1.5, 0], up: [0, 0, 1] })
+  })
+  await page.getByRole('button', { name: 'Camera' }).click()
+  await page.getByText('Parallel Projection').click()
+  await nextFrame(page)
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  const click = async (pt: { x: number; y: number }) => {
+    await page.mouse.move(pt.x, pt.y)
+    await page.mouse.down()
+    await page.mouse.up()
+  }
+
+  await page.getByRole('radio', { name: 'Dimension' }).click()
+  // First click: box A's FAR top corner — freezes the horizontal plane z=1.
+  await click(await toPage([3, 3, 1]))
+  await expect(page.getByText('Click the second point.')).toBeVisible()
+  // Second click: aimed straight down the stacked column at (0,0) — from
+  // directly overhead this resolves to box B's own top corner (0,0,2.5),
+  // a real, precise Endpoint whose entire displacement off the z=1 plane
+  // runs along the view ray (invisible) — it must be projected, not honored.
+  await click(await toPage([0, 0, 2.5]))
+  await expect(page.getByText('Drag out the dimension line', { exact: false })).toBeVisible()
+  await click(await toPage([1.5, 3.5, 1]))
+
+  const id = await page.evaluate(() => window.__hew_test!.getAnnotationIds()[0])
+  expect(id).toBeTruthy()
+  const endpoints = await page.evaluate((i) => window.__hew_test!.getLinearDimensionEndpoints(i), id)
+  expect(endpoints).not.toBeNull()
+  // Both anchors (offset already applied) sit at the FIRST click's own
+  // height — never box B's own z=2.5.
+  expect(endpoints!.a1[2]).toBeCloseTo(1, 5)
+  expect(endpoints!.b1[2]).toBeCloseTo(1, 5)
+})
+
+// Maintainer playtest (UX finding): while a plane lock is active, the
+// in-progress rubber-band lines should be colored by the lock's own axis
+// color (the same red/green/blue the draw tools' locked previews use), not
+// the tool's ordinary neutral blue — so the lock's effect is visible while
+// still dragging, not just after the fact.
+test('ArrowRight lock colors the in-progress dimension line red — the plane-lock color, not the neutral blue preview', async ({ page }) => {
+  const { toPage, click } = await setupScene(page)
+
+  await page.getByRole('radio', { name: 'Dimension' }).click()
+  // Baseline: the box's own vertical front-left edge (0,0,0)->(0,0,2) — a
+  // Z-direction baseline, so the RED (X-normal) plane lock is usable (⟂ to
+  // the baseline; an X lock on an X baseline would be degenerate instead).
+  await click(await toPage([0, 0, 0]))
+  await click(await toPage([0, 0, 2]))
+  await expect(page.getByText('Drag out the dimension line', { exact: false })).toBeVisible()
+
+  await page.keyboard.press('ArrowRight')
+  await expect(page.getByText(/locked to the red plane/i)).toBeVisible()
+
+  // Aim exactly ON the locked plane (x=0, free space clear of the box,
+  // whose own footprint stops at y=1) so the drag's offset is predictable:
+  // (0,2,0) — the previewed dimension line runs (0,2,0)->(0,2,2).
+  const hover = await toPage([0, 2, 1])
+  await page.mouse.move(hover.x, hover.y)
+
+  await nextFrame(page)
+  const background = await page.evaluate(() => window.__hew_test!.pixelColorAt([0, 3, 1])!)
+  const lineColor = await page.evaluate(() => window.__hew_test!.pixelColorAt([0, 2, 1]))
+  expect(lineColor).not.toBeNull()
+  const delta =
+    Math.abs(lineColor!.r - background.r) + Math.abs(lineColor!.g - background.g) + Math.abs(lineColor!.b - background.b)
+  expect(delta, 'the locked preview line is actually inked at (0,2,1)').toBeGreaterThan(20)
+  // Red-dominant ink — clearly NOT the neutral preview blue (0x4d90ff /
+  // 0xe85a60-ish red is the opposite channel relationship).
+  expect(lineColor!.r).toBeGreaterThan(lineColor!.b)
+})

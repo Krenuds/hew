@@ -51,6 +51,10 @@ export interface Snap {
   z: number
   kind: string
   direction?: [number, number, number]
+  /** Under an axis lock, the candidate's own position before it was
+   *  projected onto the locked line (`x/y/z` are the projection). The cue
+   *  layer draws the dotted tie between the two. */
+  projectedFrom?: [number, number, number]
   object?: bigint
   /** Placing component instance handle, when the snap came from instanced
    *  geometry (pairs with `object`). */
@@ -95,12 +99,23 @@ export interface Snap {
  *   nonzero off-plane component. In every disclosing case, the disclosure is
  *   what keeps the projection from being a silent lie about the snap. A tool
  *   that does none of the three must leave `offPlanePoints` unset.
+ * - `facesOnly`: restrict the winning candidate to the on-face point under
+ *   the cursor (PushPullTool's idle hover). Inference's rank order is a
+ *   hard total order (`crates/inference` `rank_group` — `on-face` can never
+ *   outrank a precise point kind like `endpoint`/`midpoint`), so a face the
+ *   user is aiming at from near its edge would otherwise show — and drag
+ *   from — a corner/edge chip instead of the face itself. Set alongside
+ *   `constraintPlane`: `SnapService.resolve` replaces any winner whose kind
+ *   isn't `on-face`/`plane` with the plane fallback (ray ∩
+ *   `constraintPlane`), so the hover cue is always the on-face dot under the
+ *   cursor on the face that will actually be pushed.
  */
 export interface SnapConstraint {
   anchor?: [number, number, number]
   lockAxis?: 0 | 1 | 2
   constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }
   offPlanePoints?: boolean
+  facesOnly?: boolean
 }
 
 /**

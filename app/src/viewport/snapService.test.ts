@@ -117,6 +117,7 @@ describe('SnapService — precision mode', () => {
       x: () => 1, y: () => 2, z: () => 3,
       kind: () => 'endpoint',
       direction: () => undefined,
+      projected_from: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -162,6 +163,7 @@ describe('SnapService — precision mode', () => {
       x: () => 1, y: () => 2, z: () => 0,
       kind: () => 'center',
       direction: () => undefined,
+      projected_from: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -205,6 +207,7 @@ describe('SnapService — precision mode', () => {
       x: () => 1, y: () => 0, z: () => 0,
       kind: () => 'on-axis',
       direction: () => new Float64Array([1, 0, 0]),
+      projected_from: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -243,6 +246,7 @@ describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §
     x: () => 1, y: () => 2, z: () => 3,
     kind: () => 'endpoint',
     direction: () => undefined,
+    projected_from: () => undefined,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -304,6 +308,7 @@ describe('SnapService — clearHold (finding 5a: discrete-tap hysteresis)', () =
       x: () => 1, y: () => 2, z: () => 3,
       kind: () => 'endpoint',
       direction: () => undefined,
+      projected_from: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -353,6 +358,7 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
     x: () => 1, y: () => 2, z: () => 3,
     kind: () => 'endpoint',
     direction: () => undefined,
+    projected_from: () => undefined,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -389,5 +395,86 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
     svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, 3)
     const aperture = snapFn.mock.calls[0][6] as number
     expect(aperture).toBeCloseTo(pixelRadiusToAperture(SNAP_RADIUS_PX * 3, 800, 45), 12)
+  })
+})
+
+describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")', () => {
+  // Ray origin already lies ON this plane (z=5), so a ray∩plane fallback
+  // resolves at t=0 — the ray's own origin.
+  const constraintPlane = { point: [0, 0, 5] as [number, number, number], normal: [0, 0, 1] as [number, number, number] }
+
+  function fakeSnap(kind: string) {
+    return {
+      x: () => 1, y: () => 2, z: () => 5,
+      kind: () => kind,
+      direction: () => undefined,
+      projected_from: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => undefined,
+      element_kind: () => undefined,
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      sketch_curve: () => undefined,
+      free: () => {},
+    }
+  }
+
+  it('an on-face kernel candidate is honored as-is', () => {
+    const scene = { snap: vi.fn(() => fakeSnap('on-face')) } as unknown as Scene
+    const svc = new SnapService(scene)
+    const { snap, fromKernel } = svc.resolve(
+      DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+    )
+    expect(fromKernel).toBe(true)
+    expect(snap?.kind).toBe('on-face')
+  })
+
+  it('an endpoint kernel winner is replaced by the constraintPlane fallback — inference\'s rank order can never let on-face outrank it, so facesOnly must override the winner itself', () => {
+    const scene = { snap: vi.fn(() => fakeSnap('endpoint')) } as unknown as Scene
+    const svc = new SnapService(scene)
+    const { snap, fromKernel } = svc.resolve(
+      DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+    )
+    expect(fromKernel).toBe(false)
+    expect(snap?.kind).toBe('plane')
+    expect(snap?.x).toBeCloseTo(0)
+    expect(snap?.y).toBeCloseTo(0)
+    expect(snap?.z).toBeCloseTo(5)
+  })
+
+  it('every non-on-face kind is replaced the same way (midpoint, on-edge, on-axis)', () => {
+    for (const kind of ['midpoint', 'on-edge', 'on-axis']) {
+      const scene = { snap: vi.fn(() => fakeSnap(kind)) } as unknown as Scene
+      const svc = new SnapService(scene)
+      const { snap } = svc.resolve(
+        DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+      )
+      expect(snap?.kind).toBe('plane')
+    }
+  })
+
+  it('a snap held STICKY from a PRIOR (non-facesOnly) query is never resurrected by the hysteresis "resist release" step', () => {
+    // Acquire a genuine endpoint without facesOnly first — e.g. this same
+    // tool's own state from a moment ago, or another tool's hover — so it
+    // becomes SnapService's held sticky target.
+    let phase: 'sticky' | 'facesOnly' = 'sticky'
+    const snapFn = vi.fn(() => (phase === 'sticky' ? fakeSnap('endpoint') : undefined))
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('endpoint')
+
+    // A facesOnly query where the kernel now returns nothing new: the
+    // ordinary (non-facesOnly) hysteresis would re-query at the wider break
+    // radius and re-latch the stale endpoint. Under facesOnly that step must
+    // be skipped entirely — the query falls straight through to the
+    // constraintPlane fallback instead.
+    phase = 'facesOnly'
+    snapFn.mockClear()
+    const { snap, fromKernel } = svc.resolve(
+      DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+    )
+    expect(fromKernel).toBe(false)
+    expect(snap?.kind).toBe('plane')
+    expect(snapFn.mock.calls.length).toBe(1) // only the (missed) acquire query — no hold-resist re-query
   })
 })

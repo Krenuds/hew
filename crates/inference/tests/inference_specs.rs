@@ -153,6 +153,110 @@ fn nothing_in_the_cone_returns_none() {
     assert!(away.is_none());
 }
 
+// ── Ranking ties: nearest depth wins among screen-coincident points ──────
+
+/// Two endpoint-class points stacked along the view ray — a wall-top corner
+/// directly above a slab corner, seen from a Top view — differ laterally
+/// only by float noise (a placed instance's corner composed through its
+/// pose vs. a world vertex read exactly). That noise must not decide the
+/// pick: the NEARER one wins, in both aperture modes. Guide points are the
+/// simplest endpoint-class candidate to stage this with.
+fn stacked_scene(near_lateral_noise: f64) -> InferenceScene {
+    let mut scene = InferenceScene::new();
+    // Nearer, with a hair of lateral noise (the "placed" corner).
+    scene.add_guide(
+        GuideId::default(),
+        &Guide::Point {
+            position: Point3::new(near_lateral_noise, 0.0, 1.0),
+        },
+    );
+    // Farther, laterally exact (the "world" corner). A distinct id: `add_guide`
+    // replaces a same-id guide.
+    scene.add_guide(
+        GuideId::from(slotmap::KeyData::from_ffi(2)),
+        &Guide::Point {
+            position: Point3::new(0.0, 0.0, 5.0),
+        },
+    );
+    scene
+}
+
+#[test]
+fn screen_coincident_points_rank_by_depth_not_by_float_noise() {
+    let noise = 1e-12;
+    for (name, query) in [
+        ("cone", cone_query(CYL_APERTURE_RAD)),
+        ("cylinder", cylinder_query(0.1)),
+    ] {
+        let hit = stacked_scene(noise)
+            .resolve(&query)
+            .unwrap_or_else(|| panic!("{name}: a stacked pair is inside the aperture"));
+        assert!(
+            (hit.position.z - 1.0).abs() < 1e-9,
+            "{name}: the nearer point wins the pick, not the laterally exact far one (got z = {})",
+            hit.position.z
+        );
+    }
+}
+
+#[test]
+fn a_dense_chain_of_near_tied_candidates_ranks_without_panicking() {
+    // Lateral offsets stepping by 0.7 of the tie window: each neighbour is
+    // "equal within the tie" but the ends of the chain are not — the
+    // non-transitive case that made an epsilon comparator panic inside
+    // `sort_by` on a real floor plan. The pick must still resolve, to the
+    // nearest-depth candidate of the nearest bucket.
+    let radius = 0.1;
+    let tie = radius * inference::RANK_TIE_FRACTION;
+    let mut scene = InferenceScene::new();
+    for i in 0..80u64 {
+        let lateral = 0.7 * tie * (i % 7) as f64;
+        scene.add_guide(
+            GuideId::from(slotmap::KeyData::from_ffi(i + 1)),
+            &Guide::Point {
+                position: Point3::new(lateral, 0.0, 1.0 + i as f64 * 0.05),
+            },
+        );
+    }
+    let hit = scene
+        .resolve(&cylinder_query(radius))
+        .expect("a dense stack is inside the aperture");
+    assert!(
+        (hit.position.z - 1.0).abs() < 1e-9,
+        "the nearest of the laterally tied points wins (got z = {})",
+        hit.position.z
+    );
+}
+
+#[test]
+fn rank_buckets_are_a_total_order() {
+    use inference::rank_distance_bucket;
+    let tie = 1e-7;
+    let xs: Vec<f64> = (0..200).map(|i| i as f64 * 0.7 * tie).collect();
+    let mut keys: Vec<i64> = xs.iter().map(|&x| rank_distance_bucket(x, tie)).collect();
+    keys.sort();
+    assert!(keys.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(rank_distance_bucket(f64::NAN, tie), i64::MAX);
+    assert_eq!(
+        rank_distance_bucket(1.0, 0.0),
+        rank_distance_bucket(1.0, 0.0)
+    );
+    assert!(rank_distance_bucket(1.0, 0.0) < rank_distance_bucket(2.0, 0.0));
+}
+
+#[test]
+fn a_genuinely_closer_lateral_candidate_still_beats_a_nearer_depth() {
+    // The tie window is a millionth of the aperture; a candidate a tenth of
+    // the aperture closer laterally is a real preference, depth or not.
+    let lateral = 0.1 * 0.1; // a tenth of the cylinder radius
+    let scene = stacked_scene(lateral);
+    let hit = scene.resolve(&cylinder_query(0.1)).expect("inside");
+    assert!(
+        (hit.position.z - 5.0).abs() < 1e-9,
+        "the laterally closer far point wins over the noisy near one"
+    );
+}
+
 // ── ApertureMode::Cylinder (docs/design/camera.md §1) ──────────────────────
 //
 // Parallel (orthographic) projection's pick tolerance is a constant
@@ -4137,4 +4241,76 @@ fn off_plane_points_never_defeats_occlusion() {
         "occlusion must still hide the bottom corner from an off-plane-points query: {:?}",
         snap.position
     );
+}
+
+// ── Item 7: a locked Line chain hovering the cube's edges ──────────────────
+
+/// The ISO-view eye used by the item-7 playtest repro: a unit cube, the
+/// Line tool anchored on the top face's west-edge midpoint and locked to
+/// red, the cursor hovering points of the top face's SOUTH edge.
+fn item7_query(target: Point3) -> SnapQuery {
+    let eye = Point3::new(-2.2, -2.6, 2.9);
+    SnapQuery {
+        weights: SnapWeights::default(),
+        ray: ray_at(eye, target),
+        anchor: Some(Point3::new(0.0, 0.5, 1.0)),
+        lock: Some(SnapLock::Axis(inference::Axis::X)),
+        aperture: 0.01,
+        aperture_mode: ApertureMode::Cone,
+        constraint_plane: Some(
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap(),
+        ),
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
+    }
+}
+
+#[test]
+fn item7_locked_line_hovering_the_south_edge_projects_each_edge_point_onto_the_lock() {
+    let scene = cube_scene();
+    for i in 1..10 {
+        let x = i as f64 / 10.0;
+        let snap = scene
+            .resolve(&item7_query(Point3::new(x, 0.0, 1.0)))
+            .expect("locked resolve always answers");
+        assert!(
+            snap.kind != SnapKind::OnAxis,
+            "x={x}: the south edge under the cursor must snap (got the bare lock fallback at {:?})",
+            snap.position
+        );
+        assert!(
+            (snap.position.x - x).abs() < 1e-6 && (snap.position.y - 0.5).abs() < 1e-9,
+            "x={x}: the edge point projects perpendicularly onto the lock line (got {:?})",
+            snap.position
+        );
+    }
+}
+
+#[test]
+fn item7_locked_line_hovering_the_north_midpoint_reports_the_midpoint() {
+    let scene = cube_scene();
+    let snap = scene
+        .resolve(&item7_query(Point3::new(0.5, 1.0, 1.0)))
+        .expect("locked resolve always answers");
+    assert_eq!(snap.kind, SnapKind::Midpoint, "got {:?}", snap);
+    assert!((snap.position.x - 0.5).abs() < 1e-9 && (snap.position.y - 0.5).abs() < 1e-9);
+    // The tie the UI draws: from the real midpoint to its projection.
+    let from = snap
+        .projected_from
+        .expect("a projected snap remembers where it came from");
+    assert!(
+        (from.x - 0.5).abs() < 1e-9 && (from.y - 1.0).abs() < 1e-9 && (from.z - 1.0).abs() < 1e-9
+    );
+}
+
+#[test]
+fn an_unprojected_snap_has_no_projected_from() {
+    let scene = cube_scene();
+    let snap = scene
+        .resolve(&query(
+            ray_at(Point3::new(0.5, 1.0, 3.0), Point3::new(0.5, 1.0, 1.0)),
+            NARROW,
+        ))
+        .expect("the north midpoint is under the ray");
+    assert_eq!(snap.projected_from, None);
 }

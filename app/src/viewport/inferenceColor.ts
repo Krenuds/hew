@@ -42,9 +42,13 @@ export function inferenceAxisName(info: InferenceInfo): (typeof AXIS_NAME)[numbe
 }
 
 /** The CSS color string for an inference — an `--axis-*` var when it's an
- * axis snap, otherwise the kind's hex (falling back to `--text-faint`). */
+ * axis snap (or LineTool's from-point closing inference, which rides an
+ * axis exactly the same way), otherwise the kind's hex (falling back to
+ * `--text-faint`). */
 export function inferenceCssColor(info: InferenceInfo): string {
   const axisName = inferenceAxisName(info)
-  if (info.kind === 'on-axis' && axisName !== null) return `var(--axis-${axisName})`
+  if ((info.kind === 'on-axis' || info.kind === 'from-point') && axisName !== null) {
+    return `var(--axis-${axisName})`
+  }
   return KIND_CSS_COLOR[info.kind] ?? 'var(--text-faint)'
 }

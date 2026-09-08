@@ -1,16 +1,33 @@
 /**
- * MoveTool logic tests: the durable Alt copy toggle and the ×N / /N array
+ * MoveTool logic tests: the durable copy toggle (Option on macOS, Ctrl on
+ * Windows/Linux — `platform.ts`'s `COPY_MODIFIER_KEY`) and the ×N / /N array
  * refinement, driven through the tool's public event surface against a
  * mocked WasmScene (no three.js meshes — objectsGroup stays null, matching
  * RotateTool.test.ts's approach).
+ *
+ * `isMac` is a load-time constant read from `navigator.platform`, so this
+ * whole file mocks `../platform` to `isMac: true` (macOS) rather than relying
+ * on the CI host's actual OS — every test below except the "Windows/Linux"
+ * describe near the copy-toggle tests assumes that mock. That one test needs
+ * the OTHER platform instead, so it overrides the mock with a scoped
+ * `vi.doMock` + `vi.resetModules()` + dynamic re-import (same pattern
+ * `trayLayout.test.ts` uses for its module-load-time state) — the
+ * statically-imported `MoveTool` above is a different module instance and is
+ * unaffected by that reset.
  */
 
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { MoveTool } from './MoveTool'
+import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
+
+vi.mock('../platform', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../platform')>()
+  return { ...actual, isMac: true, COPY_MODIFIER_KEY: 'Alt', COPY_MODIFIER_LABEL: 'Option' }
+})
 
 /** A ray straight down through world (x, y) — MoveTool ignores it. */
 function rayThrough(x: number, y: number): Ray {
@@ -273,6 +290,101 @@ describe('MoveTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Alt'))
     const last = onMeasurement.mock.calls.at(-1)?.[0] as string
     expect(last.startsWith('Copy ·')).toBe(true)
+  })
+})
+
+describe('MoveTool — copy modifier is platform-specific (Option on macOS, Ctrl elsewhere)', () => {
+  it('toggleCopyMode() flips copy mode directly — the method a Windows/Linux Control clean tap calls', () => {
+    const { tool, onCopyModeChange } = makeTool()
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(tool.statusHint()).toContain('Copy is on')
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it('a bare Control keydown does NOT toggle copy mode on macOS — Option owns it here', () => {
+    // Bare Control never reaches onKey via the real generic dispatch either
+    // (Viewport gates it behind `!isMod`) — this pins that even a direct
+    // call can't mistake Control for the mac copy modifier.
+    const { tool, onCopyModeChange } = makeTool()
+    tool.onKey(makeKeyEvent('Control'))
+    expect(onCopyModeChange).not.toHaveBeenCalled()
+  })
+
+  it('a Windows/Linux Control clean tap toggles copy mode via toggleCopyMode, exactly as the Viewport calls it', () => {
+    // Mirrors Viewport.tsx's onCtrlKeyUp branch: CleanModifierTap arms on a
+    // bare Control keydown and fires toggleCopyMode on a clean keyup.
+    const { tool, onCopyModeChange } = makeTool()
+    const tap = new CleanModifierTap<{ toggleCopyMode(): void }>((key) => key === 'Control')
+
+    tap.onKeyDown({ key: 'Control', repeat: false }, tool)
+    const armed = tap.onKeyUp({ key: 'Control' }, tool)
+    expect(armed).not.toBeNull()
+    armed!.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+  })
+
+  it('a Ctrl+Z chord does NOT toggle copy mode (the clean-tap combo guard)', () => {
+    const { tool, onCopyModeChange } = makeTool()
+    const tap = new CleanModifierTap<{ toggleCopyMode(): void }>((key) => key === 'Control')
+
+    tap.onKeyDown({ key: 'Control', repeat: false }, tool)
+    tap.onKeyDown({ key: 'z', repeat: false }, tool) // Ctrl+Z joins the press
+    const armed = tap.onKeyUp({ key: 'Control' }, tool)
+    expect(armed).toBeNull()
+    expect(onCopyModeChange).not.toHaveBeenCalled()
+  })
+
+  it('a Ctrl+C chord does NOT toggle copy mode either', () => {
+    const { tool, onCopyModeChange } = makeTool()
+    const tap = new CleanModifierTap<{ toggleCopyMode(): void }>((key) => key === 'Control')
+
+    tap.onKeyDown({ key: 'Control', repeat: false }, tool)
+    tap.onKeyDown({ key: 'c', repeat: false }, tool) // Ctrl+C joins the press
+    expect(tap.onKeyUp({ key: 'Control' }, tool)).toBeNull()
+    expect(onCopyModeChange).not.toHaveBeenCalled()
+  })
+})
+
+describe('MoveTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is)', () => {
+  it('a bare Alt keydown does nothing when isMac is false — toggleCopyMode is still reachable directly', async () => {
+    vi.resetModules()
+    vi.doMock('../platform', () => ({
+      isMac: false,
+      isLinux: false,
+      isWindows: true,
+      modLabel: 'Ctrl+',
+      COPY_MODIFIER_KEY: 'Control',
+      COPY_MODIFIER_LABEL: 'Ctrl',
+      isCoarsePointer: () => false,
+      prefersReducedMotion: () => false,
+    }))
+    const { MoveTool: MoveToolOnWindows } = await import('./MoveTool')
+    const { scene } = makeWasmScene()
+    const onCopyModeChange = vi.fn()
+    const tool = new MoveToolOnWindows(
+      scene as never,
+      new THREE.Group(),
+      null,
+      [{ kind: 'object', id: 1n }],
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      null,
+      onCopyModeChange,
+      vi.fn(),
+    )
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).not.toHaveBeenCalled()
+    expect(tool.statusHint()).not.toContain('Copy is on')
+
+    // The Viewport's Control clean tap calls this directly on this platform.
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(tool.statusHint()).toContain('Copy is on')
+    expect(tool.statusHint()).toContain('Ctrl')
   })
 })
 

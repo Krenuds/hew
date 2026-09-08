@@ -39,10 +39,13 @@
  * Enter commits that exact number of DEGREES (unitless) about the effective
  * axis.
  *
- * Copy: tapping Option/Alt toggles copy mode — a DURABLE toggle (not
- * hold-to-copy), so an exact angle can still be typed with the modifier long
- * released (mirrors MoveTool's Alt idiom). While on, the readout is prefixed
- * "Copy ·", the cursor grows a `+` badge, and the commit becomes a
+ * Copy: tapping the platform copy modifier toggles copy mode — a DURABLE
+ * toggle (not hold-to-copy), so an exact angle can still be typed with the
+ * modifier long released (mirrors MoveTool's idiom exactly, incl. the
+ * per-platform Option/Ctrl split — see `platform.ts`'s `COPY_MODIFIER_KEY`
+ * and MoveTool's module doc for the full mac-vs-other-platforms mechanics).
+ * While on, the readout is prefixed "Copy ·", the cursor grows a `+` badge,
+ * and the commit becomes a
  * duplicate: one `duplicate_selection_array` call (count 1, ONE undo step)
  * carrying the COMMITTED rotation affine (`rotateAboutPivotAxis`) in place
  * of a plain transform — the clones become the new selection so a
@@ -55,8 +58,8 @@
  * cross-copy drawing keep working; anything else (out-of-plane, or a
  * 180°-about-an-in-plane-axis flip) copies via `copy_sketch_islands` (Move's
  * out-of-plane kernel primitive) onto one new sketch built with the rotation
- * baked in, also one undo step per source sketch. Tapping Alt again returns
- * to plain Rotate.
+ * baked in, also one undo step per source sketch. Tapping the modifier again
+ * returns to plain Rotate.
  *
  * Array copy (SketchUp's N× / N÷): immediately after a copy commits, typing
  * `3x` (or `x3`, `*3` — both token orders) + Enter re-resolves into 3 total
@@ -141,6 +144,7 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
 import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
+import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 
 export type OnRotateCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
@@ -221,16 +225,16 @@ export class RotateTool implements Tool {
         return 'Click the object you want to rotate.'
       }
       return this.copyMode
-        ? 'Copy is on — click to set the center of rotation. Tap Alt to rotate instead.'
+        ? `Copy is on — click to set the center of rotation. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
         : 'Click to set the center of rotation. The protractor tilts to the face or edge under the cursor — Shift locks that axis, or press → / ← / ↑ to lock X / Y / Z (needed to tip a cylinder onto its side).'
     }
     if (this.stage.kind === 'pivot') {
       return this.copyMode
-        ? 'Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap Alt to rotate instead.'
+        ? `Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
         : 'Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis.'
     }
     return this.copyMode
-      ? 'Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap Alt to rotate instead.'
+      ? `Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
       : 'Move to set the angle (snaps to 15°), or type exact degrees, then click. Shift or → / ← / ↑ lock the axis.'
   }
 
@@ -283,7 +287,8 @@ export class RotateTool implements Tool {
   /** VCB buffer — raw string being typed by the user. */
   private typed: string = ''
 
-  /** Durable copy toggle (tap Option/Alt) — while true, commits duplicate. */
+  /** Durable copy toggle (tap Option on macOS, Ctrl elsewhere — see
+   *  `toggleCopyMode`) — while true, commits duplicate. */
   private copyMode: boolean = false
   /** Notifies the Viewport when the durable copy toggle flips (cursor badge). */
   private onCopyModeChange: OnCopyModeChange
@@ -341,6 +346,22 @@ export class RotateTool implements Tool {
     this.onMeasurementCb = onMeasurement
     this.onCopyModeChange = onCopyModeChange
     this.onArrayCommit = onArrayCommit ?? onCommit
+  }
+
+  /**
+   * Flip the durable copy toggle. Called from `onKey`'s bare Option/Alt tap
+   * on macOS, and — duck-typed by method name — from the Viewport's
+   * window-scope Control clean tap on Windows/Linux (see `platform.ts`'s
+   * `COPY_MODIFIER_KEY`, and MoveTool's identical method). Flips `copyMode`,
+   * notifies the cursor badge, and refreshes the mid-gesture angle readout
+   * so the "Copy · " prefix appears/disappears immediately.
+   */
+  toggleCopyMode(): void {
+    this.copyMode = !this.copyMode
+    this.onCopyModeChange(this.copyMode)
+    if (this.stage.kind === 'ref') {
+      this._reportAngleOrTyped(this.stage.lastDelta)
+    }
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
@@ -575,17 +596,17 @@ export class RotateTool implements Tool {
       return
     }
 
-    // ── Durable copy toggle: TAP Alt/Option to flip, any stage ──
+    // ── Durable copy toggle: TAP Option to flip, any stage — macOS only ──
     // A toggle rather than hold-to-copy so an exact angle can be typed
-    // afterwards — MoveTool's identical idiom (MoveTool.onKey).
-    if (ev.key === 'Alt') {
+    // afterwards — MoveTool's identical idiom (MoveTool.onKey), including
+    // the Windows/Linux Control-clean-tap split: see that tool's onKey
+    // comment and `platform.ts`'s `COPY_MODIFIER_KEY` for why the other
+    // platforms' toggle is armed/fired entirely from the Viewport instead of
+    // this branch.
+    if (isMac && ev.key === 'Alt') {
       if (!ev.repeat) {
         ev.preventDefault() // keep the browser's Alt menu-focus behavior out
-        this.copyMode = !this.copyMode
-        this.onCopyModeChange(this.copyMode)
-        if (this.stage.kind === 'ref') {
-          this._reportAngleOrTyped(this.stage.lastDelta)
-        }
+        this.toggleCopyMode()
       }
       return
     }
@@ -752,8 +773,8 @@ export class RotateTool implements Tool {
     this.onMeasurementCb(this._decorate(`${this._axisTag()}${this.typed}°`))
   }
 
-  /** Prefix a "Copy" tag onto the readout while Option/Alt is on — MoveTool's
-   * identical `_decorate`. */
+  /** Prefix a "Copy" tag onto the readout while the copy toggle is on —
+   * MoveTool's identical `_decorate`. */
   private _decorate(text: string): string {
     return this.copyMode ? `Copy · ${text}` : text
   }

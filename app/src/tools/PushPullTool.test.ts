@@ -47,6 +47,9 @@ function makeWasmScene(opts: {
   parents?: Map<bigint, bigint>
   /** Unit normal `face_normal` reports for the picked face (default +Z). */
   faceNormal?: [number, number, number]
+  /** `face_plane` result for the picked face — `[px,py,pz,nx,ny,nz]`
+   *  (default: origin, normal +Z) — `snapConstraint`'s idle-hover Path A. */
+  facePlane?: [number, number, number, number, number, number]
   /** `sketch_plane` result for the region's sketch — `[px,py,pz,nx,ny,nz]`
    *  (default: ground, point at origin, normal +Z). `undefined` simulates a
    *  stale handle (the pick must then miss, not fall back to ground). */
@@ -57,6 +60,7 @@ function makeWasmScene(opts: {
   componentThroughResults?: bigint[]
 } = {}): WasmScene {
   const faceNormal = opts.faceNormal ?? [0, 0, 1]
+  const facePlane = opts.facePlane ?? [0, 0, 0, ...faceNormal]
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
     pick_face: vi.fn(() => opts.facePick),
@@ -70,6 +74,7 @@ function makeWasmScene(opts: {
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])), // identity
     node_parent: vi.fn((_kind: number, id: bigint) => opts.parents?.get(id)),
     face_normal: vi.fn(() => new Float64Array(faceNormal)),
+    face_plane: vi.fn(() => new Float64Array(facePlane)),
     sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     region_boundary: vi.fn(() => new Float32Array([])),
     face_boundary: vi.fn(() => new Float32Array([])),
@@ -868,5 +873,146 @@ describe('PushPullTool — Ctrl/Cmd extrude-as-new-object modifier', () => {
     expect(tool.statusHint()).not.toContain('Ctrl is on')
     tool.toggleExtrudeAsNew()
     expect(tool.statusHint()).toContain('Ctrl is on')
+  })
+})
+
+// Design v1.1 Lane E "Push/Pull face-first": the idle hover constrains the
+// next snap query to the face/region plane under the cursor, restricted to
+// its `on-face` point (`facesOnly`) — inference's rank order can never let
+// `on-face` outrank a precise point (endpoint/midpoint/…), so without this a
+// hover near a box corner would show — and a drag from there would push/pull
+// from — the corner's chip instead of the face itself.
+describe('PushPullTool — snapConstraint (design v1.1 Lane E "Push/Pull face-first")', () => {
+  it('idle hover over an eligible face returns its plane with facesOnly, memoized per ray (FacePickCache)', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      facePlane: [1, 2, 3, 0, 0, 1],
+    })
+    const { tool } = makeTool(scene)
+
+    const constraint = tool.snapConstraint?.(RAY)
+    expect(constraint).toEqual({
+      constraintPlane: { point: [1, 2, 3], normal: [0, 0, 1] },
+      facesOnly: true,
+    })
+    // A second call for the SAME ray object must reuse the cached pick
+    // rather than re-raycasting (FacePickCache — same pattern as the draw
+    // tools).
+    tool.snapConstraint?.(RAY)
+    expect(scene.pick_face).toHaveBeenCalledTimes(1)
+  })
+
+  it('idle hover with no eligible face but a live sketch region falls back to the region plane, still facesOnly', () => {
+    const scene = makeWasmScene({
+      facePick: undefined,
+      regionPick: makeRegionPick(99n, 7n),
+      sketchPlane: [0, 0, 5, 0, 0, 1],
+    })
+    const { tool } = makeTool(scene)
+
+    const constraint = tool.snapConstraint?.(RAY)
+    expect(constraint).toEqual({
+      constraintPlane: { point: [0, 0, 5], normal: [0, 0, 1] },
+      facesOnly: true,
+    })
+  })
+
+  it('idle hover over nothing (no face, no region) returns null — unconstrained', () => {
+    const scene = makeWasmScene({ facePick: undefined, regionPick: undefined })
+    const { tool } = makeTool(scene)
+
+    expect(tool.snapConstraint?.(RAY)).toBeNull()
+  })
+
+  it('an ineligible face never offers a constraint (matches the click-time refusal, not the ground fallthrough)', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      parents: new Map([[3n, 9n]]), // grouped → ineligible
+      regionPick: undefined,
+    })
+    const { tool } = makeTool(scene)
+
+    expect(tool.snapConstraint?.(RAY)).toBeNull()
+  })
+
+  // Adversarial-review finding: an ineligible face used to collapse to
+  // `eligible === null` indistinguishably from "no face hit at all", so
+  // Path B ran anyway and a sketch region BEHIND the group became the
+  // constraint plane — the hover cue would land on the GROUND plane
+  // through the solid instead of failing closed like onPointerDown does.
+  // `rawPickFor` now lets snapConstraint tell the two cases apart.
+  it('an ineligible face WITH a live sketch region behind it still offers no constraint — never the region\'s plane', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      parents: new Map([[3n, 9n]]), // grouped → ineligible
+      regionPick: makeRegionPick(50n, 51n), // a real region along the SAME ray
+      sketchPlane: [0, 0, 7, 0, 0, 1], // a distinctive plane — must never surface
+    })
+    const { tool } = makeTool(scene)
+
+    expect(tool.snapConstraint?.(RAY)).toBeNull()
+    // Path B's own picks were never even attempted — the fail-closed check
+    // short-circuits before it.
+    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+  })
+
+  it('once a drag has anchored, the constraint is null — HARD_SNAP_KINDS keep working unconstrained ("pull to that edge")', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.capturingInput()).toBe(true)
+    expect(tool.snapConstraint?.(RAY)).toBeNull()
+  })
+
+  it('anchor lies on the face plane: a null snap no longer falls back to the ground plane, only to the ray origin', () => {
+    // Old behavior: a null snap on the first click fell back to
+    // `intersectGroundPlane(ray)` — for this ray that lands at world
+    // z = 0, two units below the face's own plane (z = 5, the ray's
+    // origin). With `snapConstraint` now always offering a facesOnly
+    // constraint plane over an eligible face, a null snap can no longer
+    // happen in practice (the constraint plane's ray intersection always
+    // produces one) — the ray-origin fallback here is defensive only, and
+    // this pins it to the CORRECT (non-ground) value rather than silently
+    // reintroducing the old ground-plane bug if it were ever hit.
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) }) // normal +Z
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY) // RAY origin is [0, 0, 5]
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    const call = (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[0]
+    // anchor.z = 5 (ray origin) → signed distance to (0,0,2) along +Z is -3.
+    // The old ground-plane anchor (z = 0) would have committed +2 instead.
+    expect(call[2]).toBeCloseTo(-3)
+  })
+
+  // Adversarial-review finding: the Viewport calls `snapConstraint(ray)`
+  // then `onPointerDown(snap, ray)` with the IDENTICAL `Ray` object for a
+  // real click — onPointerDown used to re-raycast from scratch instead of
+  // reusing `snapConstraint`'s already-memoized pick, costing a click two
+  // `pick_face` calls instead of one.
+  it('a real click costs ONE pick_face call — onPointerDown reuses snapConstraint\'s cached pick for the same ray', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+
+    tool.snapConstraint?.(RAY) // the Viewport's hover-cue probe
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY) // the click itself
+
+    expect(scene.pick_face).toHaveBeenCalledTimes(1)
+    expect(tool.capturingInput()).toBe(true) // the click still landed correctly
+  })
+
+  it('a real click costs ONE pick_sketch_region call — onPointerDown reuses snapConstraint\'s cached region pick for the same ray', () => {
+    const regionPick = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({ facePick: undefined, regionPick })
+    const { tool } = makeTool(scene)
+
+    tool.snapConstraint?.(RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+
+    expect(scene.pick_sketch_region).toHaveBeenCalledTimes(1)
+    expect(tool.capturingInput()).toBe(true)
   })
 })

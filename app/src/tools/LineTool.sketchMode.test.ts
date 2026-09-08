@@ -92,6 +92,10 @@ function makeWasmScene(opts: {
     ),
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
+    // Movable drawing axes (tool-parity §4) — world identity, read by the
+    // from-point closing inference (`_findFromPointCandidate`) whenever a
+    // chain has 2+ committed points, regardless of sketch mode.
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
   }
   return {
     scene: scene as unknown as WasmScene,

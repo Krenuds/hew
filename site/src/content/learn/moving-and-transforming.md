@@ -1,6 +1,6 @@
 ---
 title: "Move, Rotate, and Scale"
-description: "Move, Rotate, or Scale with full snapping, axis locks, and typed values — or drag an object straight from Select. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
+description: "Move, Rotate, or Scale with full snapping, axis locks, and typed values — or drag an object straight from Select. Copying is a Move with the copy modifier tapped — and ×N multiplies it into an array."
 order: 9
 ---
 
@@ -8,7 +8,7 @@ Move, Rotate, and Scale all work on the current selection — but they don't dem
 
 <docs-video theme="dark" slug="moving-and-transforming" label="moving and transforming demonstration"></docs-video>
 
-The fastest move doesn't even need the Move tool: with **Select** active, press on an object and **drag** it. Past a few pixels the drag becomes a real move — full snapping, axis locks, Alt-copy, typed distances — and releasing the button commits it. The tool stays Select throughout, like dragging an icon on your desktop. Dragging a member of a multi-selection drags the whole selection.
+The fastest move doesn't even need the Move tool: with **Select** active, press on an object and **drag** it. Past a few pixels the drag becomes a real move — full snapping, axis locks, the copy modifier, typed distances — and releasing the button commits it. The tool stays Select throughout, like dragging an icon on your desktop. Dragging a member of a multi-selection drags the whole selection.
 
 All three transform tools show a live ghost preview of the result and a live readout, and all three accept typed exact values mid-gesture.
 
@@ -32,7 +32,7 @@ A quick refresher:
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** tap `Option`/`Alt` — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn through the same sticky rules as hand drawing, so if it lands on other lines they split each other exactly as drawn lines would. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have). Tap `Alt` again to go back to moving.
+**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn through the same sticky rules as hand drawing, so if it lands on other lines they split each other exactly as drawn lines would. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have). Tap the same key again to go back to moving.
 
 **Array copy:** right after a copy commits, type a multiplier and press `Enter`:
 

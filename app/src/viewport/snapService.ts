@@ -103,6 +103,7 @@ function sameTarget(a: Snap, b: Snap): boolean {
 function snapJsToSnap(s: SnapJs): Snap {
   try {
     const dir = s.direction()
+    const from = s.projected_from()
     const elem = s.element()
     const elemKind = s.element_kind()
     return {
@@ -111,6 +112,7 @@ function snapJsToSnap(s: SnapJs): Snap {
       z: s.z(),
       kind: s.kind(),
       direction: dir !== undefined ? [dir[0], dir[1], dir[2]] : undefined,
+      projectedFrom: from !== undefined ? [from[0], from[1], from[2]] : undefined,
       object: s.object(),
       instance: s.instance(),
       element: elem,
@@ -267,6 +269,20 @@ export class SnapService {
      * behavior byte-identical.
      */
     apertureScaleOverride?: number,
+    /**
+     * PushPullTool's idle hover (design v1.1 Lane E): when set, only an
+     * `on-face` kernel candidate — or the `constraintPlane` fallback itself
+     * (`kind: 'plane'`) — is an acceptable result. Inference's rank order is
+     * a hard total order (`crates/inference` `rank_group`) in which
+     * `on-face` can never outrank a precise point (`endpoint`, `midpoint`,
+     * …), so without this a hover near a box corner would resolve — and a
+     * drag from there would push/pull from — that corner instead of the
+     * face under the cursor. Any other-kind winner, held or fresh, is
+     * treated exactly like "no kernel candidate": it falls through to the
+     * `constraintPlane` ray intersection (step 4 below), which every caller
+     * of this flag supplies alongside it.
+     */
+    facesOnly?: boolean,
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
     const constraintPlaneArr =
@@ -277,11 +293,18 @@ export class SnapService {
     // Coarse-pointer (touch) widening — see COARSE_POINTER_APERTURE_SCALE.
     const apertureScale = apertureScaleOverride ?? (isCoarsePointer() ? COARSE_POINTER_APERTURE_SCALE : 1)
 
-    // 1. Acquire at the normal radius.
-    const acquired = this.query(
+    // 1. Acquire at the normal radius. Under `facesOnly`, a non-`on-face`
+    //    winner is discarded here (treated as no candidate at all) so it can
+    //    never be returned NOR latched as `lastSnap` — the two things that
+    //    would let a corner/edge chip win the hover or get resurrected by
+    //    the hysteresis step below.
+    let acquired = this.query(
       ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
       offPlanePoints ?? false,
     )
+    if (facesOnly && acquired !== null && acquired.kind !== 'on-face') {
+      acquired = null
+    }
     if (acquired !== null && STICKY_KINDS.has(acquired.kind)) {
       this.lastSnap = acquired
       return { snap: acquired, fromKernel: true }
@@ -293,7 +316,11 @@ export class SnapService {
     //    Also widen the soft-axis candidate's own cone by the SAME ratio
     //    (finding E) — it never reads the widened `aperture` above, so
     //    without this a held on-axis snap would have no hysteresis at all.
-    if (this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
+    //    Skipped entirely under `facesOnly`: `on-face` is never a
+    //    STICKY_KINDS member, so a sticky point could only be resurrected
+    //    here from a PRIOR (non-facesOnly) query's hold — never a valid
+    //    result while facesOnly is asked for.
+    if (!facesOnly && this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
       const held = this.query(
         ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
         offPlanePoints ?? false,

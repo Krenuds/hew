@@ -90,35 +90,45 @@ const assertSnap = async (label, beat) => {
 
 // The two top edges (10 cm and 6 cm), both laid flat in the BLUE plane —
 // the arrow keys name the locked plane's NORMAL axis (DimensionTool.ts:
-// ArrowUp = blue-normal = the flat plane), so ↑ pins both dimensions
-// horizontal like a drawing sheet, and the lock persists across gestures
-// (the status bar names it) so the second dimension inherits it.
+// ArrowUp = blue-normal = the flat plane). A fresh DimensionTool instance
+// is minted on every rail click (Viewport.tsx's makeDimensionTool, same
+// per-activation pattern as Push/Pull), so the lock does NOT persist from
+// one beat's tool activation to the next — each beat presses its own
+// ArrowUp (design v1.1 "Dimensions on-plane": the lock now applies live,
+// the moment it's pressed — before the first click, or between the two
+// clicks — rather than only being read back at the final drag-out step).
 // Probed exact vertex snaps at this zoom: left (575,401), near (919,608),
 // right (1191,484). Clicks need only land inside the snap radius — the
 // tool commits the SNAPPED vertex, so the readings are exactly 10/6 cm.
 
 // beat 1 — the 10 cm front-left edge, endpoint to endpoint, placed
-// outward (down-left, away from the face).
+// outward (down-left, away from the face). ArrowUp is pressed BETWEEN the
+// two clicks, locking the flat plane before the second point is even
+// picked (still an exact endpoint snap either way — the lock changes what
+// the THIRD click's drag-out plane is, not the baseline's own vertices).
 await h.caption('Dimension: click endpoint to endpoint — ↑ lays the line flat.');
 await h.clickRail('Dimension');
 await h.glide(575, 401, 350);
 await assertSnap('Endpoint', 'dim1-p1');
 await h.click();
+await page.keyboard.press('ArrowUp');
+await page.waitForTimeout(400);
 await h.glide(919, 608, 400);
 await assertSnap('Endpoint', 'dim1-p2');
 await h.click();
-await page.keyboard.press('ArrowUp');
-await page.waitForTimeout(400);
 await h.glide(620, 545, 450);
 await h.click();
 h.mark('dim1');
 await assertDimensionCommitted('dim1');
 await page.waitForTimeout(1300); await shot(1);
 
-// beat 2 — the 6 cm front-right edge; the blue-plane lock is still on,
-// so this one lies flat beside the box too.
+// beat 2 — the 6 cm front-right edge, its own fresh tool instance, so its
+// own ArrowUp locks the flat plane again — this time BEFORE the first
+// click, pinning it from the very start of the gesture.
 await h.caption('The dimension’s plane is anchored to the model, not the camera.');
 await h.clickRail('Dimension');
+await page.keyboard.press('ArrowUp');
+await page.waitForTimeout(400);
 await h.glide(919, 608, 350);
 await assertSnap('Endpoint', 'dim2-p1');
 await h.click();

@@ -431,6 +431,97 @@ test('Push/Pull: double-click repeats the last committed distance on a different
   expect(after[2]).toBeCloseTo(before.bBounds[2], 5) // its base is unchanged (grew upward)
 })
 
+// Design v1.1 Lane E "Push/Pull face-first": inference's rank order can
+// never let an `on-face` snap outrank a precise point (endpoint/midpoint/…),
+// so hovering a few pixels from a box corner used to show — and a drag from
+// there used to push/pull from — the CORNER's endpoint chip instead of the
+// face itself. `PushPullTool.snapConstraint`'s idle-hover `facesOnly` fixes
+// this: the hover cue is always the on-face dot under the cursor, and a real
+// drag from near the corner pushes the intended (top) face by the typed
+// distance — the box's footprint is unchanged, only its height grows.
+test('Push/Pull: hovering 3px from a box corner shows the on-face cue, and a drag from there pushes the intended face', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -7, 6], target: [1, 1, 1], fovDeg: 45 })
+    h.drawBox([0, 0, 0], [2, 2, 0], 2) // 2x2x2 box, top face at z=2
+  })
+  await page.keyboard.press('p') // real key -> Push/Pull tool
+  await page.locator('text=Click a face').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+
+  // A point 3 SCREEN px from the top face's (2,2,2) corner, offset toward
+  // the face's own center — well inside the kernel's endpoint snap
+  // aperture, so without `facesOnly` this resolves as the corner's own
+  // Endpoint chip, not the face under the cursor.
+  const corner = await toPage([2, 2, 2])
+  const faceCenter = await toPage([1, 1, 2])
+  const dx = faceCenter.x - corner.x
+  const dy = faceCenter.y - corner.y
+  const len = Math.hypot(dx, dy)
+  const hoverPt = { x: corner.x + (dx / len) * 3, y: corner.y + (dy / len) * 3 }
+
+  // Wiggle onto the point (defeats event coalescing on a fresh position,
+  // same as the playtest-fixes.spec.ts `hoverUntilCue` pattern) and poll
+  // until the chip settles. `facesOnly` (snapService.ts) replaces a
+  // non-on-face kernel winner with the constraintPlane RAY FALLBACK, kind
+  // 'plane' — so this close to a corner, where the kernel's own winning
+  // candidate before filtering is the corner's Endpoint (never a separate,
+  // lower-ranked on-face entry the same query could fall back to), the
+  // chip reads "On Plane", not "On Face". Either is the fix working; only
+  // "Endpoint" would mean it isn't.
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.move(hoverPt.x + 1, hoverPt.y)
+        await page.mouse.move(hoverPt.x, hoverPt.y)
+        const onFace = await page.getByText('On Face', { exact: true }).count()
+        const onPlane = await page.getByText('On Plane', { exact: true }).count()
+        return onFace + onPlane
+      },
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0)
+  expect(await page.getByText('Endpoint', { exact: true }).count()).toBe(0)
+
+  const before = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const id = h.getObjectIds()[0]
+    return { id, bounds: h.getObjectBounds(id) }
+  })
+
+  // Drag from that same near-corner point straight up 1 m and commit.
+  const target = await toPage([2, 2, 3])
+  await page.mouse.down() // first click: pick the top face, start the drag
+  await page.mouse.up()
+  await page.mouse.move(target.x, target.y, { steps: 10 })
+  await page.mouse.down() // second click: commit
+  await page.mouse.up()
+  await page.waitForTimeout(150)
+
+  const after = await page.evaluate(
+    (id) => window.__hew_test!.getObjectBounds(id),
+    before.id,
+  )
+  // The TOP face grew by ~1 m — never the corner's own endpoint hijacking
+  // the depth reference, and never a side face pushed outward instead.
+  expect(after[5]).toBeCloseTo(3, 1) // top now near z=3 (was z=2)
+  expect(after[0]).toBeCloseTo(before.bounds[0], 5) // X footprint unchanged
+  expect(after[1]).toBeCloseTo(before.bounds[1], 5) // Y footprint unchanged
+  expect(after[3]).toBeCloseTo(before.bounds[3], 5)
+  expect(after[4]).toBeCloseTo(before.bounds[4], 5)
+})
+
 // ---------------------------------------------------------------------------
 // Offset — offsetRegion / offsetFace
 // ---------------------------------------------------------------------------

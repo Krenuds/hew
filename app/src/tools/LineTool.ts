@@ -85,7 +85,7 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
-import { segmentLength, directionBetween, rehomePlaneNormal } from './lineInput'
+import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, isPointOnDrawPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -144,6 +144,46 @@ const CHAIN_VERTEX_MERGE_EPS = 1e-9
  *  one-value band — agreeing on the magnitude but not on the boundary is not
  *  agreeing. */
 const DEGENERATE_SEGMENT_EPS = 1e-9
+
+/**
+ * Screen-pixel radius within which the FROM-POINT closing inference (module
+ * doc — SketchUp's classic "draw three sides of a square, the fourth snaps
+ * shut") takes over the cursor — see `_findFromPointCandidate`. Mirrors
+ * `DimensionTool`'s `ALIGN_SNAP_PX` screen-space acquire-radius pattern.
+ */
+const FROM_POINT_SNAP_PX = 8
+
+/** World-space fallback tolerance for the from-point inference before the
+ *  first `updateDiskScale` tick lands (no live camera feed yet — every
+ *  legacy unit test that never wires a camera in). */
+const FROM_POINT_FALLBACK_TOLERANCE_M = 0.02
+
+/**
+ * Kernel/inference snap kinds weak enough that the from-point closing
+ * inference is allowed to override them. A precise kernel snap (endpoint,
+ * midpoint, center, intersection, quadrant, tangent, on-edge, on-guide, ...)
+ * always wins over this UI-side inference — this override only fires when
+ * the resolved snap carries no such commitment: no snap at all, a bare
+ * constraint-plane/ground fallback, an on-face hover, or the kernel's own
+ * SOFT on-axis inference (no lock held).
+ */
+const FROM_POINT_WEAK_SNAP_KINDS: ReadonlySet<string> = new Set(['plane', 'ground', 'on-face', 'on-axis'])
+
+/** How far past the anchor, along a fresh axis lock, `_readoptFaceForLock`
+ *  probes for the face the lock actually runs along. A millimetre: past any
+ *  merge tolerance at the shared edge, well inside any face a drawing
+ *  gesture could be aimed at. */
+const READOPT_PROBE_M = 1e-3
+
+/** |cos| below which a unit lock direction counts as lying IN a face plane
+ *  (`_readoptFaceForLock`) — a numerical guard, not a kernel tolerance. */
+const LOCK_IN_PLANE_EPS = 1e-6
+
+/** Metres off a face's plane a point may sit and still count as ON that
+ *  face for the face re-adoption tests (`_faceCursor`, `_readoptFaceForPoint`,
+ *  `_readoptFaceForLock`) — the kernel's own plane tolerance scale
+ *  (`GROUND_PLANE_EPS`), well below any drawn feature. */
+const ANCHOR_ON_PLANE_EPS_M = 1e-6
 
 /** Plane chain: idle, or anchored on a frozen `DrawPlane`/`SketchTarget`
  *  with the last placed point (world-space; z = 0 exactly on the ground
@@ -256,6 +296,122 @@ export class LineTool implements Tool {
    *  describe "no committed history for the chain in progress". */
   private _chainVertices: { point: V3; sketch: bigint }[] = []
 
+  /** The snap last seen on hover — `Viewport.publishSnapCues`'s established
+   *  `'lastSnap' in activeTool` opt-in (`DimensionTool`'s own field, same
+   *  contract). Mirrors the raw `snap` argument to `onPointerMove` exactly,
+   *  EXCEPT while the from-point closing inference (module doc,
+   *  `_findFromPointCandidate`) is winning: then this reports that
+   *  candidate as a synthetic `Snap` (`kind: 'from-point'`), so the cursor-
+   *  anchored tooltip chip and the CueLayer dashed guide line both track
+   *  the point a click would actually commit, not wherever SnapService
+   *  first resolved. Cleared to `null` whenever plane mode has no cursor to
+   *  report (idle, or a degenerate ray) — face mode never sets this. */
+  lastSnap: Snap | null = null
+
+  /** Live world-per-pixel feed (`Tool.updateDiskScale`'s doc — feature-
+   *  detected by the Viewport render loop, called once per frame before this
+   *  tool draws anything): the from-point inference's `FROM_POINT_SNAP_PX`
+   *  acquire radius is a SCREEN distance, and `onPointerMove`/`onPointerDown`
+   *  only ever carry a per-pixel cursor ray, never the camera itself or its
+   *  projection. `null` until the first post-activation frame (every legacy
+   *  unit test, which never wires a camera in) — `_fromPointTolerance` falls
+   *  back to `FROM_POINT_FALLBACK_TOLERANCE_M` in that case. Mirrors
+   *  `DimensionTool`'s identical `_worldPerPixelFn`/`_cameraPos` pair. */
+  private _worldPerPixelFn: ((dist: number) => number) | null = null
+  private _cameraPos: V3 | null = null
+
+  /** Live pixel-scale feed for the from-point closing inference — see
+   *  `_worldPerPixelFn`'s doc. */
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this._worldPerPixelFn = worldPerPixel
+    this._cameraPos = [camera.position.x, camera.position.y, camera.position.z]
+  }
+
+  /** World-space from-point-inference tolerance at `atPoint`
+   *  (`FROM_POINT_SNAP_PX` converted via the live `updateDiskScale` feed, or
+   *  `FROM_POINT_FALLBACK_TOLERANCE_M` before the first tick of it has
+   *  landed — see `_worldPerPixelFn`'s doc). */
+  private _fromPointTolerance(atPoint: V3): number {
+    if (this._worldPerPixelFn === null || this._cameraPos === null) return FROM_POINT_FALLBACK_TOLERANCE_M
+    const dist = segmentLength(atPoint, this._cameraPos)
+    return this._worldPerPixelFn(dist) * FROM_POINT_SNAP_PX
+  }
+
+  /**
+   * The from-point closing-inference candidate (module doc): while a
+   * plane-mode chain has at least two committed points, for every EARLIER
+   * chain vertex `p` (every one except the current segment's start `S`) and
+   * each of the three movable drawing-axis directions, consider the
+   * infinite line through `p` along that axis (`fromPointCandidate`,
+   * lineInput.ts). If the current segment is itself axis-locked, the
+   * candidate is where the LOCKED segment (its actual current direction,
+   * `S` → `cursor` — already collinear with the lock, so this is exactly
+   * "S + s·u") meets `p`'s line; unlocked, it's the foot of the
+   * perpendicular from `cursor` onto `p`'s line. Only accepted within
+   * `_fromPointTolerance` of `cursor`; several candidates can qualify, and
+   * the closest one wins.
+   *
+   * Returns null outside plane mode, with fewer than two committed points,
+   * while axis-locked but the cursor hasn't moved off `S` yet (no segment
+   * direction to intersect with), or when nothing lands within tolerance.
+   */
+  private _findFromPointCandidate(cursor: V3): { point: V3; direction: V3 } | null {
+    if (this.planeStage.kind !== 'anchored') return null
+    if (this._chainVertices.length < 2) return null
+
+    const { plane, anchor: segStart } = this.planeStage
+    let lockDir: V3 | null = null
+    if (this.lockAxis !== null) {
+      lockDir = directionBetween(segStart, cursor)
+      if (lockDir === null) return null
+    }
+
+    const frame = getDrawingAxes(this.wasmScene)
+    const axes: V3[] = [frame.x, frame.y, frame.z]
+    const earlierVertices = this._chainVertices.slice(0, -1)
+
+    let best: { point: V3; direction: V3; distance: number } | null = null
+    for (const { point: p } of earlierVertices) {
+      for (const d of axes) {
+        const candidate = fromPointCandidate(p, d, segStart, cursor, lockDir, plane.origin, plane.u, plane.v)
+        if (candidate === null) continue
+        const distance = segmentLength(candidate, cursor)
+        if (distance > this._fromPointTolerance(candidate)) continue
+        if (best === null || distance < best.distance) best = { point: candidate, direction: d, distance }
+      }
+    }
+    return best === null ? null : { point: best.point, direction: best.direction }
+  }
+
+  /**
+   * `_planeCursor`'s result, then the from-point closing inference layered
+   * on top when it wins precedence over the resolved `snap`
+   * (`FROM_POINT_WEAK_SNAP_KINDS`) — shared by the move-preview and the
+   * click-commit path so a click always lands exactly where the preview/
+   * chip showed it would. Returns null only when `_planeCursor` itself does
+   * (no cursor at all).
+   */
+  private _resolvePlaneCursor(
+    snap: Snap | null, ray: Ray, plane: DrawPlane,
+  ): { point: V3; snap: Snap | null } | null {
+    const cursor = this._planeCursor(snap, ray, plane)
+    if (cursor === null) return null
+    if (snap === null || FROM_POINT_WEAK_SNAP_KINDS.has(snap.kind)) {
+      const fromPoint = this._findFromPointCandidate(cursor)
+      if (fromPoint !== null) {
+        return {
+          point: fromPoint.point,
+          snap: {
+            x: fromPoint.point[0], y: fromPoint.point[1], z: fromPoint.point[2],
+            kind: 'from-point',
+            direction: fromPoint.direction,
+          },
+        }
+      }
+    }
+    return { point: cursor, snap }
+  }
+
   /** The last pointer ray's direction seen by either `onPointerMove` or
    *  `onPointerDown` — a best-effort "current view direction" for
    *  `rehomePlaneNormal`'s view-facing fallback (tool-parity playtest2
@@ -288,9 +444,20 @@ export class LineTool implements Tool {
   /** Run `pick_face` for `ray` and return the eligible {object, face} pair
    *  (or null), reusing a cached result for the same `ray` reference if one
    *  was already computed earlier in this same pointer event. */
-  private _eligiblePickFor(ray: Ray): { object: bigint; face: bigint } | null {
+  private _eligiblePickFor(ray: Ray, probeEdges = false): { object: bigint; face: bigint } | null {
     return this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
-      this._isEligible(object, instance))
+      this._isEligible(object, instance), probeEdges)
+  }
+
+  /** Whether `snap` sits on an object's edge or corner — the one place a
+   *  pick ray misses the faces under it, so the face pick may probe beside
+   *  the ray (`FacePickCache.pickFor`'s `probeEdges`). */
+  private _snapOnBoundary(snap: Snap | null): boolean {
+    return (
+      snap !== null &&
+      snap.object !== undefined &&
+      (snap.elementKind === 'vertex' || snap.elementKind === 'edge')
+    )
   }
 
   constructor(
@@ -357,6 +524,15 @@ export class LineTool implements Tool {
     }
 
     if (this.faceStage.kind === 'anchored') {
+      // The FIRST segment of a face chain is not held to the adopted face:
+      // the anchor sits on an edge two faces share as often as not, and
+      // which of them the user means is only known from where the second
+      // point goes (`_faceCursor` re-adopts the face that holds both).
+      // A lock decides that instead (`_readoptFaceForLock`), and from the
+      // second segment on the chain stays on its face.
+      if (this.faceStage.points.length === 1 && this.lockAxis === null) {
+        return Object.keys(lockPart).length > 0 ? lockPart : null
+      }
       return {
         ...lockPart,
         constraintPlane: {
@@ -565,7 +741,7 @@ export class LineTool implements Tool {
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._lastViewDir = ray.direction
-    if (this._currentMode(ray) === 'face') {
+    if (this._currentMode(ray, this._snapOnBoundary(snap)) === 'face') {
       this._onPointerMoveFace(snap, ray)
     } else {
       this._onPointerMovePlane(snap, ray)
@@ -584,7 +760,7 @@ export class LineTool implements Tool {
    *     under the cursor (via `pick_face`), else plane mode (which itself
    *     resolves sketch-vs-ground via `_resolveIdleTarget`).
    */
-  private _currentMode(ray?: Ray): 'face' | 'plane' {
+  private _currentMode(ray?: Ray, probeEdges = false): 'face' | 'plane' {
     if (this.faceStage.kind === 'anchored') return 'face'
     if (this.planeStage.kind === 'anchored') return 'plane'
     if (this._activeContext !== null) return 'face'
@@ -593,7 +769,7 @@ export class LineTool implements Tool {
     if (this.idlePlaneLock !== null) return 'plane'
     if (ray === undefined) return 'plane'
 
-    return this._eligiblePickFor(ray) !== null ? 'face' : 'plane'
+    return this._eligiblePickFor(ray, probeEdges) !== null ? 'face' : 'plane'
   }
 
   private _onPointerMovePlane(snap: Snap | null, ray: Ray): void {
@@ -604,25 +780,33 @@ export class LineTool implements Tool {
       if (this.idlePlaneLock !== null && snap !== null) {
         this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
       }
+      this.lastSnap = null
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
       return
     }
     const { plane, anchor } = this.planeStage
-    const cursor = this._planeCursor(snap, ray, plane)
-    if (cursor === null) {
+    const resolved = this._resolvePlaneCursor(snap, ray, plane)
+    if (resolved === null) {
+      this.lastSnap = null
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
       return
     }
+    const { point: cursor, snap: effectiveSnap } = resolved
+    this.lastSnap = effectiveSnap
     this._lastPlaneCursor = cursor
     this._clearPreview()
-    this._drawRubberBandSegment(anchor, cursor, this._previewStyle(snap))
+    this._drawRubberBandSegment(anchor, cursor, this._previewStyle(effectiveSnap))
     this._reportMeasurement(anchor, cursor)
     this._publishTransient()
   }
 
   private _onPointerMoveFace(snap: Snap | null, ray: Ray): void {
+    // Face mode never re-interprets the cursor, so the cue path must see the
+    // raw snap — not a from-point candidate left behind by a plane-mode chain
+    // that has since been cancelled or closed.
+    this.lastSnap = null
     if (this.faceStage.kind !== 'anchored') {
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
@@ -654,9 +838,72 @@ export class LineTool implements Tool {
    */
   private _faceCursor(snap: Snap | null, ray: Ray): V3 | null {
     if (this.faceStage.kind !== 'anchored') return null
-    if (snap !== null) return [snap.x, snap.y, snap.z]
     const { planePoint, normal } = this.faceStage
+    if (snap === null) return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
+    const p: V3 = [snap.x, snap.y, snap.z]
+    if (this.faceStage.points.length !== 1 || this.lockAxis !== null) return p
+    // First segment, unlocked: the snap was not held to the adopted face
+    // (`snapConstraint`). On that face's plane it is simply the cursor. Off
+    // it, the point may be on the neighbouring face the anchor also lies on
+    // — the face the user is actually drawing across — in which case the
+    // chain moves there. Anything else (a corner of another object, empty
+    // ground) is projected onto the adopted face along the ray, exactly as
+    // the constraint would have placed it.
+    const anchor = this.faceStage.points[0]
+    if (Math.abs(dotV3(normal, [p[0] - anchor[0], p[1] - anchor[1], p[2] - anchor[2]])) <= ANCHOR_ON_PLANE_EPS_M) {
+      return p
+    }
+    if (this._readoptFaceForPoint(p, ray, this._snapOnBoundary(snap))) return p
     return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
+  }
+
+  /**
+   * Move a bare-anchor face chain onto the eligible face under `ray` when
+   * that face's plane holds both the anchor and `p` (the point about to
+   * become the second vertex) — the second point deciding which of an
+   * edge's two faces the first click meant. False, and nothing changes,
+   * when there is no such face.
+   */
+  private _readoptFaceForPoint(p: V3, ray: Ray, probeEdges: boolean): boolean {
+    if (this.faceStage.kind !== 'anchored') return false
+    const eligible = this._eligiblePickFor(ray, probeEdges)
+    if (eligible === null) return false
+    if (eligible.object === this.faceStage.object && eligible.face === this.faceStage.face) return false
+    const plane = this._worldFacePlane(eligible.object, eligible.face)
+    if (plane === null) return false
+    const anchor = this.faceStage.points[0]
+    const off = (q: V3) => Math.abs(dotV3(plane.normal, [q[0] - plane.point[0], q[1] - plane.point[1], q[2] - plane.point[2]]))
+    if (off(anchor) > ANCHOR_ON_PLANE_EPS_M || off(p) > ANCHOR_ON_PLANE_EPS_M) return false
+    this.faceStage = {
+      kind: 'anchored',
+      object: eligible.object,
+      face: eligible.face,
+      normal: plane.normal,
+      planePoint: anchor,
+      points: [anchor],
+    }
+    this._lastFaceCursor = null
+    return true
+  }
+
+  /** A face's world-space plane (a point on it and its unit normal), through
+   *  the active instance's pose when drawing inside one; null for a stale
+   *  handle or a singular pose. */
+  private _worldFacePlane(object: bigint, face: bigint): { point: V3; normal: V3 } | null {
+    const normal = worldFaceNormal(this.wasmScene, object, face, this._activeInstance)
+    if (normal === null) return null
+    const planeArr = this.wasmScene.face_plane(object, face)
+    let point: V3 = [planeArr[0], planeArr[1], planeArr[2]]
+    if (this._activeInstance !== null) {
+      const pose = this.wasmScene.instance_pose(this._activeInstance)
+      if (pose === undefined) return null
+      point = [
+        pose[0] * point[0] + pose[1] * point[1] + pose[2] * point[2] + pose[3],
+        pose[4] * point[0] + pose[5] * point[1] + pose[6] * point[2] + pose[7],
+        pose[8] * point[0] + pose[9] * point[1] + pose[10] * point[2] + pose[11],
+      ]
+    }
+    return { point, normal }
   }
 
   /**
@@ -703,7 +950,7 @@ export class LineTool implements Tool {
     // genuine double-click places exactly one point then `onDoubleClick` ends
     // the chain. Every distinct click reaches here, regardless of cadence.
     this._lastViewDir = ray.direction
-    if (this._currentMode(ray) === 'face') {
+    if (this._currentMode(ray, this._snapOnBoundary(snap)) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
       this._onPointerDownPlane(snap, ray)
@@ -763,6 +1010,7 @@ export class LineTool implements Tool {
         this.lockAxis = null
       } else {
         this.lockAxis = requested
+        this._readoptFaceForLock()
       }
       // An explicit arrow lock supersedes any Shift-held lock.
       this.shiftAxisLock = false
@@ -786,6 +1034,68 @@ export class LineTool implements Tool {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
     }
+  }
+
+  /**
+   * A face chain that has only its anchor, locked to an axis that does not
+   * lie in the adopted face, re-adopts the neighbouring face that holds
+   * both the anchor and the lock — if the point just ahead along the lock
+   * is on such a face.
+   *
+   * Why: the first click on an edge shared by two faces (the midpoint of a
+   * box's top/west edge, say) adopts whichever face the pick ray hit first
+   * — the west face as often as the top. Lock red from there and the
+   * constraint plane (x = 0) is NORMAL to the lock: every candidate the
+   * plane keeps projects onto the anchor and is culled, the resolver falls
+   * back to the lock line's ray-nearest point, and the rubber band jumps
+   * with camera parallax as the cursor moves along the top face's south
+   * edge (playtest item 7). The user pressing → from that midpoint means
+   * "draw along red on the top", so the top face is the plane to draw on.
+   *
+   * The probe is the pick the first click itself would have made a hair
+   * further along the lock: a ray from the eye through the point
+   * `READOPT_PROBE_M` past the anchor along the lock direction, run through
+   * the same eligibility as every face pick. It must land on a face whose
+   * plane contains the anchor and the lock direction; anything else (no
+   * face there, a face that only shares the anchor) leaves the chain as it
+   * was. Only the bare anchor re-adopts — once a segment is committed on a
+   * face, the chain stays on that face (face mode never re-homes).
+   */
+  private _readoptFaceForLock(): void {
+    if (this.faceStage.kind !== 'anchored' || this.faceStage.points.length !== 1) return
+    if (this.lockAxis === null || this._cameraPos === null) return
+    const frame = getDrawingAxes(this.wasmScene)
+    const dir: V3 = [frame.x, frame.y, frame.z][this.lockAxis]
+    if (Math.abs(dotV3(dir, this.faceStage.normal)) <= LOCK_IN_PLANE_EPS) return // the lock already lies in the face
+    const anchor = this.faceStage.points[0]
+    const probe: V3 = [
+      anchor[0] + dir[0] * READOPT_PROBE_M,
+      anchor[1] + dir[1] * READOPT_PROBE_M,
+      anchor[2] + dir[2] * READOPT_PROBE_M,
+    ]
+    const toProbe = directionBetween(this._cameraPos, probe)
+    if (toProbe === null) return
+    const eligible = this._eligiblePickFor({ origin: this._cameraPos, direction: toProbe })
+    if (eligible === null) return
+    if (eligible.object === this.faceStage.object && eligible.face === this.faceStage.face) return
+    const plane = this._worldFacePlane(eligible.object, eligible.face)
+    if (plane === null) return
+    const { normal } = plane
+    if (Math.abs(dotV3(dir, normal)) > LOCK_IN_PLANE_EPS) return // that face cannot hold the lock either
+    // The anchor must lie in the new face's own plane: a face with a
+    // compatible normal somewhere else along the probe ray (a parallel
+    // floor, another box's wall) is not the neighbour.
+    const off = dotV3(normal, [anchor[0] - plane.point[0], anchor[1] - plane.point[1], anchor[2] - plane.point[2]])
+    if (Math.abs(off) > ANCHOR_ON_PLANE_EPS_M) return
+    this.faceStage = {
+      kind: 'anchored',
+      object: eligible.object,
+      face: eligible.face,
+      normal,
+      planePoint: anchor,
+      points: [anchor],
+    }
+    this._lastFaceCursor = null
   }
 
   /**
@@ -887,6 +1197,7 @@ export class LineTool implements Tool {
     this._lastPlaneCursor = null
     this._lastFaceCursor = null
     this._prevSegmentDir = null
+    this.lastSnap = null
     this._chainVertices = []
     this.lockAxis = null
     this.shiftAxisLock = false
@@ -984,9 +1295,12 @@ export class LineTool implements Tool {
       this._publishTransient()
     } else {
       const { plane, target, anchor } = this.planeStage
-      const cursor = this._planeCursor(snap, ray, plane)
-      if (cursor === null) return
-      this._commitPlaneSegment(plane, target, anchor, cursor)
+      // Same resolve the preview just showed (`_onPointerMovePlane`), so a
+      // click lands exactly on the from-point candidate the chip/preview
+      // promised — never the raw, un-inferred point underneath it.
+      const resolved = this._resolvePlaneCursor(snap, ray, plane)
+      if (resolved === null) return
+      this._commitPlaneSegment(plane, target, anchor, resolved.point)
     }
   }
 
@@ -1169,7 +1483,7 @@ export class LineTool implements Tool {
     if (this.faceStage.kind === 'idle') {
       if (snap === null) return
 
-      const eligible = this._eligiblePickFor(ray)
+      const eligible = this._eligiblePickFor(ray, this._snapOnBoundary(snap))
       if (eligible === null) return
 
       const { object: objectHandle, face: faceHandle } = eligible

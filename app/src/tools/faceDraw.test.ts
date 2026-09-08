@@ -130,3 +130,33 @@ describe('worldFaceNormal (component-edit-parity.md phase A2)', () => {
     expect(worldFaceNormal(scene, 3n, 4n, 42n)).toBeNull()
   })
 })
+
+describe('FacePickCache boundary probe', () => {
+  const RAY = { origin: [0, 0, 5] as [number, number, number], direction: [0, 0, -1] as [number, number, number] }
+  const eligible = () => true
+  const sceneMissingOnTheRay = () => {
+    const pick_face = vi.fn((_ox: number, _oy: number, _oz: number, dx: number, dy: number, dz: number) =>
+      dx === 0 && dy === 0 && dz === -1
+        ? undefined // exactly on the edge: a strict miss
+        : { object: () => 7n, instance: () => undefined, face: () => 3n, free: vi.fn() },
+    )
+    return { scene: { pick_face } as unknown as Parameters<FacePickCache['pickFor']>[0], pick_face }
+  }
+
+  it('does not probe unless asked, and a miss costs one raycast', () => {
+    const { scene, pick_face } = sceneMissingOnTheRay()
+    const cache = new FacePickCache()
+    expect(cache.pickFor(scene, RAY, eligible)).toBeNull()
+    expect(pick_face).toHaveBeenCalledTimes(1)
+  })
+
+  it('with probeEdges, a miss on the ray retries beside it and takes the first face hit', () => {
+    const { scene, pick_face } = sceneMissingOnTheRay()
+    const cache = new FacePickCache()
+    expect(cache.pickFor(scene, RAY, eligible, true)).toEqual({ object: 7n, face: 3n })
+    expect(pick_face).toHaveBeenCalledTimes(2) // the ray, then the first nudge hit
+    // Cached per (ray, probe) — the plain question about the same ray is
+    // answered afresh, not from the probed answer.
+    expect(cache.pickFor(scene, RAY, eligible)).toBeNull()
+  })
+})
