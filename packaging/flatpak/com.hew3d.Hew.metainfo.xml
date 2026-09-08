@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.hew3d.Hew</id>
+  <name>Hew</name>
+  <summary>3D modeling the SketchUp way, on watertight solids</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <description>
+    <p>
+      Hew is a 3D modeler: draw on faces, push and pull them, and let
+      inference snapping do the aiming. Every closed extrusion is a
+      discrete, watertight object, and combining objects is always an
+      explicit choice, so a model is printable from the first click.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.hew3d.Hew.desktop</launchable>
+  <url type="homepage">https://hew3d.com</url>
+  <url type="bugtracker">https://github.com/hew3d/hew/issues</url>
+  <provides>
+    <binary>hew</binary>
+    <binary>hew-cli</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="1.0.0" date="2026-09-05" />
+  </releases>
+</component>

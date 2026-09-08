@@ -1,0 +1,24 @@
+# Maintainer: Kurt Granroth <kurt@granroth.com>
+# Rendered by packaging/render.sh — edit that script, not the hashes here.
+pkgname=hew-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="3D modeler with SketchUp's interaction model on a solids-first kernel (binary release)"
+arch=('x86_64' 'aarch64')
+url="https://hew3d.com"
+license=('AGPL-3.0-only')
+depends=('webkit2gtk-4.1' 'gtk3')
+provides=('hew' 'hew-cli')
+conflicts=('hew')
+options=('!strip')
+source_x86_64=("https://github.com/hew3d/hew/releases/download/v${pkgver}/Hew_${pkgver}_amd64.deb")
+source_aarch64=("https://github.com/hew3d/hew/releases/download/v${pkgver}/Hew_${pkgver}_arm64.deb")
+sha256sums_x86_64=('cfaeb57ccf93be1e27981d45adbecd187985de96b1a336576ef4364f5c874547')
+sha256sums_aarch64=('c5645c047ad1f02e3612d949594551259abd43495aa435d234753f6493af191f')
+
+package() {
+  # The .deb's data tarball already has the FHS layout (/usr/bin/hew,
+  # /usr/bin/hew-cli, the desktop entry and hicolor icons).
+  bsdtar -xf data.tar.gz -C "${pkgdir}"
+  chmod 755 "${pkgdir}/usr/bin/hew" "${pkgdir}/usr/bin/hew-cli"
+}
