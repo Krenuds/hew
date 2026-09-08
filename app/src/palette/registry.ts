@@ -228,6 +228,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'scenes-previous', label: 'Previous Scene', description: 'Activate the previous Scene in the list.', group: 'Actions', synonyms: ['scene'], gate: 'scenesAny' },
   { id: 'scenes-transitions', label: 'Scene Transitions', description: 'Toggle the 0.6s camera tween when activating a Scene.', group: 'Actions', synonyms: ['scene', 'animation', 'tween'] },
   { id: 'toggle-object-info', label: 'Toggle Object Info', description: 'Show or hide the Object Info panel.', group: 'Actions' },
+  { id: 'toggle-changes', label: 'Toggle Changes', description: 'Show or hide the Changes panel — this session’s undo/redo entries since the last save.', group: 'Actions', synonyms: ['history', 'undo', 'redo'] },
   { id: 'toggle-debug-log', label: 'Toggle Debug Log', description: 'Show or hide the debug log panel.', group: 'Actions' },
   { id: 'open-library', label: 'Library', description: 'Browse and insert saved components, materials, and models', group: 'Actions', synonyms: ['library', 'components', 'insert'] },
   { id: 'save-to-library-doc', label: 'Save to Library…', description: 'Save the whole document as a library item.', group: 'Actions', synonyms: ['library', 'component', 'model'] },

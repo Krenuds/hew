@@ -85,6 +85,10 @@ export interface MenuBarProps {
   onRedo: () => void
   canUndo: boolean
   canRedo: boolean
+  /** "Undo Push/Pull" / "Redo Move" — the top undo/redo entry's label
+   * (Lane C, docs/design/v1.1-cycle.md). Defaults to the bare verb. */
+  undoLabel?: string
+  redoLabel?: string
   /** The currently active tool name. */
   activeTool?: string
   /** Called when the user picks a tool from the menu. */
@@ -97,6 +101,8 @@ export interface MenuBarProps {
   showTags?: boolean
   /** Whether the Scenes pane is visible (docs/design/scenes.md §5). */
   showScenes?: boolean
+  /** Whether the Changes pane is visible (Lane C, docs/design/v1.1-cycle.md). */
+  showChanges?: boolean
   /** Whether the Object Info pane is visible. */
   showObjectInfo?: boolean
   /** Whether the Debug Log panel is visible. */
@@ -111,6 +117,8 @@ export interface MenuBarProps {
   onToggleTags?: () => void
   /** Toggle the Scenes pane. */
   onToggleScenes?: () => void
+  /** Toggle the Changes pane. */
+  onToggleChanges?: () => void
   /** Toggle the Object Info pane. */
   onToggleObjectInfo?: () => void
   /** Toggle the Debug Log panel. */
@@ -594,12 +602,15 @@ export function MenuBar({
   onRedo,
   canUndo,
   canRedo,
+  undoLabel = 'Undo',
+  redoLabel = 'Redo',
   activeTool,
   onSelectTool,
   showModelInfo = true,
   showMaterials = true,
   showTags = false,
   showScenes = false,
+  showChanges = false,
   showObjectInfo = false,
   showDebugLog = false,
   showLibrary = false,
@@ -607,6 +618,7 @@ export function MenuBar({
   onToggleMaterials,
   onToggleTags,
   onToggleScenes,
+  onToggleChanges,
   onToggleObjectInfo,
   onToggleDebugLog,
   onToggleLibrary,
@@ -787,13 +799,13 @@ export function MenuBar({
         {openMenu === 'edit' && (
           <div style={DROPDOWN_STYLE}>
             <MenuItem
-              label="Undo"
+              label={canUndo ? undoLabel : 'Undo'}
               shortcut={`${mod}Z`}
               disabled={!canUndo}
               onClick={withClose(onUndo)}
             />
             <MenuItem
-              label="Redo"
+              label={canRedo ? redoLabel : 'Redo'}
               shortcut={`${mod}⇧Z`}
               disabled={!canRedo}
               onClick={withClose(onRedo)}
@@ -978,6 +990,11 @@ export function MenuBar({
                 onClick={withClose(() => onToggleSceneTransitions?.())}
               />
             </SubMenu>
+            <CheckMenuItem
+              label="Changes"
+              checked={showChanges}
+              onClick={withClose(() => onToggleChanges?.())}
+            />
             {(onOpenPalette !== undefined || onEnterShopMode !== undefined) && (
               <div style={SEPARATOR_STYLE} />
             )}

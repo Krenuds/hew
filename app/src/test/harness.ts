@@ -893,6 +893,15 @@ export interface HewTestHarness {
    * before `scene.save()`) and returns the resulting bytes — camera
    * persistence's save side, exercised end to end without needing an
    * actual OS file-save dialog in this harness.
+   *
+   * Also calls `scene.mark_saved()` after grabbing the bytes (Lane C, docs/
+   * design/v1.1-cycle.md) — mirroring App's real save flow, which marks the
+   * document clean once its write actually lands (`markSavedIfUnmoved`,
+   * App.tsx) — and reconciles (`act`, not `query`) so the app's own
+   * `docSession.dirty`/title-dot state picks up the new saved mark
+   * immediately, exactly as it would after a real Save. So this is the
+   * harness's "the document was saved" step for `at_saved_mark`/dirty-state
+   * E2E coverage, not just a bytes producer.
    */
   saveWithCameraState(): number[]
 
@@ -1969,7 +1978,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     saveWithCameraState: () =>
-      query((s) => {
+      act((s) => {
         const api = deps.getViewportApi()
         if (api === null) throw new Error('__hew_test: viewport not ready')
         const state = api.getCameraState()
@@ -1980,7 +1989,13 @@ export function installTestHarness(deps: HarnessDeps): () => void {
           new Float64Array(state.target),
           new Float64Array(state.up),
         )
-        return Array.from(s.save())
+        const bytes = Array.from(s.save())
+        // Mirrors App's real save flow marking the document clean once its
+        // write lands (Lane C) — see this method's own doc comment. `act`
+        // (not `query`) so the reconcile that follows recomputes
+        // `docSession.dirty` from the fresh saved mark right away.
+        s.mark_saved()
+        return bytes
       }),
 
     worldToScreen: (world) => {

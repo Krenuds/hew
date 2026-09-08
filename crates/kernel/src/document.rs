@@ -513,6 +513,60 @@ pub struct DocTransaction {
     snapshot: Document,
 }
 
+/// Where on the undo stack the document was last saved (or created/
+/// loaded) — the undo-depth at which the document is CLEAN. Session-only,
+/// never serialized; a snapshot clone carries it so a checkpoint restore
+/// leaves it consistent.
+///
+/// `None` means the saved state is unreachable through undo/redo: a new
+/// action was committed while the saved depth lay in the redo branch, so
+/// the branch holding the saved state was discarded
+/// ([`Document::commit_new_action`]). Only [`Document::mark_saved`] makes
+/// the document clean again from there. The `Default` is "clean at depth
+/// 0" — a fresh or freshly loaded document has nothing to save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SavedMark(Option<usize>);
+
+impl Default for SavedMark {
+    fn default() -> Self {
+        SavedMark(Some(0))
+    }
+}
+
+/// One entry of the document-level undo or redo stack as the UI and the
+/// API see it ([`Document::history_entries`]): a human-readable label the
+/// kernel derives from the action itself, and who authored it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntryInfo {
+    /// A short label for the entry: the transaction's own label when it
+    /// was committed through [`Document::commit_transaction`], otherwise
+    /// derived from the action's kind and payload (`"Push/Pull"`,
+    /// `"Move 3 objects"`, `"Rename 'Box' → 'Base'"`).
+    pub label: String,
+    pub origin: HistoryOrigin,
+    /// Session bookkeeping (entering/leaving a group or component edit):
+    /// undoable, but not a change to what a save writes — excluded from
+    /// the saved-depth accounting and from "changes since last save"
+    /// ([`Document::content_depth`]).
+    pub bookkeeping: bool,
+}
+
+/// Both stacks at once ([`Document::history_entries`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntries {
+    /// The undo stack, oldest first — the last element is the entry the
+    /// next [`Document::undo`] would pop.
+    pub undo: Vec<HistoryEntryInfo>,
+    /// The redo stack, in the order [`Document::redo`] would replay them —
+    /// the first element is the next redo.
+    pub redo: Vec<HistoryEntryInfo>,
+    /// The CONTENT depth at which the document is clean
+    /// ([`Document::saved_depth`]) — an index into `undo` with the
+    /// bookkeeping entries filtered out; `None` when the saved state was
+    /// discarded with a redo branch.
+    pub saved_depth: Option<usize>,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -608,6 +662,8 @@ enum DocAction {
     /// the operands; redo reverses. Like `CreatedObject`, all three handles stay
     /// stable (hide-not-delete), so later ops keep referring to live handles.
     Boolean {
+        /// Which combine ran — only a history label reads it.
+        op: BooleanOp,
         result: ObjectId,
         a: ObjectId,
         b: ObjectId,
@@ -624,6 +680,8 @@ enum DocAction {
     /// `hidden_operands`; redo reverses. Pure visibility flipping, all
     /// handles stable (hide-not-delete) — nothing is recomputed on replay.
     BooleanNodes {
+        /// Which combine ran — only a history label reads it.
+        op: BooleanOp,
         /// The first operand's root node. Undo/redo destructure this
         /// variant with `..`, resolving purely from `hidden_operands` /
         /// `result_objects` / `result_group`; kept for `Debug` diagnostics.
@@ -1498,12 +1556,79 @@ pub enum PendingActionKind {
     Other,
 }
 
+/// `"3 objects"` / `"1 object"`.
+fn count_label(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// Classifies an affine transform for a history label: a pure
+/// translation is a "Move", a rigid change of orientation a "Rotate",
+/// anything that changes lengths a "Scale". Tolerances are the kernel's
+/// own; a label never needs to be tighter than that.
+fn transform_verb(t: &Transform) -> &'static str {
+    let m = t.to_affine();
+    let linear_is_identity = [
+        (m[0], 1.0),
+        (m[1], 0.0),
+        (m[2], 0.0),
+        (m[4], 0.0),
+        (m[5], 1.0),
+        (m[6], 0.0),
+        (m[8], 0.0),
+        (m[9], 0.0),
+        (m[10], 1.0),
+    ]
+    .iter()
+    .all(|(a, b)| (a - b).abs() <= tol::AXES_ORTHONORMAL);
+    if linear_is_identity {
+        return "Move";
+    }
+    match t.similarity_scale() {
+        Some(scale) if (scale - 1.0).abs() <= tol::AXES_ORTHONORMAL => "Rotate",
+        _ => "Scale",
+    }
+}
+
 impl DocAction {
     fn kind(&self) -> PendingActionKind {
         match self {
             DocAction::PlaceTextCompound(_) => PendingActionKind::PlaceTextCompound,
             DocAction::CreatedObject { .. } => PendingActionKind::CreatedObject,
             _ => PendingActionKind::Other,
+        }
+    }
+
+    /// Session bookkeeping — entering or leaving a group/component edit.
+    /// Undoable (it re-opens or re-closes the session), but it changes
+    /// nothing a save writes, so the saved mark and the change count
+    /// ignore it ([`Document::content_depth`]).
+    fn is_bookkeeping(&self) -> bool {
+        matches!(
+            self,
+            DocAction::SessionOpened { .. }
+                | DocAction::SessionClosed { .. }
+                | DocAction::GroupSessionOpened { .. }
+                | DocAction::GroupSessionClosed { .. }
+        )
+    }
+
+    /// How many per-object op entries for `object` this action holds —
+    /// one for a bare [`DocAction::ObjectOp`]/[`DocAction::DefObjectOp`]
+    /// on it, the sum over children for a compound. Feeds
+    /// [`Document::describe_object_op`]'s stack-position arithmetic.
+    fn object_op_count(&self, object: ObjectId) -> usize {
+        match self {
+            DocAction::ObjectOp { object: o } | DocAction::DefObjectOp { object: o, .. } => {
+                usize::from(*o == object)
+            }
+            DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
+                actions.iter().map(|a| a.object_op_count(object)).sum()
+            }
+            _ => 0,
         }
     }
 
@@ -2680,6 +2805,8 @@ pub struct Document {
     attrs: BTreeMap<AttrTarget, crate::attr::AttrDict>,
     undo: ActionStack,
     redo: ActionStack,
+    /// See [`SavedMark`].
+    saved: SavedMark,
     /// The open editing-session STACK, innermost last (docs/design/
     /// group-session.md; docs/design/explode-session-prototype.md for the
     /// component frame). NOT serialized — see [`Document::save_guarded`],
@@ -2886,7 +3013,7 @@ impl Document {
             prior,
             value,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange::default())
     }
@@ -2933,7 +3060,7 @@ impl Document {
             removed,
             whole_ns: key.is_none(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange::default())
     }
@@ -3062,7 +3189,7 @@ impl Document {
             before,
             after: frame,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -4181,7 +4308,7 @@ impl Document {
             // ([`Document::insert_document`]) populates this.
             sketches: Vec::new(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let change = DocChange {
@@ -4800,7 +4927,7 @@ impl Document {
             tags: tags_added,
             sketches: ctx.all_sketches.clone(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         ctx.report.objects_added = ctx.all_objects.len();
@@ -5449,7 +5576,7 @@ impl Document {
             after,
             created: pending.created,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.fresh_sketches.remove(&sketch);
         self.debug_validate();
         let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -5567,7 +5694,7 @@ impl Document {
         }
         self.hidden_sketches.insert(sketch);
         self.undo.push(DocAction::DeletedSketch { sketch });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
         Ok(DocChange {
@@ -5635,7 +5762,7 @@ impl Document {
             prev,
             next: alpha,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange::default())
     }
@@ -5723,7 +5850,7 @@ impl Document {
             prev,
             next: material,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.paint_change(object))
     }
@@ -5760,7 +5887,7 @@ impl Document {
             prev,
             next: material,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.paint_change(object))
     }
@@ -5831,7 +5958,7 @@ impl Document {
             prev,
             next: frame,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.paint_change(object))
     }
@@ -5941,7 +6068,7 @@ impl Document {
             faces,
             defaults,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(change)
     }
@@ -6056,7 +6183,7 @@ impl Document {
             hidden: false,
         });
         self.undo.push(DocAction::CreatedGuide { guide: id });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(id)
     }
@@ -6079,7 +6206,7 @@ impl Document {
             hidden: false,
         });
         self.undo.push(DocAction::CreatedGuide { guide: id });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(id)
     }
@@ -6099,7 +6226,7 @@ impl Document {
             _ => return Err(DocumentError::UnknownGuide),
         }
         self.undo.push(DocAction::DeletedGuide { guide });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange {
             guides_touched: vec![guide],
@@ -6122,7 +6249,7 @@ impl Document {
         self.undo.push(DocAction::DeletedGuides {
             guides: live.clone(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange {
             guides_touched: live,
@@ -6208,7 +6335,7 @@ impl Document {
         });
         self.undo
             .push(DocAction::CreatedAnnotation { annotation: id });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(id)
     }
@@ -6255,7 +6382,7 @@ impl Document {
         });
         self.undo
             .push(DocAction::CreatedAnnotation { annotation: id });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(id)
     }
@@ -6293,7 +6420,7 @@ impl Document {
         });
         self.undo
             .push(DocAction::CreatedAnnotation { annotation: id });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(id)
     }
@@ -6356,7 +6483,7 @@ impl Document {
             after: new,
             after_detached,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange::default())
     }
@@ -6376,7 +6503,7 @@ impl Document {
         }
         self.undo
             .push(DocAction::DeletedAnnotation { annotation: id });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(DocChange::default())
     }
@@ -6716,7 +6843,7 @@ impl Document {
             prev_tags,
             next_tags,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.node_change(node))
     }
@@ -6811,7 +6938,7 @@ impl Document {
             prev_tags,
             next_tags,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.node_change(node))
     }
@@ -6844,7 +6971,7 @@ impl Document {
             prev_tags,
             next_tags,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.node_change(node))
     }
@@ -6971,7 +7098,7 @@ impl Document {
             return Ok(DocChange::default());
         }
         self.undo.push(DocAction::TagRenamed { registry, nodes });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(change)
     }
@@ -7086,7 +7213,7 @@ impl Document {
             identities,
             nodes,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(change)
     }
@@ -7498,7 +7625,7 @@ impl Document {
             prev_name,
             next_name: name,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(self.component_change(component))
     }
@@ -8122,7 +8249,7 @@ impl Document {
                 merged_base: None,
                 reanchored: Vec::new(),
             });
-            self.redo.clear();
+            self.commit_new_action();
             self.debug_validate();
             let change = DocChange {
                 objects_touched: vec![id],
@@ -8169,7 +8296,7 @@ impl Document {
             merged_base: Some(object),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         let change = DocChange {
             objects_touched: vec![object, id],
@@ -8396,7 +8523,7 @@ impl Document {
                 merged_base: None,
                 reanchored: Vec::new(),
             });
-            self.redo.clear();
+            self.commit_new_action();
             self.debug_validate();
             let instances_touched = self.placing_instances(component);
             let change = DocChange {
@@ -8440,7 +8567,7 @@ impl Document {
             merged_base: Some(object),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         let instances_touched = self.placing_instances(component);
         let change = DocChange {
@@ -8509,7 +8636,7 @@ impl Document {
             merged_base: None,
             reanchored: Vec::new(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         let change = DocChange {
             objects_touched: vec![id],
@@ -8791,7 +8918,7 @@ impl Document {
             merged_base,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let change = DocChange {
@@ -8965,7 +9092,7 @@ impl Document {
             .apply(&mut rec.object, op)
             .map_err(DocumentError::Op)?;
         self.undo.push(DocAction::ObjectOp { object });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let change = DocChange {
@@ -9044,12 +9171,13 @@ impl Document {
         self.objects[b].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
         self.undo.push(DocAction::Boolean {
+            op,
             result: id,
             a,
             b,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let change = DocChange {
@@ -9154,12 +9282,13 @@ impl Document {
         self.components[component].members.push(NodeId::Object(id));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
         self.undo.push(DocAction::Boolean {
+            op,
             result: id,
             a,
             b,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let instances_touched = self.placing_instances(component);
@@ -9335,6 +9464,7 @@ impl Document {
         };
         let change = boolean_nodes_change(&hidden_operands, &result_objects, result_group);
         self.undo.push(DocAction::BooleanNodes {
+            op,
             a,
             b,
             hidden_operands,
@@ -9342,7 +9472,7 @@ impl Document {
             result_group,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok((root, change))
@@ -9471,7 +9601,7 @@ impl Document {
             b,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let change = DocChange {
@@ -9570,7 +9700,7 @@ impl Document {
             b,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let instances_touched = self.placing_instances(component);
@@ -9636,7 +9766,7 @@ impl Document {
             results: results.clone(),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let mut objects_touched = results.clone();
@@ -9719,7 +9849,7 @@ impl Document {
             results: results.clone(),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let mut objects_touched = results.clone();
@@ -9766,7 +9896,7 @@ impl Document {
             forward: *t,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -9851,7 +9981,7 @@ impl Document {
             forward: local_t,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let instances_touched = self.placing_instances(component);
@@ -9949,7 +10079,7 @@ impl Document {
             actions,
             meta: None,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(change)
     }
@@ -10002,7 +10132,7 @@ impl Document {
             prior,
             forward: *t,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -10076,7 +10206,7 @@ impl Document {
                     prior,
                     forward: *t,
                 });
-                self.redo.clear();
+                self.commit_new_action();
                 self.debug_validate();
 
                 Ok(DocChange {
@@ -10194,7 +10324,7 @@ impl Document {
             detached,
             removed,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let (components_touched, instances_touched) = self.def_sketch_owner_change(source);
@@ -10267,7 +10397,7 @@ impl Document {
         // Nothing left can fail; commit. The source is not touched.
         let copy = self.insert_sketch_record(fresh);
         self.undo.push(DocAction::CopiedSketchIslands { copy });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok((
@@ -10311,7 +10441,7 @@ impl Document {
             old_pos,
             new_pos,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -10394,7 +10524,7 @@ impl Document {
             parent,
             prev_parent_members,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok((group, group_change(group, parent, members)))
@@ -10443,7 +10573,7 @@ impl Document {
             prev_parent_members,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(group_change(group, parent, &members))
@@ -10502,7 +10632,7 @@ impl Document {
             hidden_subtree: hidden_subtree.clone(),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(delete_change(node, parent, &hidden_subtree))
@@ -10594,7 +10724,7 @@ impl Document {
             forward: *t,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -10785,7 +10915,7 @@ impl Document {
             forward: *t,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -10950,7 +11080,7 @@ impl Document {
             instances: pre_instances,
             axes_origin: Some(pre_axes_origin),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -11127,7 +11257,7 @@ impl Document {
             instances: pre_instances,
             axes_origin: None,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -11374,7 +11504,7 @@ impl Document {
             prev_parent_members,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let change = made_component_change(
@@ -11459,7 +11589,7 @@ impl Document {
             tags: Vec::new(),
         });
         self.undo.push(DocAction::PlacedInstance { instance });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok((
@@ -11646,7 +11776,7 @@ impl Document {
         self.components[component].name = Some(name);
 
         self.undo.push(DocAction::PlaceTextCompound(bundle));
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         change.sketches_touched.push(sketch);
@@ -11693,7 +11823,7 @@ impl Document {
             next,
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -11744,7 +11874,7 @@ impl Document {
             .apply(&mut rec.object, op)
             .map_err(DocumentError::Op)?;
         self.undo.push(DocAction::DefObjectOp { component, object });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         // A shared-geometry edit is seen by every instance of the definition.
@@ -11811,7 +11941,7 @@ impl Document {
 
         self.undo
             .push(DocAction::DeletedDefMember { component, object });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok(DocChange {
@@ -12030,7 +12160,7 @@ impl Document {
             created_sketches: created_sketches.clone(),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let mut change = DocChange {
@@ -12450,7 +12580,7 @@ impl Document {
             new_def,
             prev_instance_name,
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         Ok((
@@ -12781,7 +12911,7 @@ impl Document {
                 .map(|&i| (i, session.pristine_instance_poses[&i]))
                 .collect(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         session.undo_len_at_open = self.undo.actions.len();
 
         let mut change = DocChange {
@@ -13218,7 +13348,7 @@ impl Document {
         }
         let (change, action) = self.exit_explode_session();
         self.undo.push(action);
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(change)
     }
@@ -13293,7 +13423,7 @@ impl Document {
             members: members.clone(),
             reanchored,
         });
-        self.redo.clear();
+        self.commit_new_action();
         let undo_len_at_open = self.undo.actions.len();
         self.sessions.push(SessionFrame::Group(GroupSession {
             group,
@@ -13386,7 +13516,7 @@ impl Document {
         }
         let (change, action) = self.exit_group_session();
         self.undo.push(action);
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(change)
     }
@@ -13860,7 +13990,7 @@ impl Document {
             groups: created.groups.clone(),
             instances: created.instances.clone(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let mut change = DocChange {
@@ -14000,7 +14130,7 @@ impl Document {
             groups: created.groups.clone(),
             instances: created.instances.clone(),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
 
         let mut change = DocChange {
@@ -14231,6 +14361,392 @@ impl Document {
         }
     }
 
+    // ----------------------------------------------------- saved mark
+
+    /// The branch-discard step every new action ends with: clears the redo
+    /// stack, and — when the redo branch it discards held the saved state
+    /// ([`SavedMark`]) — records that no undo/redo can ever reach a clean
+    /// document again until the next [`Document::mark_saved`]. Called
+    /// right after the action's `self.undo.push(..)`, so the depth to
+    /// compare against is the pre-push depth (`len - 1`). Undo/redo never
+    /// call this: they move between states that all keep their depth
+    /// identity, so the mark stays valid across them.
+    fn commit_new_action(&mut self) {
+        // The mark is a CONTENT depth (bookkeeping entries — session
+        // open/close — do not count, see `DocAction::is_bookkeeping`), so
+        // compare against the content depth as it was before this push.
+        let pushed_content = self.undo.last().is_some_and(|a| !a.is_bookkeeping());
+        let before = self.content_depth() - usize::from(pushed_content);
+        if !self.redo.is_empty()
+            && let Some(saved) = self.saved.0
+            && saved > before
+        {
+            self.saved = SavedMark(None);
+        }
+        self.redo.clear();
+    }
+
+    /// How many entries on the undo stack are real changes to the
+    /// document — everything except session bookkeeping
+    /// ([`DocAction::is_bookkeeping`]). The depth the saved mark records
+    /// and compares: entering and leaving a group or component edit is
+    /// undoable, but it changes nothing a save would write, so it neither
+    /// dirties the document nor counts as a change since the last save.
+    pub fn content_depth(&self) -> usize {
+        self.undo
+            .actions
+            .iter()
+            .filter(|a| !a.is_bookkeeping())
+            .count()
+    }
+
+    /// Records that the document's current state is what is on disk (or
+    /// is a fresh document): the undo depth right now becomes the CLEAN
+    /// depth [`Document::at_saved_mark`] compares against. Callers invoke
+    /// this only after a write actually succeeded, and on open/new. Pure
+    /// bookkeeping — not an action, not recorded, never serialized.
+    pub fn mark_saved(&mut self) {
+        self.saved = SavedMark(Some(self.content_depth()));
+    }
+
+    /// True when the undo stack sits exactly at the depth recorded by the
+    /// last [`Document::mark_saved`] — every undoable change made since
+    /// the save has been undone (or redone back), so as far as the
+    /// history is concerned there is nothing to save. A mark discarded
+    /// with a redo branch ([`Document::commit_new_action`]) answers false
+    /// forever. Non-undoable, still-persisted state (scenes, view flags,
+    /// palette additions) is outside this answer by design — the caller
+    /// tracks those separately.
+    pub fn at_saved_mark(&self) -> bool {
+        self.saved.0 == Some(self.content_depth())
+    }
+
+    /// The undo depth the document was last marked saved at, `None` once
+    /// that state was discarded with a redo branch. See [`SavedMark`].
+    pub fn saved_depth(&self) -> Option<usize> {
+        self.saved.0
+    }
+
+    // ------------------------------------------------ history listing
+
+    /// Every entry of both stacks with a human-readable label and its
+    /// origin — the source for a session changelog, "Undo X" menu text,
+    /// and the API's `hew.history.status.entries`. Labels come from the
+    /// action itself ([`Document::describe_action`]); a transaction's own
+    /// label wins when it has one.
+    pub fn history_entries(&self) -> HistoryEntries {
+        let undo = self
+            .undo
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, a)| self.entry_info(a, Some(i)))
+            .collect();
+        // The redo stack pops from its end, so reverse it into replay order.
+        let redo = self
+            .redo
+            .actions
+            .iter()
+            .rev()
+            .map(|a| self.entry_info(a, None))
+            .collect();
+        HistoryEntries {
+            undo,
+            redo,
+            saved_depth: self.saved.0,
+        }
+    }
+
+    fn entry_info(&self, action: &DocAction, undo_index: Option<usize>) -> HistoryEntryInfo {
+        let origin = match action {
+            DocAction::Compound {
+                meta: Some(meta), ..
+            } => meta.origin.clone(),
+            _ => HistoryOrigin::User,
+        };
+        HistoryEntryInfo {
+            label: self.describe_action(action, undo_index),
+            origin,
+            bookkeeping: action.is_bookkeeping(),
+        }
+    }
+
+    /// A short human label for a history entry. `undo_index` is the
+    /// entry's position on the undo stack (oldest = 0) when it sits there
+    /// — a per-object op's label is resolved against the object's own op
+    /// stack by counting the later entries that touched the same object,
+    /// which needs to know where in the stack this entry is; redo entries
+    /// pass `None` and resolve against the object's redo stack instead.
+    fn describe_action(&self, action: &DocAction, undo_index: Option<usize>) -> String {
+        match action {
+            DocAction::Compound {
+                meta: Some(meta), ..
+            } => meta.label.clone(),
+            DocAction::Compound {
+                actions,
+                meta: None,
+            } => self.describe_children(actions, undo_index),
+            DocAction::PlaceTextCompound(_) => "3D Text".to_string(),
+            DocAction::AttrSet { ns, key, .. } => format!("Set attribute {ns}.{key}"),
+            DocAction::AttrDeleted { ns, .. } => format!("Delete attribute {ns}"),
+            DocAction::CreatedObject { merged_base, .. } => {
+                if merged_base.is_some() {
+                    "Follow Me".to_string()
+                } else {
+                    "Push/Pull".to_string()
+                }
+            }
+            DocAction::ObjectOp { object } => self.describe_object_op(*object, undo_index),
+            DocAction::DefObjectOp { object, .. } => self.describe_object_op(*object, undo_index),
+            DocAction::Boolean { op, .. } | DocAction::BooleanNodes { op, .. } => match op {
+                BooleanOp::Union => "Union".to_string(),
+                BooleanOp::Subtract => "Subtract".to_string(),
+                BooleanOp::Intersect => "Intersect".to_string(),
+            },
+            DocAction::Sliced { .. } => "Slice".to_string(),
+            DocAction::PushThrough { .. } => "Push/Pull through".to_string(),
+            DocAction::Transform {
+                objects, forward, ..
+            } => format!(
+                "{} {}",
+                transform_verb(forward),
+                count_label(objects.len(), "object")
+            ),
+            DocAction::TransformSketch { forward, .. }
+            | DocAction::TransformSketchIsland { forward, .. } => {
+                format!("{} sketch", transform_verb(forward))
+            }
+            DocAction::DetachedSketchIsland { .. } => "Move sketch off its plane".to_string(),
+            DocAction::CopiedSketchIslands { .. } => "Copy sketch".to_string(),
+            DocAction::TransformSelection {
+                objects,
+                sketches,
+                instances,
+                forward,
+                ..
+            } => {
+                let (o, s, i) = (objects.len(), sketches.len(), instances.len());
+                let noun = match (o > 0, s > 0, i > 0) {
+                    (true, false, false) => "object",
+                    (false, true, false) => "sketch",
+                    (false, false, true) => "instance",
+                    _ => "item",
+                };
+                format!(
+                    "{} {}",
+                    transform_verb(forward),
+                    count_label(o + s + i, noun)
+                )
+            }
+            DocAction::Rescale { factor, .. } => format!("Resize model ×{factor:.4}")
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string(),
+            DocAction::SetAxes { .. } => "Move drawing axes".to_string(),
+            DocAction::MovedSketchVertex { .. } => "Move sketch point".to_string(),
+            DocAction::SketchGesture { .. } => "Draw".to_string(),
+            DocAction::Grouped { .. } => "Group".to_string(),
+            DocAction::Ungrouped { .. } => "Ungroup".to_string(),
+            DocAction::Deleted { node, .. } => format!("Delete {}", self.history_node_label(*node)),
+            DocAction::MadeComponent { component, .. } => match self.component_name(*component) {
+                Some(name) => format!("Make component '{name}'"),
+                None => "Make component".to_string(),
+            },
+            DocAction::PlacedInstance { .. } => "Place instance".to_string(),
+            DocAction::Duplicated { .. } => "Copy".to_string(),
+            DocAction::DuplicatedArray { roots, .. } => format!("Copy ×{}", roots.len()),
+            DocAction::CreatedGuide { .. } => "Guide".to_string(),
+            DocAction::DeletedGuide { .. } => "Delete guide".to_string(),
+            DocAction::DeletedGuides { guides } => {
+                format!("Delete {}", count_label(guides.len(), "guide"))
+            }
+            DocAction::CreatedAnnotation { annotation }
+            | DocAction::UpdatedAnnotation { annotation, .. } => {
+                let what = self.annotation_label(*annotation);
+                if matches!(action, DocAction::CreatedAnnotation { .. }) {
+                    what
+                } else {
+                    format!("Edit {}", what.to_lowercase())
+                }
+            }
+            DocAction::DeletedAnnotation { annotation } => {
+                format!(
+                    "Delete {}",
+                    self.annotation_label(*annotation).to_lowercase()
+                )
+            }
+            DocAction::DeletedSketch { .. } => "Delete sketch".to_string(),
+            DocAction::TransformInstance { prev, next, .. } => {
+                let forward = prev.inverse().map(|inv| inv.then(next)).unwrap_or(*next);
+                format!("{} instance", transform_verb(&forward))
+            }
+            DocAction::Exploded { .. } => "Explode".to_string(),
+            DocAction::MadeUnique { .. } => "Make unique".to_string(),
+            DocAction::SessionOpened { component, .. }
+            | DocAction::SessionClosed { component, .. } => {
+                let verb = if matches!(action, DocAction::SessionOpened { .. }) {
+                    "Edit"
+                } else {
+                    "Finish editing"
+                };
+                match self.component_name(*component) {
+                    Some(name) => format!("{verb} component '{name}'"),
+                    None => format!("{verb} component"),
+                }
+            }
+            DocAction::GroupSessionOpened { .. } => "Edit group".to_string(),
+            DocAction::GroupSessionClosed { .. } => "Finish editing group".to_string(),
+            DocAction::PaintFace { .. } => "Paint face".to_string(),
+            DocAction::SetObjectMaterial { .. } => "Paint object".to_string(),
+            DocAction::SetFaceUvFrame { .. } => "Position texture".to_string(),
+            DocAction::ReplaceMaterial {
+                faces, defaults, ..
+            } => format!(
+                "Replace material on {}",
+                count_label(faces.len() + defaults.len(), "face")
+            ),
+            DocAction::SetMaterialAlpha { .. } => "Change material opacity".to_string(),
+            DocAction::NodeMetaChanged {
+                prev_name,
+                next_name,
+                prev_tags,
+                next_tags,
+                ..
+            } => {
+                if prev_name != next_name {
+                    match (prev_name, next_name) {
+                        (Some(a), Some(b)) => format!("Rename '{a}' → '{b}'"),
+                        (None, Some(b)) => format!("Rename to '{b}'"),
+                        (Some(a), None) => format!("Clear name '{a}'"),
+                        (None, None) => "Rename".to_string(),
+                    }
+                } else if next_tags.len() > prev_tags.len() {
+                    "Tag".to_string()
+                } else if next_tags.len() < prev_tags.len() {
+                    "Untag".to_string()
+                } else {
+                    "Change tags".to_string()
+                }
+            }
+            DocAction::ComponentRenamed {
+                prev_name,
+                next_name,
+                ..
+            } => match (prev_name, next_name) {
+                (Some(a), Some(b)) => format!("Rename component '{a}' → '{b}'"),
+                (_, Some(b)) => format!("Rename component to '{b}'"),
+                _ => "Rename component".to_string(),
+            },
+            DocAction::TagDeleted { registry, .. } => {
+                format!("Delete {}", count_label(registry.len(), "tag"))
+            }
+            DocAction::TagRenamed { .. } => "Rename tag".to_string(),
+            DocAction::FollowMeFace { .. } => "Follow Me".to_string(),
+            DocAction::Imported {
+                objects, instances, ..
+            } => format!(
+                "Import {}",
+                count_label(objects.len() + instances.len(), "item")
+            ),
+            DocAction::DeletedDefMember { .. } => "Delete component member".to_string(),
+            DocAction::ConsumedScaffolding { .. } => "Draw".to_string(),
+        }
+    }
+
+    /// A label for an unlabeled compound: its children's common label
+    /// (with a count when they all agree), else the first child's label
+    /// plus how many more it bundles.
+    fn describe_children(&self, actions: &[DocAction], undo_index: Option<usize>) -> String {
+        let labels: Vec<String> = actions
+            .iter()
+            .map(|a| self.describe_action(a, undo_index))
+            .collect();
+        match labels.as_slice() {
+            [] => "Edit".to_string(),
+            [one] => one.clone(),
+            [first, rest @ ..] if rest.iter().all(|l| l == first) => {
+                format!("{first} ×{}", labels.len())
+            }
+            [first, rest @ ..] => format!("{first} (+{} more)", rest.len()),
+        }
+    }
+
+    /// The label for a per-object op entry: which of the object's own
+    /// recorded ops this entry stands for. The document stack and the
+    /// object's [`History`] advance in lockstep for that object, so the
+    /// entry at `undo_index` is the object's op `k` from its top, where
+    /// `k` is the number of LATER document entries that touched the same
+    /// object (compound children included). Redo entries mirror this
+    /// against the object's redo stack. Anything unresolvable (a stale
+    /// object, a count past the stack) falls back to a generic label —
+    /// a label is never worth a panic.
+    fn describe_object_op(&self, object: ObjectId, undo_index: Option<usize>) -> String {
+        let Some(rec) = self.objects.get(object) else {
+            return "Edit face".to_string();
+        };
+        let op = match undo_index {
+            Some(i) => {
+                let later = self.undo.actions[i + 1..]
+                    .iter()
+                    .map(|a| a.object_op_count(object))
+                    .sum::<usize>();
+                let ops: Vec<&KernelOp> = rec.history.applied_ops().collect();
+                ops.len()
+                    .checked_sub(later + 1)
+                    .and_then(|idx| ops.get(idx).copied())
+            }
+            None => rec.history.peek_redo(),
+        };
+        match op {
+            Some(KernelOp::PushPull { .. })
+            | Some(KernelOp::UnbuildPushPull { .. })
+            | Some(KernelOp::ExtrudeSubFace { .. })
+            | Some(KernelOp::CollapseSubFace { .. }) => "Push/Pull".to_string(),
+            Some(KernelOp::SplitFace { .. }) | Some(KernelOp::SplitFaceInner { .. }) => {
+                "Draw on face".to_string()
+            }
+            Some(KernelOp::MergeFaces { .. }) | Some(KernelOp::MergeInnerFace { .. }) => {
+                "Merge faces".to_string()
+            }
+            None => "Edit face".to_string(),
+        }
+    }
+
+    /// A node's name quoted for a history label — `'Base'`, `group
+    /// 'Walls'` — or its bare kind word when unnamed. Reads the records
+    /// directly rather than through the live-only name accessors: a
+    /// `Delete` entry names a node that is hidden by the time anyone
+    /// lists the history.
+    fn history_node_label(&self, node: NodeId) -> String {
+        let (kind, name): (&str, Option<String>) = match node {
+            NodeId::Object(id) => ("object", self.objects.get(id).and_then(|r| r.name.clone())),
+            NodeId::Group(id) => ("group", self.groups.get(id).and_then(|r| r.name.clone())),
+            NodeId::Instance(id) => (
+                "instance",
+                self.instances.get(id).and_then(|r| {
+                    r.name
+                        .clone()
+                        .or_else(|| self.components.get(r.def).and_then(|c| c.name.clone()))
+                }),
+            ),
+        };
+        match (node, name) {
+            (NodeId::Group(_), Some(name)) => format!("group '{name}'"),
+            (_, Some(name)) => format!("'{name}'"),
+            (_, None) => kind.to_string(),
+        }
+    }
+
+    fn annotation_label(&self, annotation: AnnotationId) -> String {
+        match self.annotations.get(annotation).map(|r| &r.annotation) {
+            Some(Annotation::LinearDimension { .. }) | Some(Annotation::RadialDimension { .. }) => {
+                "Dimension".to_string()
+            }
+            Some(Annotation::LeaderText { .. }) => "Text".to_string(),
+            None => "Annotation".to_string(),
+        }
+    }
+
     /// Opens a transaction bracket: snapshots the whole document so the
     /// mutations that follow can later be committed as ONE labeled undo
     /// entry ([`Document::commit_transaction`]) or discarded wholesale
@@ -14338,7 +14854,7 @@ impl Document {
             actions,
             meta: Some(meta),
         });
-        self.redo.clear();
+        self.commit_new_action();
         self.debug_validate();
         Ok(true)
     }
@@ -15259,6 +15775,7 @@ impl Document {
                 a,
                 b,
                 reanchored,
+                ..
             } => {
                 // Undo a combine: hide the result, bring the operands back.
                 // A definition-owned result (component-edit-parity.md phase
@@ -16636,6 +17153,7 @@ impl Document {
                 a,
                 b,
                 reanchored,
+                ..
             } => {
                 // Redo a combine: hide the operands again, show the result.
                 let (result, a, b) = (*result, *a, *b);

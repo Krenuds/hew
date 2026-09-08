@@ -661,7 +661,7 @@ impl Registry {
             S,
             Kernel,
             Req,
-            "History depth and the top entry's label and origin.",
+            "History depth, the top entry's label and origin, the saved depth, and every undo/redo entry's label and origin.",
         );
         // hew.view — live-application surface (app profile only, except
         // snapshot's headless carve-out below).
@@ -2673,14 +2673,32 @@ impl Registry {
                 "properties": {},
                 "additionalProperties": false
             });
+            let entry_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string" },
+                    "origin": {},
+                    "bookkeeping": { "type": "boolean" }
+                },
+                "required": ["label", "origin", "bookkeeping"]
+            });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "undo_depth": { "type": "integer" },
                     "redo_depth": { "type": "integer" },
-                    "top": {}
+                    "top": {},
+                    "saved_depth": {},
+                    "entries": {
+                        "type": "object",
+                        "properties": {
+                            "undo": { "type": "array", "items": entry_schema.clone() },
+                            "redo": { "type": "array", "items": entry_schema }
+                        },
+                        "required": ["undo", "redo"]
+                    }
                 },
-                "required": ["undo_depth", "redo_depth", "top"]
+                "required": ["undo_depth", "redo_depth", "top", "saved_depth", "entries"]
             });
             cmd.refusals = Vec::new();
         }

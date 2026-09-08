@@ -74,12 +74,22 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .host
         .save_document(ctx.doc, path.as_deref())
         .map_err(CmdError::Refusal)?;
-    // A host that wrote the file itself returns nothing; one with no
-    // filesystem hands the bytes back for the caller to write, exactly
-    // as `hew.doc.export` already does.
+    // A host that wrote the file itself (`CliHost`) returns nothing — the
+    // save is complete the instant `save_document` returns `Ok`, so this
+    // is the right place to mark the document clean (Lane C's saved
+    // mark, docs/agents/HEW_API.md §7). A host with no filesystem of its
+    // own (`LiveHost`) hands the bytes back for the caller to write,
+    // exactly as `hew.doc.export` already does — the write hasn't
+    // happened yet at this point, so marking clean here would be a lie;
+    // the live app calls `Scene::mark_saved` itself once ITS write
+    // (Tauri fs, or a browser download the user confirmed) actually
+    // lands.
     match written {
         Some(bytes) => Ok(serde_json::json!({ "bytes_base64": encode_base64(&bytes) })),
-        None => Ok(serde_json::json!({})),
+        None => {
+            ctx.doc.mark_saved();
+            Ok(serde_json::json!({}))
+        }
     }
 }
 

@@ -1202,6 +1202,12 @@ fn sync_menu_state(
     window: tauri::WebviewWindow,
     checked: HashMap<String, bool>,
     enabled: HashMap<String, bool>,
+    // Lane C (docs/design/v1.1-cycle.md): "Undo Push/Pull" / "Redo Move" —
+    // the top undo/redo entry's label, derived from `Scene::
+    // history_entries_json`. Reaches only items registered in `guard.items`
+    // (edit-undo/edit-redo, via `gated_item` — see their construction
+    // above) since `MenuItem::set_text` isn't offered on a `CheckMenuItem`.
+    text: HashMap<String, String>,
 ) -> Result<(), String> {
     if !window.is_focused().unwrap_or(false) {
         let any_doc_focused = app
@@ -1237,6 +1243,11 @@ fn sync_menu_state(
             let _ = item.set_enabled(*value);
         } else if let Some(item) = guard.items.get(id) {
             let _ = item.set_enabled(*value);
+        }
+    }
+    for (id, value) in &text {
+        if let Some(item) = guard.items.get(id) {
+            let _ = item.set_text(value);
         }
     }
     Ok(())
@@ -2661,12 +2672,27 @@ fn main() {
             // ----------------------------------------------------------------
             // Edit menu
             // ----------------------------------------------------------------
-            let edit_undo = MenuItemBuilder::with_id("edit-undo", "Undo")
-                .accelerator("CmdOrCtrl+Z")
-                .build(handle)?;
-            let edit_redo = MenuItemBuilder::with_id("edit-redo", "Redo")
-                .accelerator("Shift+CmdOrCtrl+Z")
-                .build(handle)?;
+            // Registered via `gated_item` (not a bare `MenuItemBuilder`) so
+            // `sync_menu_state` can reach them through `guard.items` — Lane C
+            // (docs/design/v1.1-cycle.md) wants their TEXT to track the top
+            // undo/redo entry's label ("Undo Push/Pull"), which needs the
+            // same handle enable/disable already uses.
+            let edit_undo = gated_item(
+                handle,
+                &mut gated,
+                "edit-undo",
+                "Undo",
+                Some("CmdOrCtrl+Z"),
+                Some("CmdOrCtrl+Z"),
+            )?;
+            let edit_redo = gated_item(
+                handle,
+                &mut gated,
+                "edit-redo",
+                "Redo",
+                Some("Shift+CmdOrCtrl+Z"),
+                Some("Shift+CmdOrCtrl+Z"),
+            )?;
             // No accelerator: a bare Backspace/Delete binding here would be a
             // global OS-level shortcut that fires even while typing in a text
             // field or dialog, unlike the JS keydown handler (App.tsx), which
@@ -2884,6 +2910,11 @@ fn main() {
                 None,
                 None,
             )?;
+            // Changes panel (Lane C, docs/design/v1.1-cycle.md): this
+            // session's undo/redo entries since the last save. No
+            // accelerator, same reasoning as win-scenes/win-debug-log.
+            let win_changes =
+                check_item(handle, &mut checks, "win-changes", "Changes", None, None)?;
 
             // View ▸ Scenes (docs/design/scenes.md §5): Add/Update/Next/
             // Previous plus the Scene Transitions checkmark (a SPEC.md
@@ -2949,6 +2980,7 @@ fn main() {
                 .item(&win_tags)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&scenes_menu)
+                .item(&win_changes)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&view_palette)
                 .build()?;
@@ -3729,6 +3761,7 @@ fn main() {
                 "win-materials" => "toggle-materials",
                 "win-tags" => "toggle-tags",
                 "win-scenes" => "toggle-scenes",
+                "win-changes" => "toggle-changes",
                 "win-object-info" => "toggle-object-info",
                 "win-library" => "toggle-library",
                 "win-debug-log" => "toggle-debug-log",

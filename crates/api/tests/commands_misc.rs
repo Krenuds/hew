@@ -1299,6 +1299,61 @@ fn status_reports_the_transact_label_and_connection_origin_after_an_api_transact
     assert_eq!(result["top"]["origin"], json!({ "connection": "test" }));
 }
 
+// Lane C (docs/design/v1.1-cycle.md): `hew.history.status` grows
+// `saved_depth` and `entries` (every undo/redo entry's own label and
+// origin, unlike `top`'s meta-only label — see HEW_API.md §7's note).
+#[test]
+fn status_reports_saved_depth_and_every_entrys_label_and_origin() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let obj_pub = public_of(&doc, &EntityRef::Object(obj));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+
+    // build_box left two UI-authored entries (Draw, Push/Pull — see this
+    // file's own `build_box`, which wraps the rectangle in begin/end_
+    // sketch_gesture rather than the wasm-api harness's single-entry-fold
+    // shortcut). `mark_saved` is session bookkeeping, not a command (HEW_
+    // API.md §7's `hew.doc.save` note), so it's called directly on the
+    // kernel `Document` here, exactly like this file's other direct
+    // `doc.*` assertions.
+    doc.mark_saved();
+    assert_eq!(doc.saved_depth(), Some(2));
+
+    // A third entry via an API transaction with an explicit label — its
+    // origin is this connection's own identity.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.doc.transact",
+        json!({
+            "label": "Rename the leg",
+            "commands": [
+                { "method": "hew.entity.rename", "params": { "id": obj_pub, "name": "Leg" } }
+            ]
+        }),
+    );
+    // Undo it back below the saved mark — dirty again (in the ordinary
+    // direction), and the connection-authored entry is now reachable via
+    // redo, not undo.
+    call_ok(&mut conn, &mut doc, 3, "hew.history.undo", json!({}));
+
+    let result = call_ok(&mut conn, &mut doc, 4, "hew.history.status", json!({}));
+    assert_eq!(result["saved_depth"], json!(2));
+    assert_eq!(
+        result["entries"]["undo"],
+        json!([
+            { "label": "Draw", "origin": "user", "bookkeeping": false },
+            { "label": "Push/Pull", "origin": "user", "bookkeeping": false },
+        ]),
+    );
+    assert_eq!(
+        result["entries"]["redo"],
+        json!([{ "label": "Rename the leg", "origin": { "connection": "test" }, "bookkeeping": false }]),
+    );
+}
+
 #[test]
 fn undo_with_a_wrong_expected_label_refuses() {
     let mut doc = Document::new();

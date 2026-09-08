@@ -453,14 +453,16 @@ export interface HistoryRedoParams {}
 export interface HistoryRedoResult {}
 
 /**
- * `hew.history.status` (v1) — History depth and the top entry's label and origin.
+ * `hew.history.status` (v1) — History depth, the top entry's label and origin, the saved depth, and every undo/redo entry's label and origin.
  * Tier: Required · Class: solitary · Served: kernel
  * Refusals: none.
  */
 export interface HistoryStatusParams {}
 
 export interface HistoryStatusResult {
+  entries: { redo: { bookkeeping: boolean; label: string; origin: UnspecifiedShape }[]; undo: { bookkeeping: boolean; label: string; origin: UnspecifiedShape }[] }
   redo_depth: number
+  saved_depth: UnspecifiedShape
   top: UnspecifiedShape
   undo_depth: number
 }

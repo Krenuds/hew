@@ -560,6 +560,23 @@ below.
 - Shop Mode gets its own Print Layout sheet from the document menu, with
   Save PDF… as the primary action (the iOS share sheet, or a download
   elsewhere) since AirPrint on iOS ignores the paper size Hew composed for
+- Undo-to-clean: the document's dirty/save-state indicator is derived from
+  the kernel's own saved mark (`Document::at_saved_mark`), so undoing back
+  to exactly the undo depth you last saved at clears the dirty dot with no
+  re-save needed, matching every other undo-aware editor; a handful of
+  changes the kernel's undo stack can't see (Scenes edits, Library
+  provenance stamps, a recovered or freshly imported document) are tracked
+  as separate non-undoable-dirty reasons instead. The Edit menu names the
+  specific step you're about to undo/redo ("Undo Push/Pull," "Redo Move"),
+  derived from the action itself rather than only from a labeled
+  transaction. A **Changes** tray section (View ▸ Changes) lists the
+  session's history with a marker at the saved depth, the undone tail
+  dimmed, and an origin badge on API-authored entries. The native `ask`/
+  browser `confirm` prompt for a discard-triggering gesture (File ▸ Close/
+  New/Open/Import, the desktop window close) is replaced by an in-app
+  dialog listing what would be lost — entries since the save, plus any
+  non-undoable-dirty reasons — with Save/Don't Save/Cancel, Save running
+  the normal save flow and continuing the original action once it lands
 
 ### Reliability & diagnostics
 

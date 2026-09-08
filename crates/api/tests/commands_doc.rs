@@ -24,8 +24,44 @@ use api::{
     Connection, DispatchOutcome, Host, NoHost, Profile, Refusal, Request, RequestId, Response,
     SnapshotParams, SnapshotResult, codes,
 };
-use kernel::Document;
+use kernel::{Document, Plane, Point3};
 use serde_json::{Value, json};
+
+// --------------------------------------------------------------- fixtures
+
+fn ground() -> Plane {
+    Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .expect("ground plane is well-defined")
+}
+
+/// One document-level edit — a fresh box, one undo entry (Lane C: the
+/// sketch's creation folds into `extrude_region`'s own entry, matching
+/// `kernel/tests/saved_mark_specs.rs`'s `build_box`) — for the
+/// `mark_saved`/`at_saved_mark` coverage below, which needs a document
+/// that has actually moved off the clean-at-depth-0 default.
+fn edit_the_document(doc: &mut Document) {
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).expect("gesture");
+    {
+        let sk = doc.sketch_mut(s).expect("sketch is live");
+        let corners = [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ];
+        for (a, b) in corners {
+            sk.add_segment(a, b).expect("rectangle segment");
+        }
+    }
+    doc.end_sketch_gesture(s).expect("end gesture");
+    let regions = doc.extrudable_regions(s).expect("live");
+    doc.extrude_region(s, regions[0], 0.5).expect("extrude box");
+}
 
 // ------------------------------------------------------------- test host
 
@@ -454,6 +490,64 @@ fn save_forwards_the_path_and_returns_the_empty_result() {
     );
     assert_eq!(result, json!({}));
     assert_eq!(host.last_save_path.as_deref(), Some("out.hew"));
+}
+
+/// Lane C's saved mark: a host that writes the file itself (`CliHost`'s
+/// shape — `save_document` returns `None`) has completed the save the
+/// instant the command returns `Ok`, so `hew.doc.save` marks the document
+/// clean right there.
+#[test]
+fn save_marks_the_document_clean_when_the_host_writes_it_itself() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    assert!(!doc.at_saved_mark(), "an edit was just made");
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.hew" }),
+    );
+    assert!(
+        doc.at_saved_mark(),
+        "the host's own write completed the save"
+    );
+}
+
+/// The `LiveHost` shape — `save_document` returns bytes rather than
+/// writing them — has NOT completed the save when the command returns:
+/// the caller still has to write those bytes somewhere. Marking the
+/// document clean here would be a lie the app could never see through;
+/// the live app calls `Scene::mark_saved` itself once its own write
+/// succeeds (crates/wasm-api).
+#[test]
+fn save_leaves_the_document_dirty_when_the_host_only_returns_bytes() {
+    struct BytesOnlyHost;
+    impl Host for BytesOnlyHost {
+        fn save_document(
+            &mut self,
+            doc: &Document,
+            _path: Option<&str>,
+        ) -> Result<Option<Vec<u8>>, Refusal> {
+            Ok(Some(doc.save_for_persistence()))
+        }
+    }
+
+    let mut conn = Connection::new(Profile::App, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    assert!(!doc.at_saved_mark(), "an edit was just made");
+    let mut host = BytesOnlyHost;
+    hello_attach(&mut conn, &mut doc, &mut host);
+    call_ok(&mut conn, &mut doc, &mut host, 2, "hew.doc.save", json!({}));
+    assert!(
+        !doc.at_saved_mark(),
+        "the bytes haven't been written anywhere yet"
+    );
 }
 
 /// A host with no filesystem of its own (the live WASM boundary) can

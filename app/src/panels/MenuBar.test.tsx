@@ -153,6 +153,29 @@ describe('MenuBar', () => {
     expect(onUndo).not.toHaveBeenCalled()
   })
 
+  // Lane C (docs/design/v1.1-cycle.md): the Edit menu names the specific
+  // step, not just the bare verb — "Undo Push/Pull" / "Redo Move".
+  it('shows the specific undo/redo entry label when canUndo/canRedo', () => {
+    render(<MenuBar {...defaultProps} canUndo canRedo undoLabel="Undo Push/Pull" redoLabel="Redo Move" />)
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    expect(screen.getByText('Undo Push/Pull')).toBeInTheDocument()
+    expect(screen.getByText('Redo Move')).toBeInTheDocument()
+  })
+
+  it('falls back to the bare verb when disabled, even if a stale label is passed', () => {
+    render(<MenuBar {...defaultProps} canUndo={false} canRedo={false} undoLabel="Undo Push/Pull" redoLabel="Redo Move" />)
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    expect(screen.getByText('Undo')).toBeInTheDocument()
+    expect(screen.getByText('Redo')).toBeInTheDocument()
+  })
+
+  it('defaults to the bare verb when no label prop is given', () => {
+    render(<MenuBar {...defaultProps} canUndo canRedo />)
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    expect(screen.getByText('Undo')).toBeInTheDocument()
+    expect(screen.getByText('Redo')).toBeInTheDocument()
+  })
+
   // --- Object menu: object commands (originally the Outliner's per-object
   // buttons, then Edit-menu items; now split into their own Object menu) ---
 

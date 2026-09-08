@@ -298,6 +298,14 @@ impl History {
         self.applied.last().map(|rec| &rec.entry.inverse)
     }
 
+    /// Every committed op still on the undo stack, oldest first — the
+    /// FORWARD ops as they ran, not their inverses. For labeling
+    /// ([`crate::Document::history_entries`]); the handle caveat of
+    /// [`History::peek_undo`] applies.
+    pub fn applied_ops(&self) -> impl Iterator<Item = &KernelOp> {
+        self.applied.iter().map(|rec| &rec.entry.op)
+    }
+
     /// The op the next [`History::redo`] would dispatch, if any. Same handle
     /// caveat as [`History::peek_undo`].
     pub fn peek_redo(&self) -> Option<&KernelOp> {

@@ -58,6 +58,19 @@ const mockScene = {
   object_solid: () => true,
   can_scene_undo: () => false,
   can_scene_redo: () => false,
+  // Lane C (docs/design/v1.1-cycle.md): this mock is not a real, stateful
+  // kernel document, so `at_saved_mark` statically mirrors the OLD
+  // unconditional "any mutation dirties" behavior every test here already
+  // assumes — `handleDocumentChanged` only reads it after a real mutation
+  // fired (never on mount), so `false` here reproduces the pre-Lane-C
+  // `afterMutation` latch exactly. Save-flow specifics (mark_saved actually
+  // clearing dirty) are covered by documentSession.test.ts and the E2E
+  // dirty-state spec, not here — no test in this file exercises Save.
+  at_saved_mark: () => false,
+  mark_saved: vi.fn(),
+  undo_depth: () => 0,
+  redo_depth: () => 0,
+  history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
   // save() is called once to snapshot the blank scene for "New" resets.
   save: () => new Uint8Array(),
   load: vi.fn(),
@@ -598,7 +611,7 @@ describe('App — tray layout persistence', () => {
   })
 
   it('restores each tray section\'s collapsed/expanded state from the persisted layout', async () => {
-    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false, scenes: false })
+    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false, scenes: false, changes: false })
     await renderAndLoad()
     expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByRole('button', { name: /object info/i })).toHaveAttribute('aria-expanded', 'false')
@@ -1266,23 +1279,23 @@ describe('App — unified Open dialog', () => {
       handle: '/tmp/other.hew',
     })
 
-    // Cancelling the prompt leaves the open document completely untouched —
-    // the dialog is never even shown (confirmDiscard runs before it, on the
-    // web fallback path).
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false)
+    // Cancelling the in-app UnsavedChangesDialog (Lane C) leaves the open
+    // document completely untouched — the pick's own openAny() is never
+    // even reached (confirmDiscard runs before it, on the web fallback
+    // path), so it's still just the one call from opening my-house.hew.
     triggerOpen()
-    await Promise.resolve()
-    expect(confirmSpy).toHaveBeenCalledTimes(1)
-    // Still just the one call from opening my-house.hew — cancelling the
-    // discard prompt means the dialog for THIS gesture never even opens.
+    const cancelDialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
+    fireEvent.click(within(cancelDialog).getByRole('button', { name: /^cancel$/i }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /unsaved changes/i })).not.toBeInTheDocument())
     expect(vi.mocked(fakeFileHost.openAny)).toHaveBeenCalledTimes(1)
     expect(screen.getByText('my-house.hew')).toBeInTheDocument()
     expect(mockScene.load).toHaveBeenCalledTimes(1)
 
-    // Confirming discards it and replaces the document in place — the web
+    // Don't Save discards it and replaces the document in place — the web
     // build has no Tauri window to open the pick into instead.
-    confirmSpy.mockReturnValueOnce(true)
     triggerOpen()
+    const discardDialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
+    fireEvent.click(within(discardDialog).getByRole('button', { name: /don.t save/i }))
     await waitFor(() => expect(mockScene.load).toHaveBeenCalledTimes(2))
     expect(await screen.findByText('other.hew')).toBeInTheDocument()
   })
@@ -1303,19 +1316,21 @@ describe('isPristineDocument', () => {
   const emptyScene = { object_ids: emptyIds, group_ids: emptyIds, instance_ids: emptyIds, sketch_ids: emptyIds } as unknown as Scene
   const nonEmptyScene = { object_ids: oneId, group_ids: emptyIds, instance_ids: emptyIds, sketch_ids: emptyIds } as unknown as Scene
 
-  const blankClean: DocSessionState = { currentRef: null, dirty: false, lastEditAt: null, lastSavedAt: null }
-  const blankDirty: DocSessionState = { currentRef: null, dirty: true, lastEditAt: 1, lastSavedAt: null }
+  const blankClean: DocSessionState = { currentRef: null, dirty: false, lastEditAt: null, lastSavedAt: null, nonUndoableReasons: new Set() }
+  const blankDirty: DocSessionState = { currentRef: null, dirty: true, lastEditAt: 1, lastSavedAt: null, nonUndoableReasons: new Set() }
   const namedClean: DocSessionState = {
     currentRef: { name: 'house.hew', handle: '/tmp/house.hew' },
     dirty: false,
     lastEditAt: null,
     lastSavedAt: 1,
+    nonUndoableReasons: new Set(),
   }
   const namedDirty: DocSessionState = {
     currentRef: { name: 'house.hew', handle: '/tmp/house.hew' },
     dirty: true,
     lastEditAt: 1,
     lastSavedAt: 1,
+    nonUndoableReasons: new Set(),
   }
 
   it('a fresh blank document (no file, clean, empty scene) is pristine', () => {
@@ -2297,22 +2312,25 @@ describe('App — autosave arm/disarm (recovery-snapshot timer, Lane F adversari
   it('File ▸ New (discarding a dirty document) cancels the pending autosave timer outright', async () => {
     await renderAndLoad()
     vi.useFakeTimers()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     // Dirty the document — armAutosaveTick fires, a timer is pending.
     mutateDocument()
 
     // File ▸ New on a dirty (non-pristine) document: `isPristineDocument`
-    // is false, `isTauri` is false in this jsdom/web test build, so
-    // `newDocument()` awaits `confirmDiscard()` -> `window.confirm` (mocked
-    // to accept) before resetting in place and calling
-    // `clearRecoverySnapshot()`.
+    // is false, so `newDocument()` awaits `confirmDiscard()` — the in-app
+    // Unsaved Changes dialog (Lane C) — and Don't Save resets in place and
+    // calls `clearRecoverySnapshot()`.
     fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
     fireEvent.mouseDown(menubar().getByText('New'))
-    // Flush the confirm()/applyLoadedBytes/clearRecoverySnapshot chain —
-    // a small fake-time advance (rather than `waitFor`, which polls on
-    // REAL timers and would hang here) covers both pending microtasks and
-    // any short setTimeout/rAF step along the way.
+    // Flush to the dialog, answer it, then flush the applyLoadedBytes/
+    // clearRecoverySnapshot chain — small fake-time advances (rather than
+    // `waitFor`, which polls on REAL timers and would hang here) cover both
+    // pending microtasks and any short setTimeout/rAF step along the way.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50)
+    })
+    const dialog = screen.getByRole('dialog', { name: /unsaved changes/i })
+    fireEvent.click(within(dialog).getByRole('button', { name: /don.t save/i }))
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50)
     })
@@ -2329,7 +2347,322 @@ describe('App — autosave arm/disarm (recovery-snapshot timer, Lane F adversari
       await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS * 2)
     })
     expect(recoveryState.write).not.toHaveBeenCalled()
+  })
+})
 
-    confirmSpy.mockRestore()
+describe('App — Lane C: dirty is derived from the kernel saved mark', () => {
+  // mockScene.at_saved_mark defaults to a static `false` (see its own doc
+  // comment above) — mirroring the OLD unconditional "any mutation dirties"
+  // behavior for every test that doesn't care about this. This suite
+  // overrides it per test to exercise the actual undo-to-clean derivation
+  // (`afterMutation`'s `atSavedMark` parameter, documentSession.ts).
+  const originalAtSavedMark = mockScene.at_saved_mark
+
+  afterEach(() => {
+    mockScene.at_saved_mark = originalAtSavedMark
+    delete (mockScene as Record<string, unknown>).scene_undo
+  })
+
+  it('undoing back to the saved mark clears the dirty title dot — no re-save needed', async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void; undo: () => void }
+    }).__hew_test
+
+    // A real mutation dirties the document (at_saved_mark's default false).
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+    expect(document.title.startsWith('•')).toBe(true)
+
+    // Undo lands exactly back at the saved mark: at_saved_mark now reports
+    // true, and handleDocumentChanged (the choke point every undo/redo
+    // reconciles through) recomputes dirty from it — no explicit "clean"
+    // action, no re-save, matching every other undo-aware editor.
+    mockScene.at_saved_mark = () => true
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => { /* no-op */ } })
+    act(() => harness.undo())
+
+    expect(document.title.startsWith('•')).toBe(false)
+  })
+
+  it('undoing while NOT at the saved mark leaves the title dirty', async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void; undo: () => void }
+    }).__hew_test
+
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+    expect(document.title.startsWith('•')).toBe(true)
+
+    // Undo one step, but the saved mark sits somewhere else entirely
+    // (at_saved_mark stays false) — still dirty.
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => { /* no-op */ } })
+    act(() => harness.undo())
+
+    expect(document.title.startsWith('•')).toBe(true)
+  })
+
+  // Session bookkeeping (Lane C follow-up, maintainer playtest): entering
+  // or leaving a group/component edit session pushes a real, undoable
+  // kernel action, but the kernel's `content_depth` ignores it — the
+  // saved mark (and therefore `at_saved_mark()`) doesn't move. This test
+  // stands in for that at the App/documentSession seam: whatever mutation
+  // fires, if the kernel reports `at_saved_mark(): true` right through it
+  // (exactly what a pure-bookkeeping action does), the derived `dirty`
+  // must stay false — no separate bookkeeping-awareness needed above the
+  // kernel's own `at_saved_mark` boundary.
+  it('a mutation the kernel reports as still-at-the-saved-mark (a bookkeeping action) never dirties the title', async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+
+    mockScene.at_saved_mark = () => true
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+
+    expect(document.title.startsWith('•')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — confirmDiscard's Save-then-continue path (adversarial review
+// finding): the in-app UnsavedChangesDialog's Save button runs the real
+// save flow and only lets the original discard-triggering action (here,
+// File ▸ New) proceed on an ACTUAL successful write — a cancelled/failed
+// save must leave the dialog up, New un-run, and the document untouched.
+// ---------------------------------------------------------------------------
+
+describe('App — confirmDiscard: Save-then-continue (File ▸ New)', () => {
+  const originalAtSavedMark = mockScene.at_saved_mark
+  let fakeFileHost: FileHost
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn(),
+      openAny: vi.fn(),
+      exportBinary: vi.fn(),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+  })
+
+  afterEach(() => {
+    mockScene.at_saved_mark = originalAtSavedMark
+    delete (mockScene as Record<string, unknown>).scene_undo
+    vi.mocked(makeFileHost).mockReset()
+  })
+
+  const dirtyTheDocument = async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+    // mockScene.at_saved_mark defaults to a static `false` (see its own doc
+    // comment), so any real mutation dirties the title.
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+    expect(document.title.startsWith('•')).toBe(true)
+  }
+
+  const triggerNew = () => {
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('New'))
+  }
+
+  it('a successful Save in the dialog lets File ▸ New proceed', async () => {
+    await dirtyTheDocument()
+    vi.mocked(fakeFileHost.save).mockResolvedValue({ name: 'house.hew', handle: '/tmp/house.hew' })
+
+    triggerNew()
+    const dialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
+    fireEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+    // New proceeded: the blank-document load ran, and the dialog closed.
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog', { name: /unsaved changes/i })).not.toBeInTheDocument()
+  })
+
+  it('a cancelled Save (host returns null — e.g. a dismissed Save As picker) blocks New and keeps the document', async () => {
+    await dirtyTheDocument()
+    vi.mocked(fakeFileHost.save).mockResolvedValue(null)
+
+    triggerNew()
+    const dialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
+    fireEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+
+    // The dialog stays up (Save didn't land) — New never ran, nothing was
+    // discarded, and the document is exactly as dirty as before.
+    expect(screen.getByRole('dialog', { name: /unsaved changes/i })).toBeInTheDocument()
+    expect(mockScene.load).not.toHaveBeenCalled()
+    expect(document.title.startsWith('•')).toBe(true)
+
+    // The Save button is usable again (not stuck in "Saving…"), so the
+    // user can retry or fall back to Don't Save/Cancel.
+    expect(within(dialog).getByRole('button', { name: /^save$/i })).not.toBeDisabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — Lane C: `undoRedoMenuLabels` (App.tsx) reaching the web MenuBar.
+// ---------------------------------------------------------------------------
+
+describe('App — Lane C: Edit menu shows the specific undo/redo entry label', () => {
+  const originalHistoryEntriesJson = mockScene.history_entries_json
+  const originalCanUndo = mockScene.can_scene_undo
+  const originalCanRedo = mockScene.can_scene_redo
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    mockScene.history_entries_json = originalHistoryEntriesJson
+    mockScene.can_scene_undo = originalCanUndo
+    mockScene.can_scene_redo = originalCanRedo
+  })
+
+  it('shows "Undo <label>" / "Redo <label>" derived from the top undo/redo entry', async () => {
+    mockScene.can_scene_undo = () => true
+    mockScene.can_scene_redo = () => true
+    mockScene.history_entries_json = () =>
+      JSON.stringify({
+        undo: [{ label: 'Push/Pull', origin: 'user' }],
+        redo: [{ label: 'Move 1 object', origin: 'user' }],
+        savedDepth: 1,
+      })
+
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    expect(screen.getByText('Undo Push/Pull')).toBeInTheDocument()
+    expect(screen.getByText('Redo Move 1 object')).toBeInTheDocument()
+  })
+
+  it('falls back to the bare verb when the history is empty, even with canUndo/canRedo true', async () => {
+    mockScene.can_scene_undo = () => true
+    mockScene.can_scene_redo = () => true
+    mockScene.history_entries_json = () => JSON.stringify({ undo: [], redo: [], savedDepth: 0 })
+
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    expect(screen.getByText('Undo')).toBeInTheDocument()
+    expect(screen.getByText('Redo')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — recovery snapshot clearing on a dirty→clean transition (Lane C
+// follow-up, maintainer playtest repro): make changes (autosave writes a
+// recovery snapshot while dirty), undo them all (the document reads clean),
+// quit — no unsaved-changes prompt (correct), but the STALE snapshot must
+// not survive to falsely offer recovery on the next launch. Covers the
+// dirty→clean effect (`wasDirtyRef`) and the write/clear ordering
+// `clearRecoverySnapshot` itself guarantees; the Tauri-close and
+// beforeunload call sites are exercised directly in App.tsx and aren't
+// reachable from jsdom (no real window close/Tauri shell here), so this
+// suite covers the transition effect plus the beforeunload listener's own
+// dirty gate (which IS reachable, via a dispatched event).
+// ---------------------------------------------------------------------------
+
+describe('App — recovery snapshot clearing on clean', () => {
+  const originalAtSavedMark = mockScene.at_saved_mark
+
+  beforeEach(() => {
+    // `shouldAdvanceTime` keeps the fake clock ticking in step with real
+    // time (dialogs.test.tsx's own pickup-polling precedent) so the kernel
+    // load promise and RTL's `waitFor` polling still resolve normally,
+    // while `vi.advanceTimersByTimeAsync` fast-forwards the 12s autosave
+    // interval without the test actually waiting on it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    mockScene.at_saved_mark = originalAtSavedMark
+    delete (mockScene as Record<string, unknown>).scene_undo
+  })
+
+  it('clears the recovery snapshot when an undo lands back at the saved mark after an autosave write', async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void; undo: () => void }
+    }).__hew_test
+
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+    expect(document.title.startsWith('•')).toBe(true)
+
+    // Let the 12s autosave tick fire and write a recovery snapshot while dirty.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_000)
+    })
+    await waitFor(() => expect(recoveryState.write).toHaveBeenCalled())
+    recoveryState.clear.mockClear()
+
+    // Undo back to the saved mark — the document reads clean again, with
+    // no explicit save/close/discard in between.
+    mockScene.at_saved_mark = () => true
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => { /* no-op */ } })
+    act(() => harness.undo())
+    expect(document.title.startsWith('•')).toBe(false)
+
+    await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
+  })
+
+  it('keeps the snapshot while the document is still dirty (a close/unload check must not clear it)', async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+    expect(document.title.startsWith('•')).toBe(true)
+
+    // The beforeunload listener only fires clearRecoverySnapshot when NOT
+    // dirty (App.tsx) — a dirty document's snapshot is the whole point of
+    // recovery, so it must survive an unload check.
+    window.dispatchEvent(new Event('beforeunload', { cancelable: true }))
+    await Promise.resolve()
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+  })
+
+  it('discards (clears) a write that resolves AFTER the document already went clean, instead of leaving the snapshot behind', async () => {
+    let resolveWrite!: () => void
+    recoveryState.write.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveWrite = resolve }),
+    )
+
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void; undo: () => void }
+    }).__hew_test
+
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+    expect(document.title.startsWith('•')).toBe(true)
+
+    // The autosave tick fires; the write is deliberately left pending.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_000)
+    })
+    expect(recoveryState.write).toHaveBeenCalled()
+
+    // Undo back to the saved mark WHILE the write is still in flight.
+    mockScene.at_saved_mark = () => true
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => { /* no-op */ } })
+    act(() => harness.undo())
+    expect(document.title.startsWith('•')).toBe(false)
+
+    // clearRecoverySnapshot (fired by the dirty→clean transition) is
+    // awaiting the still-in-flight write — clear() hasn't run yet.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+
+    // The write finally lands — clear() must run right after, so the
+    // snapshot it just wrote never survives the clean transition.
+    resolveWrite()
+    await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
   })
 })

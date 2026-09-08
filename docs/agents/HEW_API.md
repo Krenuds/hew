@@ -668,7 +668,7 @@ for, not shipped.
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
 | `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
-| `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin) | Required |
+| `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin; the saved depth; every undo/redo entry's label and origin) | Required |
 | `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2) | Standard (`core` grants `snapshot` and `line_drawing` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
 | `hew.print` | `pdf` (a full print job — paper/scale/tiling/marks — as a PDF, headless or live, §7.2) | Standard |
 | `hew.annotate` | dimensions, leader text | Reserved |
@@ -769,12 +769,39 @@ Semantics notes, normative:
   refusing typed when the top entry isn't the named one, and
   `hew.history.status` reports the depth and the top entry's label and
   origin — so an agent verifies the top entry is its own before popping,
-  rather than blindly undoing the user's last edit. History commands are
+  rather than blindly undoing the user's last edit. `status` also
+  reports `saved_depth` (the undo depth at which the document is clean,
+  counting only real changes — session open/close entries are flagged
+  `bookkeeping: true` in `entries` and are undoable but never dirty the
+  document nor count as changes since the last save; `saved_depth` is
+  therefore an index into `entries.undo` with those filtered out —
+  `null` once a new action discarded the redo branch that held it; the
+  app's dirty-title-dot and unsaved-changes dialog are built on the
+  identical kernel state, `Document::at_saved_mark`) and `entries`, the
+  full `{undo: [...], redo: [...]}` listing behind the app's Changes
+  tray: every entry, oldest-first on `undo` and replay-order on `redo`,
+  each with a **derived** `label` and `origin`. That derived label is
+  not the same thing as `top`'s: `top.label` is `null` for any entry
+  without a recorded `CompoundMeta` (a UI-authored edit, or one
+  committed outside `commit_transaction`) — but every `entries` element
+  always carries a human-readable label, because the kernel derives one
+  from the action itself (`Document::describe_action`) when no
+  transaction supplied one. History commands are
   solitary (§6.4) and sit outside the one-envelope-one-undo accounting.
   Undo through the API is subject to the same replay contract as the
   UI's (DEVELOPMENT.md rule 9): it either restores exactly or fails
   typed — the deferred `UnbuildPushPull` case (ROADMAP.md in this directory) is today's
   one documented typed-failure gap — and it never corrupts.
+- `hew.doc.save` marks the document clean (`Document::mark_saved`, the
+  same state `hew.history.status.saved_depth` reports) exactly when the
+  write it triggered is actually complete: a host that writes the file
+  itself (`hew-cli`'s `CliHost`) has finished by the time the command
+  returns, so the mark is set there. A host with no filesystem of its
+  own hands the bytes back instead (below) — the write hasn't happened
+  yet at that point, so the command does not mark the document clean;
+  the live desktop app calls the equivalent (`Scene::mark_saved`) itself
+  once its own write (through Tauri, or a confirmed browser download)
+  actually lands.
 - `hew.doc.export` returns the exported bytes base64 by default; a
   client may instead pass `path`, honored by hosts with filesystem
   access (`hew-cli`, the desktop shell) and refused typed elsewhere.

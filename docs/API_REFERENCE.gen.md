@@ -1496,7 +1496,7 @@ Redo the most recently undone entry.
 - **Class:** solitary
 - **Served:** kernel
 
-History depth and the top entry's label and origin.
+History depth, the top entry's label and origin, the saved depth, and every undo/redo entry's label and origin.
 
 **Params schema:**
 
@@ -1513,9 +1513,59 @@ History depth and the top entry's label and origin.
 ```json
 {
   "properties": {
+    "entries": {
+      "properties": {
+        "redo": {
+          "items": {
+            "properties": {
+              "bookkeeping": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": "string"
+              },
+              "origin": {}
+            },
+            "required": [
+              "label",
+              "origin",
+              "bookkeeping"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "undo": {
+          "items": {
+            "properties": {
+              "bookkeeping": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": "string"
+              },
+              "origin": {}
+            },
+            "required": [
+              "label",
+              "origin",
+              "bookkeeping"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "undo",
+        "redo"
+      ],
+      "type": "object"
+    },
     "redo_depth": {
       "type": "integer"
     },
+    "saved_depth": {},
     "top": {},
     "undo_depth": {
       "type": "integer"
@@ -1524,7 +1574,9 @@ History depth and the top entry's label and origin.
   "required": [
     "undo_depth",
     "redo_depth",
-    "top"
+    "top",
+    "saved_depth",
+    "entries"
   ],
   "type": "object"
 }

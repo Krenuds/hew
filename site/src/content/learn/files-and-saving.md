@@ -14,7 +14,9 @@ Hew's native format is `.hew`, an open, documented container (a zip holding a JS
 - **New**: `⌘N` / `Ctrl+N`. Same rule as Open: a non-pristine document opens a fresh window on desktop; the web app offers to discard.
 - **Close** (`⌘W`, or File ▸ Close) closes the window (macOS desktop only).
 
-The window title is the save-state indicator: a `•` before the name plus an "Edited …" label means unsaved changes; "Saved …" means you're clean. Hew warns you before anything would discard unsaved work — closing the window or tab, opening another file, or starting a new document.
+The window title is the save-state indicator: a `•` before the name plus an "Edited …" label means unsaved changes; "Saved …" means you're clean. That dirty mark tracks the same undo history you can step through: undo back to exactly where you last saved and the mark clears on its own, no re-save needed — SketchUp and every other undo-aware editor works the same way.
+
+Before anything would discard unsaved work — closing the window or tab, opening another file, or starting a new document — Hew shows what's about to be lost: the changes made since your last save, and **Save**, **Don't Save**, and **Cancel** to choose from. Save runs the normal save flow and, once it lands, continues whatever you were doing (opening the other file, starting the new document, or closing the window).
 
 ## In the browser
 
@@ -47,6 +49,12 @@ Recovery snapshots are an emergency net, not a save system. Save normally, and t
 
 ## Undo history
 
-Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file.
+Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file. The Edit menu names the specific step you're about to undo or redo ("Undo Push/Pull," "Redo Move"), not just the bare verb.
 
 Your view is the one exception to both rules above. It's saved with the file, so reopening a model brings back the last view you had it framed in, but changing it is never an undo step — panning, orbiting, or walking around isn't something you'd want an accidental `Ctrl+Z` to reverse.
+
+Opening and closing a group or component for editing is on that same undo list — `Ctrl+Z` right after double-clicking in really does back out of the edit — but it isn't a *change*: it never marks the document dirty, and it's left off the Changes panel below, since nothing about the model actually moved.
+
+## Changes panel
+
+The **Changes** section of the right-hand tray (View ▸ Changes) lists this session's history in order, with a **Saved** marker showing exactly where your last save landed. Anything past the marker is unsaved; anything you've undone past it is dimmed and struck through, since redoing it would bring it back. A handful of edits don't live on that undo list at all — editing Scenes, and adding materials or components from the Library — so the panel and the discard-warning dialog both call those out by name rather than leaving you to guess why the document is still marked dirty.

@@ -23,6 +23,9 @@ import { TagsPanel } from './panels/TagsPanel'
 import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/ScenesPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
+import { ChangesPanel } from './panels/ChangesPanel'
+import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/UnsavedChangesDialog'
+import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
 import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
@@ -40,9 +43,12 @@ import {
   documentName,
   saveStateLabel,
   afterMutation,
+  markNonUndoableDirty,
+  NON_UNDOABLE_REASON,
   afterSave, applyWriteThroughSave,
   afterOpen,
   afterImport,
+  afterRecovery,
   type DocSessionState,
 } from './io/documentSession'
 import { nextRelativeTimeBoundary } from './io/relativeTime'
@@ -189,6 +195,32 @@ function basenameOf(path: string): string {
  *  behind it and must not be silently abandoned by reusing the window. */
 export function isPristineDocument(session: DocSessionState, scene: Scene): boolean {
   return session.currentRef === null && !session.dirty && isSceneEmpty(scene)
+}
+
+/** Calls `scene.mark_saved()` ONLY when the document's undo depth hasn't
+ * moved since `undoDepthAtCapture` — every save flow here grabs the bytes
+ * to write, then awaits a host write that can take a while (Tauri fs,
+ * a browser download, a Library write-through). An edit landing during
+ * that await must never be silently marked clean: the written bytes
+ * predate it. Always returns the CURRENT `scene.at_saved_mark()` reading —
+ * a skipped mark correctly reports the document as still dirty, which
+ * `afterSave`/`applyWriteThroughSave`'s `atSavedMark` parameter honors. */
+function markSavedIfUnmoved(scene: Scene, undoDepthAtCapture: number): boolean {
+  if (scene.undo_depth() === undoDepthAtCapture) scene.mark_saved()
+  return scene.at_saved_mark()
+}
+
+/** "Undo Push/Pull" / "Redo Move" — the Edit menu's Lane C labels (docs/
+ * design/v1.1-cycle.md), derived from the top undo/redo entry each render.
+ * Falls back to the bare verb when there is nothing to undo/redo. */
+function undoRedoMenuLabels(scene: Scene | null): { undo: string; redo: string } {
+  const entries = parseHistoryEntries(scene?.history_entries_json())
+  const topUndo = entries.undo[entries.undo.length - 1]?.label
+  const topRedo = entries.redo[0]?.label
+  return {
+    undo: topUndo !== undefined ? `Undo ${topUndo}` : 'Undo',
+    redo: topRedo !== undefined ? `Redo ${topRedo}` : 'Redo',
+  }
 }
 
 /** Whether two session stacks are the SAME sequence of frames (identity at
@@ -366,6 +398,8 @@ export default function App() {
   const [showTags, setShowTags] = useState(() => getTrayLayout().tags)
   /** Pane visibility: Scenes (docs/design/scenes.md §5) */
   const [showScenes, setShowScenes] = useState(() => getTrayLayout().scenes)
+  /** Pane visibility: Changes (Lane C, docs/design/v1.1-cycle.md) */
+  const [showChanges, setShowChanges] = useState(() => getTrayLayout().changes)
   /** Pane visibility: Object Info */
   const [showObjectInfo, setShowObjectInfo] = useState(() => getTrayLayout().objectInfo)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
@@ -515,6 +549,13 @@ export default function App() {
   // When true, handleDocumentChanged suppresses the dirty-marking setState
   // (used during programmatic loads so the post-load afterOpen wins).
   const suppressDirtyRef = useRef(false)
+  // saveDocument/saveAsDocument are defined much further down (they close
+  // over docSession.currentRef); declared here (initial no-op, kept current
+  // by an effect beside their real definitions) so confirmDiscard and the
+  // unsaved-changes dialog's Save button — both defined earlier — can
+  // trigger "the current save flow" without a forward reference.
+  const saveDocumentRef = useRef<() => Promise<boolean>>(async () => false)
+  const saveAsDocumentRef = useRef<() => Promise<boolean>>(async () => false)
   // Stable recovery-store instance (autosave / crash recovery).
   const recoveryStoreRef = useRef(makeRecoveryStore())
   // pushUnionHidden is defined further down (it depends on `state`); reach it
@@ -643,8 +684,9 @@ export default function App() {
       materials: showMaterials,
       tags: showTags,
       scenes: showScenes,
+      changes: showChanges,
     })
-  }, [showModelInfo, showObjectInfo, showMaterials, showTags, showScenes])
+  }, [showModelInfo, showObjectInfo, showMaterials, showTags, showScenes, showChanges])
   useEffect(() => {
     return subscribeTrayLayout((layout) => {
       setShowModelInfo(layout.modelInfo)
@@ -652,6 +694,7 @@ export default function App() {
       setShowMaterials(layout.materials)
       setShowTags(layout.tags)
       setShowScenes(layout.scenes)
+      setShowChanges(layout.changes)
     })
   }, [])
 
@@ -811,7 +854,11 @@ export default function App() {
     }).catch(() => { /* ignore */ })
   }, [docSession.currentRef])
 
-  // Warn before unload when there are unsaved changes.
+  // Warn before unload when there are unsaved changes. (The "also clear
+  // the recovery snapshot on a CLEAN unload" half of this lives further
+  // down, right after `clearRecoverySnapshot` is defined — referencing it
+  // here would be a TDZ error, since this effect runs before that `const`
+  // is reached during render.)
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
       if (docSession.dirty) {
@@ -1184,7 +1231,10 @@ export default function App() {
     if (next.hiddenTagPaths !== undefined) setHiddenTagPaths(next.hiddenTagPaths)
   }, [])
   const scenesMarkDirty = useCallback(() => {
-    setDocSession((s) => afterMutation(s, Date.now()))
+    // Scenes state lives outside the kernel's undo stack (docs/design/
+    // scenes.md) — `at_saved_mark()` can't see a Scene add/update/rename,
+    // so this is a non-undoable-dirty reason, not a plain `afterMutation`.
+    setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.scenesEdited, Date.now()))
     armAutosaveTick()
   }, [armAutosaveTick])
   const scenesToast = useCallback((message: string) => handleToastRef.current?.(message), [])
@@ -1267,10 +1317,16 @@ export default function App() {
         Array.from(scene.component_member_sketches(component)),
       )
     })
-    // Mark the document dirty on any mutation — but NOT during programmatic
-    // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
+    // Recompute dirty on any mutation — but NOT during programmatic loads
+    // (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
+    // `atSavedMark` is the kernel's own answer (Lane C): this is the single
+    // choke point every commit, undo, AND redo reconciles through (Viewport's
+    // handleSceneRefresh doc comment), so undoing back to the saved depth
+    // lands here with `atSavedMark: true` and cleans the document right back
+    // up — no separate "undo to clean" plumbing needed.
     if (!suppressDirtyRef.current) {
-      setDocSession((s) => afterMutation(s, Date.now()))
+      const atSavedMark = sceneRef.current?.at_saved_mark() ?? true
+      setDocSession((s) => afterMutation(s, Date.now(), atSavedMark))
       armAutosaveTick()
     }
   }, [activeContext, trimContextPath, armAutosaveTick])
@@ -1830,18 +1886,52 @@ export default function App() {
   // applyLoadedBytes closure.
   applyLoadedBytesRef.current = applyLoadedBytes
 
+  // ---------------------------------------------------------------- unsaved-changes dialog
+  // The in-app UnsavedChangesDialog (Lane C, docs/design/v1.1-cycle.md)
+  // replaces the native `ask`/`confirm` this guard used to show — it lists
+  // the entries since the saved mark AND the non-undoable reasons
+  // (Scenes/Library/…), and offers Save (runs the current save flow and
+  // only proceeds on success) as a third option alongside Discard/Cancel.
+  // Promise-plus-ref-resolver, same shape as promptStlUnits above: the
+  // dialog itself is rendered declaratively near the bottom of this
+  // component; this bridges that to the imperative call sites (confirmDiscard,
+  // the Tauri close guard) that need to await a decision.
+  const unsavedChangesResolveRef = useRef<((decision: UnsavedChangesDecision) => void) | null>(null)
+  const [unsavedChangesPromptOpen, setUnsavedChangesPromptOpen] = useState(false)
+
+  const requestUnsavedChangesDecision = useCallback((): Promise<UnsavedChangesDecision> => {
+    return new Promise((resolve) => {
+      // Defense in depth, mirroring promptStlUnits: a clobbered prior
+      // prompt resolves 'cancel' rather than hanging forever.
+      if (unsavedChangesResolveRef.current !== null) {
+        unsavedChangesResolveRef.current('cancel')
+      }
+      unsavedChangesResolveRef.current = resolve
+      setUnsavedChangesPromptOpen(true)
+    })
+  }, [])
+
+  const resolveUnsavedChangesPrompt = useCallback((decision: UnsavedChangesDecision) => {
+    setUnsavedChangesPromptOpen(false)
+    const resolve = unsavedChangesResolveRef.current
+    unsavedChangesResolveRef.current = null
+    resolve?.(decision)
+  }, [])
+
   // ---------------------------------------------------------------- discard guard
-  // Returns true if it's safe to proceed (no unsaved changes, or user confirms).
-  // Reads current session state from docSessionRef to stay pure-function-safe.
+  // Returns true if it's safe to proceed (no unsaved changes, the user chose
+  // Don't Save, or Save just succeeded). Reads current session state from
+  // docSessionRef to stay pure-function-safe.
   const confirmDiscard = useCallback(async (): Promise<boolean> => {
     if (!docSessionRef.current.dirty) return true
-    const message = 'You have unsaved changes. Discard them?'
-    if (isTauri) {
-      const { ask } = await import('@tauri-apps/plugin-dialog')
-      return ask(message, { title: 'Unsaved Changes', kind: 'warning' })
+    const decision = await requestUnsavedChangesDecision()
+    if (decision === 'cancel') return false
+    if (decision === 'save') {
+      const ok = await saveDocumentRef.current()
+      if (!ok) return false // save failed or was cancelled — don't discard
     }
-    return window.confirm(message)
-  }, [])
+    return true
+  }, [requestUnsavedChangesDecision])
 
   // Drop this window's autosave snapshot once its document has actually been
   // discarded (replaced in place, or the window is closing) — a discarded
@@ -1877,6 +1967,54 @@ export default function App() {
     if (autosaveWriteRef.current !== inFlight) return
     await recoveryStoreRef.current.clear().catch(() => { /* best effort */ })
   }, [])
+
+  // Drop this window's autosave/recovery snapshot the moment the session
+  // state transitions dirty → clean, wherever that happens. The common
+  // case is `handleDocumentChanged` computing `atSavedMark: true` after an
+  // undo (or a run of them) lands back on the saved depth — the document
+  // reads clean, but autosave may already have written a snapshot for it
+  // while it was still dirty, and nothing else clears it: Save/Open/
+  // Import/discard flows each call `clearRecoverySnapshot` at their own
+  // choke point, but "the user undid everything" isn't one of them. Left
+  // alone, that stale snapshot survives a subsequent clean close (correctly
+  // silent — nothing dirty to warn about) and falsely offers recovery on
+  // the next launch (the maintainer's repro).
+  //
+  // `wasDirtyRef` (not `docSessionRef`, which this same render already
+  // updated for the CURRENT state) holds the previous render's dirty flag
+  // so this only fires on the actual transition, not on every clean
+  // render (mount, a fresh document, a page that was never dirty). Runs
+  // AFTER `clearRecoverySnapshot`'s own definition so it can close over it
+  // directly; `clearRecoverySnapshot` itself is racesafe (it awaits any
+  // write still in flight before clearing, and bails if a newer write
+  // superseded it — see its own doc comment), so a write that completes
+  // after this transition is either awaited-then-cleared or represents a
+  // genuinely newer edit and is correctly left alone. `clear()` is a
+  // scoped no-op when there's nothing to clear, so redundant calls here
+  // (e.g. right after a save flow already cleared it) are harmless.
+  const wasDirtyRef = useRef(false)
+  useEffect(() => {
+    if (wasDirtyRef.current && !docSession.dirty) {
+      void clearRecoverySnapshot()
+    }
+    wasDirtyRef.current = docSession.dirty
+  }, [docSession.dirty, clearRecoverySnapshot])
+
+  // Web build: beforeunload can't await a save/discard decision the way
+  // the Tauri close guard does, so a dirty document only gets the native
+  // "leave site?" prompt above. But when the document is NOT dirty, this
+  // is still a real close — best-effort clear this window's snapshot the
+  // same way the Tauri close handler does unconditionally, in case the
+  // dirty→clean effect above hasn't run yet (e.g. the transition and the
+  // unload land in the same tick) or a stale snapshot predates this
+  // session's own dirty tracking. Fire-and-forget: unload doesn't wait.
+  useEffect(() => {
+    const handler = () => {
+      if (!docSessionRef.current.dirty) void clearRecoverySnapshot()
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [clearRecoverySnapshot])
 
   // ---------------------------------------------------------------- document lifecycle
 
@@ -2238,18 +2376,30 @@ export default function App() {
     })()
   }, [])
 
-  const saveDocument = useCallback(() => {
+  // Both return a promise resolving `true` iff the write actually landed —
+  // false for a user cancel OR a failure (already toasted) — so the
+  // unsaved-changes dialog's Save button can await one and only continue
+  // the original discard-triggering action (Close/Open/New/Import) on
+  // success. Ordinary trigger sites (menu, shortcut) call these
+  // fire-and-forget and ignore the result, exactly as before.
+  const saveDocument = useCallback(async (): Promise<boolean> => {
     const scene = sceneRef.current
-    if (scene === null) return
+    if (scene === null) return false
     // `Scene.save()` is transparent to an open explode session — it
     // serializes as-if-closed, so saving mid-session needs no special
     // handling here (the session, and its dimming/scoping, is untouched).
     pushCameraStateToScene(scene)
+    const undoDepthAtSave = scene.undo_depth()
     const bytes = new Uint8Array(scene.save())
     const ref = docSession.currentRef
-    fileHostRef.current.save(bytes, ref).then((newRef) => {
-      if (newRef === null) return // user cancelled
-      setDocSession(afterSave(newRef, Date.now()))
+    try {
+      const newRef = await fileHostRef.current.save(bytes, ref)
+      if (newRef === null) return false // user cancelled
+      // See `markSavedIfUnmoved`'s doc comment: only claim the kernel's own
+      // saved mark when nothing has edited the document since the bytes
+      // above were grabbed.
+      const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
+      setDocSession(afterSave(newRef, Date.now(), atSavedMark))
       LogStore.log.info('app', `Saved: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
       void clearRecoverySnapshot()
@@ -2259,24 +2409,29 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
       persistSceneThumbnails(bytes)
-    }).catch((err: unknown) => {
+      return true
+    } catch (err: unknown) {
       handleToast(`Save failed: ${friendlyErrorText(err)}`)
-    })
+      return false
+    }
   }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene])
 
-  const saveAsDocument = useCallback(() => {
+  const saveAsDocument = useCallback(async (): Promise<boolean> => {
     const scene = sceneRef.current
-    if (scene === null) return
+    if (scene === null) return false
     pushCameraStateToScene(scene)
+    const undoDepthAtSave = scene.undo_depth()
     const bytes = new Uint8Array(scene.save())
     // When saving an imported model (currentRef=null, importedName set), suggest
     // the imported filename with a .hew extension so the user sees a sensible
     // default in the Save As dialog.
     const baseName = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const suggestedName = baseName.endsWith('.hew') ? baseName : baseName + '.hew'
-    fileHostRef.current.saveAs(bytes, suggestedName).then((newRef) => {
-      if (newRef === null) return // user cancelled
-      setDocSession(afterSave(newRef, Date.now()))
+    try {
+      const newRef = await fileHostRef.current.saveAs(bytes, suggestedName)
+      if (newRef === null) return false // user cancelled
+      const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
+      setDocSession(afterSave(newRef, Date.now(), atSavedMark))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
       void clearRecoverySnapshot()
@@ -2286,9 +2441,11 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
       persistSceneThumbnails(bytes)
-    }).catch((err: unknown) => {
+      return true
+    } catch (err: unknown) {
       handleToast(`Save As failed: ${friendlyErrorText(err)}`)
-    })
+      return false
+    }
   }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot, pushCameraStateToScene])
 
   // ---------------------------------------------------------------- open by path (Tauri only)
@@ -2485,17 +2642,16 @@ export default function App() {
     const ok = applyLoadedBytes(snapshot.bytes)
     if (!ok) return false
     const { meta } = snapshot
-    setDocSession({
-      currentRef: meta.path !== null ? { name: meta.name, handle: meta.path } : null,
-      dirty: true,
-      importedName: meta.path !== null ? undefined : meta.name,
-      // meta.savedAt is when the autosave snapshot was written — the best
-      // available lower bound for "edits existed as of here".
-      // lastSavedAt stays null: this snapshot was never actually written to
-      // the real file yet, only to the recovery slot.
-      lastEditAt: meta.savedAt,
-      lastSavedAt: null,
-    })
+    // meta.savedAt is when the autosave snapshot was written — the best
+    // available lower bound for "edits existed as of here". Always dirty
+    // via the 'Recovered document' reason, not `at_saved_mark()`: `Scene.
+    // load` is clean-at-depth-0 by kernel default, but this content was
+    // never written to the real file, only to the recovery slot.
+    setDocSession(afterRecovery(
+      meta.path !== null ? { name: meta.name, handle: meta.path } : null,
+      meta.path !== null ? undefined : meta.name,
+      meta.savedAt,
+    ))
     // The recovered document still only exists in the recovery snapshot —
     // claim() re-homed it to this window's own slot (the next autosave tick
     // refreshes it in place); arm the tick so it will actually fire if
@@ -3081,6 +3237,12 @@ export default function App() {
             const ref = docSessionRef.current.currentRef
             const hash = await sha256Hex(bytes)
             const summary = await readItemSummary(bytes)
+            // `stamp_library_source` pushes no undo entry (it's session
+            // metadata, not a document action) — capture the undo depth
+            // now so a write-through below can tell whether some OTHER,
+            // genuinely undoable edit raced ahead of it before claiming
+            // the kernel's saved mark (`markSavedIfUnmoved`'s doc comment).
+            const undoDepthAtStamp = scene.undo_depth()
             scene.stamp_library_source(
               target.nodeKinds,
               target.nodeIds,
@@ -3115,15 +3277,26 @@ export default function App() {
                 // state must never be clobbered clean (that would be
                 // silent, autosave-suppressed data loss: the written
                 // bytes predate the edit). Apply afterSave only when the
-                // session is still exactly the one this flow captured.
-                setDocSession((prev) => applyWriteThroughSave(prev, sessionAtSave, newRef, Date.now()))
+                // session is still exactly the one this flow captured, AND
+                // only claim the kernel's saved mark when nothing moved
+                // the undo stack out from under the stamp.
+                const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtStamp)
+                setDocSession((prev) => applyWriteThroughSave(prev, sessionAtSave, newRef, Date.now(), atSavedMark))
                 setDocRev((r) => r + 1)
               } else {
+                // The write-through didn't land (host declined/cancelled) —
+                // the stamp is still only in memory: non-undoable dirty,
+                // same as the ordinary path below.
                 reconcileRef.current()
+                setDocSession((prev) => markNonUndoableDirty(prev, NON_UNDOABLE_REASON.libraryMetadata, Date.now()))
                 setDocRev((r) => r + 1)
               }
             } else {
+              // Ordinary path: the stamp landed but nothing wrote it to
+              // disk — `at_saved_mark()` can't see it (no undo entry), so
+              // it needs its own non-undoable-dirty reason.
               reconcileRef.current()
+              setDocSession((prev) => markNonUndoableDirty(prev, NON_UNDOABLE_REASON.libraryMetadata, Date.now()))
               setDocRev((r) => r + 1)
             }
           } catch (err) {
@@ -3133,6 +3306,7 @@ export default function App() {
               // and leave the session honestly dirty so nothing is lost
               // silently.
               reconcileRef.current()
+              setDocSession((prev) => markNonUndoableDirty(prev, NON_UNDOABLE_REASON.libraryMetadata, Date.now()))
               setDocRev((r) => r + 1)
               handleToast(`Save failed: ${friendlyErrorText(err)}`)
             }
@@ -3281,7 +3455,12 @@ export default function App() {
       // Palette entries serialize into the document — mark it dirty like
       // any other committed mutation (adversarial review S10), or a
       // close/quit after "Paint with this" silently drops the material.
+      // The material-registry write itself pushes no undo entry
+      // (conformance's `material_and_tag_registry_writes_add_no_undo_entry`),
+      // so `handleDocumentChanged`'s `at_saved_mark()` read alone can't see
+      // it — an explicit non-undoable reason, same as Scenes.
       handleDocumentChanged()
+      setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
       setDocRev((r) => r + 1)
       if (ids.length === 0) return
       setCurrentMaterialId(ids[0])
@@ -3305,8 +3484,10 @@ export default function App() {
         return
       }
       // Dirty for the same reason as Paint-with-this (adversarial review
-      // S10): the palette rides the document.
+      // S10): the palette rides the document, and the same non-undoable
+      // registry write applies.
       handleDocumentChanged()
+      setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
       setDocRev((r) => r + 1)
       if (ids.length > 0) handleToast(`Added "${item.displayName}" to palette.`)
     },
@@ -3429,8 +3610,9 @@ export default function App() {
   const newDocumentRef = useRef(newDocument)
   const openDocumentRef = useRef(openDocument)
   const importDocumentRef = useRef(importDocument)
-  const saveDocumentRef = useRef(saveDocument)
-  const saveAsDocumentRef = useRef(saveAsDocument)
+  // saveDocumentRef/saveAsDocumentRef are declared earlier (with docSessionRef)
+  // so confirmDiscard/the unsaved-changes dialog can use them too — this
+  // block only keeps them current, like every other ref here.
   const handleUndoRef = useRef(handleUndo)
   const handleRedoRef = useRef(handleRedo)
   const handleZoomExtentsRef = useRef(handleZoomExtents)
@@ -3638,6 +3820,7 @@ export default function App() {
       case 'toggle-materials':    setShowMaterials((v) => !v); break
       case 'toggle-tags':         setShowTags((v) => !v); break
       case 'toggle-scenes':       setShowScenes((v) => !v); break
+      case 'toggle-changes':      setShowChanges((v) => !v); break
       case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
@@ -4047,24 +4230,38 @@ export default function App() {
         // Always prevent the default close; we decide explicitly below.
         event.preventDefault()
         if (docSessionRef.current.dirty) {
-          const { ask } = await import('@tauri-apps/plugin-dialog')
-          const ok = await ask(
-            'You have unsaved changes. Discard them and close?',
-            { title: 'Unsaved Changes', kind: 'warning' },
-          )
-          if (!ok) return // keep the window open
-          // The user chose to discard — the close makes it irreversible, so
-          // drop this window's autosave snapshot before the webview (and its
-          // ability to invoke the shell) is destroyed.
-          await clearRecoverySnapshot()
+          // In-app UnsavedChangesDialog (Lane C) replaces the native `ask`
+          // — Save runs the current save flow (via requestUnsavedChangesDecision
+          // → confirmDiscard's own machinery) and only resolves 'save' on
+          // an actual successful write.
+          const decision = await requestUnsavedChangesDecision()
+          if (decision === 'cancel') return // keep the window open
+          if (decision === 'save') {
+            const ok = await saveDocumentRef.current()
+            if (!ok) return // save failed/cancelled — keep the window open
+          }
         }
+        // Whether the document was already clean (no prompt needed) or
+        // just got saved/discarded above, the close is proceeding
+        // irreversibly — drop this window's autosave snapshot before the
+        // webview (and its ability to invoke the shell) is destroyed.
+        // Unconditional (not just the dirty branch above): a document that
+        // reads clean right now can still have a stale snapshot on disk —
+        // e.g. autosave wrote one while dirty, then an undo brought the
+        // document back to its saved mark — and leaving it behind would
+        // falsely offer recovery on the next launch even though there was
+        // never an unsaved-changes prompt to justify one.
+        // `clearRecoverySnapshot` is a scoped no-op when there's nothing
+        // to clear.
+        await clearRecoverySnapshot()
         // Force-close, bypassing onCloseRequested (no loop).
         await win.destroy()
       })
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
     return () => { cancelled = true; unlisten?.() }
-    // docSessionRef is always current; clearRecoverySnapshot has [] deps (stable).
-  }, [clearRecoverySnapshot])
+    // docSessionRef/saveDocumentRef are always current; clearRecoverySnapshot
+    // and requestUnsavedChangesDecision both have stable ([]) deps.
+  }, [clearRecoverySnapshot, requestUnsavedChangesDecision])
 
   // ---------------------------------------------------------------- native drag-drop (Tauri only)
   // The OS delivers file drops to Tauri's webview event bus rather than the
@@ -4336,6 +4533,12 @@ export default function App() {
   useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
 
+  // Undo/redo availability (queried from scene each render for menu state)
+  const canUndo = sceneRef.current?.can_scene_undo() ?? false
+  const canRedo = sceneRef.current?.can_scene_redo() ?? false
+  // Lane C (docs/design/v1.1-cycle.md): "Undo Push/Pull" / "Redo Move".
+  const { undo: undoLabel, redo: redoLabel } = undoRedoMenuLabels(sceneRef.current)
+
   // ---------------------------------------------------------------- native menu state sync (macOS)
   // Reflect UI state into the native menu bar: the active tool's radio
   // check, the View/Window toggles' check marks, and the enabled state of
@@ -4371,6 +4574,7 @@ export default function App() {
       'win-materials': showMaterials,
       'win-tags': showTags,
       'win-scenes': showScenes,
+      'win-changes': showChanges,
       'win-object-info': showObjectInfo,
       'win-debug-log': showDebugLog,
       'win-library': showLibrary,
@@ -4402,9 +4606,17 @@ export default function App() {
       'scenes-update': scenes.activeSid !== null,
       'scenes-next': scenes.entries.length > 0,
       'scenes-previous': scenes.entries.length > 0,
+      // Lane C: native Undo/Redo now have a real handle (edit_undo/
+      // edit_redo registered via gated_item — shells/tauri's own comment on
+      // why), so sync their enabled state exactly like the web MenuBar's
+      // `disabled={!canUndo}`.
+      'edit-undo': canUndo,
+      'edit-redo': canRedo,
     }
+    // "Undo Push/Pull" / "Redo Move" (docs/design/v1.1-cycle.md).
+    const text: Record<string, string> = { 'edit-undo': undoLabel, 'edit-redo': redoLabel }
     import('@tauri-apps/api/core')
-      .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled }))
+      .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled, text }))
       .catch(() => { /* shell without the command (older build) — ignore */ })
   }, [
     activeTool,
@@ -4416,6 +4628,7 @@ export default function App() {
     showMaterials,
     showTags,
     showScenes,
+    showChanges,
     showObjectInfo,
     showDebugLog,
     showLibrary,
@@ -4426,6 +4639,10 @@ export default function App() {
     menuFocusTick,
     parallelProjection,
     componentFrameOpen,
+    canUndo,
+    canRedo,
+    undoLabel,
+    redoLabel,
     sceneTransitionsOn,
     scenes.activeSid,
     scenes.entries.length,
@@ -4593,10 +4810,6 @@ export default function App() {
   const objectCount = watertightMap.size
   const allWatertight = objectCount === 0 || Array.from(watertightMap.values()).every(Boolean)
   const leakyCount = Array.from(watertightMap.values()).filter((v) => !v).length
-
-  // Undo/redo availability (queried from scene each render for menu state)
-  const canUndo = sceneRef.current?.can_scene_undo() ?? false
-  const canRedo = sceneRef.current?.can_scene_redo() ?? false
 
   // Selection-gated command availability — see the menuGates memo above.
   const booleanOperands = menuGates?.booleanOperands ?? []
@@ -4769,12 +4982,15 @@ export default function App() {
         onRedo={handleRedo}
         canUndo={canUndo}
         canRedo={canRedo}
+        undoLabel={undoLabel}
+        redoLabel={redoLabel}
         activeTool={activeTool}
         onSelectTool={(name) => activateTool(name as ToolName)}
         showModelInfo={showModelInfo}
         showMaterials={showMaterials}
         showTags={showTags}
         showScenes={showScenes}
+        showChanges={showChanges}
         showObjectInfo={showObjectInfo}
         showDebugLog={showDebugLog}
         showLibrary={showLibrary}
@@ -4782,6 +4998,7 @@ export default function App() {
         onToggleMaterials={() => setShowMaterials((v) => !v)}
         onToggleTags={() => setShowTags((v) => !v)}
         onToggleScenes={() => setShowScenes((v) => !v)}
+        onToggleChanges={() => setShowChanges((v) => !v)}
         onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         onToggleLibrary={() => setShowLibrary((v) => !v)}
@@ -5282,6 +5499,9 @@ export default function App() {
           >
             <ScenesPanel scenes={scenes} rename={scenesRename} />
           </TraySection>
+          <TraySection title="Changes" collapsed={!showChanges} onToggle={() => setShowChanges((v) => !v)}>
+            <ChangesPanel scene={state.scene} docRev={docRev} reasons={docSession.nonUndoableReasons} />
+          </TraySection>
         </div>
       </div>
 
@@ -5387,6 +5607,29 @@ export default function App() {
             stlUnitsResolveRef.current?.(null)
             stlUnitsResolveRef.current = null
           }}
+        />
+      )}
+
+      {/* Unsaved-changes prompt (Lane C, docs/design/v1.1-cycle.md) —
+          replaces the native ask/confirm for every discard-triggering
+          gesture: File ▸ Close/New/Open/Import's confirmDiscard, and the
+          Tauri window close guard below. */}
+      {unsavedChangesPromptOpen && (
+        <UnsavedChangesDialog
+          scene={state?.scene ?? null}
+          reasons={docSession.nonUndoableReasons}
+          onSave={async () => {
+            const ok = await saveDocumentRef.current()
+            // Only resolve (closing the dialog and letting the original
+            // discard-triggering action proceed) on a REAL save — a
+            // cancelled or failed save (already toasted by the save flow
+            // itself) leaves the dialog up so the user can retry or fall
+            // back to Don't Save/Cancel.
+            if (ok) resolveUnsavedChangesPrompt('save')
+            return ok
+          }}
+          onDontSave={() => resolveUnsavedChangesPrompt('dont-save')}
+          onCancel={() => resolveUnsavedChangesPrompt('cancel')}
         />
       )}
 

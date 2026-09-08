@@ -54,6 +54,18 @@ const mockScene = {
   object_solid: () => true,
   can_scene_undo: () => false,
   can_scene_redo: () => false,
+  // Lane C (docs/design/v1.1-cycle.md): this mock is not a real, stateful
+  // kernel document, so `at_saved_mark` statically mirrors the OLD
+  // unconditional "any mutation dirties" behavior every test here already
+  // assumes — `handleDocumentChanged` only reads it after a real mutation
+  // fired (never on mount), so `false` here reproduces the pre-Lane-C
+  // `afterMutation` latch exactly. No test in this file exercises Save, so
+  // `mark_saved`/`undo_depth` are unexercised no-op stubs.
+  at_saved_mark: () => false,
+  mark_saved: vi.fn(),
+  undo_depth: () => 0,
+  redo_depth: () => 0,
+  history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
   save: () => new Uint8Array(),
   load: vi.fn(),
   camera_state: () => undefined,

@@ -34,10 +34,10 @@ use inference::{
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
     Anchor, Annotation, AnnotationId, BooleanOp, CapturedCurve, ComponentId, DocChange, Document,
-    DocumentError, EdgeId, FaceId, GroupId, Guide, GuideId, ImageFormat, InstanceId, KernelOp,
-    KernelOpError, KernelOpReport, LoadError, Material, MaterialId, MaterialScope, NodeId, Object,
-    ObjectId, Plane, Point3, RadialKind, Rgba8, SketchCurveRim, SketchEdgeId, SketchId,
-    SketchRegionId, Texture, Transform, UvFrame, Vec3, WatertightState,
+    DocumentError, EdgeId, FaceId, GroupId, Guide, GuideId, HistoryOrigin, ImageFormat, InstanceId,
+    KernelOp, KernelOpError, KernelOpReport, LoadError, Material, MaterialId, MaterialScope,
+    NodeId, Object, ObjectId, Plane, Point3, RadialKind, Rgba8, SketchCurveRim, SketchEdgeId,
+    SketchId, SketchRegionId, Texture, Transform, UvFrame, Vec3, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -538,6 +538,17 @@ fn node_ids(kinds: &[u8], ids: &[u64]) -> Result<Vec<NodeId>, ApiError> {
 
 /// The undo label of a multi-node tag batch ("Tag 3 objects" / "Untag 1
 /// object").
+/// `HistoryOrigin` as `hew.history.status`'s wire shape (`crates/api/src/
+/// commands/history.rs`'s `origin_json`, kept identical so the app's one
+/// history-entries parser handles both the API response and
+/// [`Scene::history_entries_json`]): `"user"`, or `{"connection": "id"}`.
+fn history_origin_json(origin: &HistoryOrigin) -> serde_json::Value {
+    match origin {
+        HistoryOrigin::User => serde_json::json!("user"),
+        HistoryOrigin::Connection(id) => serde_json::json!({ "connection": id }),
+    }
+}
+
 fn tag_batch_label(verb: &str, n: usize) -> String {
     format!("{verb} {n} {}", if n == 1 { "object" } else { "objects" })
 }
@@ -6189,6 +6200,83 @@ impl Scene {
         Ok(DocChangeJs { inner: change })
     }
 
+    /// How many entries the next [`Scene::scene_undo`] could pop, one at a
+    /// time.
+    pub fn undo_depth(&self) -> u32 {
+        self.doc.undo_depth() as u32
+    }
+
+    /// [`Scene::undo_depth`]'s redo-side mirror.
+    pub fn redo_depth(&self) -> u32 {
+        self.doc.redo_depth() as u32
+    }
+
+    // ----------------------------------------------------- saved mark
+
+    /// Records that the document's current state is what is on disk (or is
+    /// a fresh document): the source of the app's dirty-title-dot and
+    /// unsaved-changes-dialog logic. Callers invoke this only after a write
+    /// has actually succeeded — never speculatively.
+    ///
+    /// Pure host-side bookkeeping, not a document mutation: it doesn't
+    /// touch [`Scene::state_hash`], so it is deliberately **not** recorded
+    /// for record/replay (`crates/wasm-api/src/recording.rs`) — replay
+    /// reproduces the sequence of document mutations that led to a bug,
+    /// and "the app wrote this state to disk" carries no geometric
+    /// information for that purpose. A reproducer that undoes below a mark
+    /// set before it was captured will therefore show `at_saved_mark() ==
+    /// false` at a depth the original session had marked clean; that's
+    /// fine — replay never asserts on save state.
+    pub fn mark_saved(&mut self) {
+        self.doc.mark_saved();
+    }
+
+    /// True when the undo stack sits exactly at the depth
+    /// [`Scene::mark_saved`] last recorded — nothing to save. See
+    /// [`kernel::Document::at_saved_mark`] for the exact semantics around
+    /// undo/redo and a discarded redo branch.
+    pub fn at_saved_mark(&self) -> bool {
+        self.doc.at_saved_mark()
+    }
+
+    /// The undo depth [`Scene::mark_saved`] was last called at, or
+    /// `undefined` once that state became unreachable (a new action
+    /// discarded the redo branch that held it — see
+    /// [`kernel::Document::saved_depth`]). wasm-bindgen marshals
+    /// `Option<u32>` to `number | undefined`.
+    pub fn saved_depth(&self) -> Option<u32> {
+        self.doc.saved_depth().map(|d| d as u32)
+    }
+
+    /// Every undo/redo entry with a human-readable label and origin, plus
+    /// the saved depth — the source for the Changes tray section and the
+    /// unsaved-changes dialog's entry list, and (mirrored) `hew.history.
+    /// status.entries` (docs/agents/HEW_API.md §7). JSON: `{"undo": [{
+    /// "label": string, "origin": "user" | {"connection": string},
+    /// "bookkeeping": bool }, ..], "redo": [..], "savedDepth": number |
+    /// null}`. `undo` is oldest first; `redo` is in replay order (index 0
+    /// is what the next [`Scene::scene_redo`] would apply). `bookkeeping`
+    /// marks session open/close entries — undoable, but not changes to
+    /// what a save writes — and `savedDepth` is the CONTENT depth, i.e. an
+    /// index into `undo` with those entries filtered out
+    /// (`Document::content_depth`).
+    pub fn history_entries_json(&self) -> String {
+        let entries = self.doc.history_entries();
+        let entry_json = |e: &kernel::HistoryEntryInfo| {
+            serde_json::json!({
+                "label": e.label,
+                "origin": history_origin_json(&e.origin),
+                "bookkeeping": e.bookkeeping,
+            })
+        };
+        let value = serde_json::json!({
+            "undo": entries.undo.iter().map(entry_json).collect::<Vec<_>>(),
+            "redo": entries.redo.iter().map(entry_json).collect::<Vec<_>>(),
+            "savedDepth": entries.saved_depth,
+        });
+        value.to_string()
+    }
+
     // ---------------------------------------------------------------- camera
 
     /// The camera's working view at last save (docs/design/camera.md §5), or
@@ -10698,6 +10786,82 @@ mod tests {
             g3,
             "view-state toggles leave the generation untouched"
         );
+    }
+
+    /// The saved mark round-trips across the FFI exactly as `kernel`'s own
+    /// `saved_mark_specs.rs` proves it does inside `Document` — this test
+    /// only checks the wasm-api plumbing (types, `mark_saved` reaching the
+    /// document, `at_saved_mark`/`saved_depth` reading it back), not the
+    /// semantics themselves.
+    #[test]
+    fn saved_mark_crosses_the_ffi() {
+        let mut scene = Scene::new();
+        assert!(scene.at_saved_mark(), "fresh scene is clean at depth 0");
+        assert_eq!(scene.saved_depth(), Some(0));
+        assert_eq!(scene.undo_depth(), 0);
+        assert_eq!(scene.redo_depth(), 0);
+
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        assert!(!scene.at_saved_mark(), "one undo entry past the mark");
+        assert_eq!(
+            scene.undo_depth(),
+            1,
+            "the fresh sketch's creation folds into extrude's one entry"
+        );
+
+        scene.mark_saved();
+        assert!(scene.at_saved_mark());
+        assert_eq!(scene.saved_depth(), Some(1));
+
+        scene.scene_undo().unwrap();
+        assert!(!scene.at_saved_mark(), "one entry below the mark");
+        assert_eq!(scene.redo_depth(), 1);
+        scene.scene_redo().unwrap();
+        assert!(scene.at_saved_mark(), "redo back to the mark is clean");
+
+        // A fresh edit while the mark's redo branch is intact leaves it
+        // reachable (kernel's `a_new_action_with_an_empty_redo_stack_
+        // keeps_the_mark_valid`), but undoing past a mark whose branch
+        // WAS discarded invalidates it until the next `mark_saved` — that
+        // full contract lives in `saved_mark_specs.rs`; here we only
+        // confirm the FFI surface exposes `None`.
+        scene.scene_undo().unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        scene.extrude_region(s2, r2, 1.0).unwrap();
+        assert_eq!(
+            scene.saved_depth(),
+            None,
+            "the saved depth's redo branch was just discarded"
+        );
+        assert!(!scene.at_saved_mark());
+    }
+
+    /// `history_entries_json` reports both stacks, oldest-first for undo,
+    /// replay-order for redo, with the saved depth alongside — the exact
+    /// shape the Changes tray and unsaved-changes dialog parse.
+    #[test]
+    fn history_entries_json_reports_labels_and_saved_depth() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        scene.mark_saved();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene.scene_undo().unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&scene.history_entries_json()).unwrap();
+        let undo = parsed["undo"].as_array().unwrap();
+        assert_eq!(undo.len(), 1, "the first (saved) box remains on undo");
+        assert_eq!(undo[0]["label"], serde_json::json!("Push/Pull"));
+        assert_eq!(undo[0]["origin"], serde_json::json!("user"));
+
+        let redo = parsed["redo"].as_array().unwrap();
+        assert_eq!(redo.len(), 1, "the undone second box is now on redo");
+        assert_eq!(redo[0]["label"], serde_json::json!("Push/Pull"));
+
+        assert_eq!(parsed["savedDepth"], serde_json::json!(1));
     }
 
     /// Copies are part of the replay contract: a session that Move+Option
