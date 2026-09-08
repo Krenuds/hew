@@ -948,6 +948,14 @@ pub enum RecordedCall {
         /// The JSON-RPC request text, verbatim.
         frame: String,
     },
+    /// `delete_selection(kinds, ids)` — the Delete-key/Cut batch delete
+    /// (Lane D, v1.1-cycle.md): every listed node removed as ONE undo step,
+    /// `add_node_tag_many`'s labeled-compound shape. Additive variant: a
+    /// recording that never batch-deletes (every recording captured before
+    /// this shipped, including the individual `DeleteNode` calls it
+    /// replaces going forward) replays on older builds unchanged; one that
+    /// does fails to parse there — loudly, never silently divergent.
+    DeleteSelection { kinds: Vec<u8>, ids: Vec<u64> },
 }
 
 /// A [`kernel::UvFrame`]'s components, flattened for [`RecordedCall::SetFaceUvFrame`]

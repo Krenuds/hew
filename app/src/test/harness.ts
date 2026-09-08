@@ -81,6 +81,11 @@ export interface HarnessDeps {
   /** Delete a tag everywhere through the app's real Tags-panel path
    * (kernel `delete_tag` + tag-visibility resync + document-changed). */
   deleteTag: (path: string[]) => void
+  /** Toggle one node's hidden flag through the app's real Outliner eye path
+   * (`App.handleToggleHidden`). */
+  toggleNodeHidden: (node: NodeRef) => void
+  /** Whether `node`'s own key is in the app's hidden set. */
+  isNodeHidden: (node: NodeRef) => boolean
   /**
    * Print (docs/design/printing.md §12): install a recording print host +
    * page sink so a spec can drive File ▸ Print… end to end without the OS
@@ -225,6 +230,27 @@ export interface HewTestHarness {
    *  read of the persisted flag, for asserting what a Scene activation
    *  restored (docs/design/scenes.md §5). */
   isTagHidden(path: string[]): boolean
+
+  // -------- outliner (Lane D: search/visibility) --------
+  /** Toggle one node's own hidden flag through the app's real Outliner eye
+   *  path (`App.handleToggleHidden`: session hidden set + union push to
+   *  renderer/kernel + persisted `set_node_user_hidden`) — NOT a bare scene
+   *  call, mirroring `toggleTagPath` above. */
+  toggleNodeHidden(node: { kind: string; id: string }): void
+  /** Whether `node`'s OWN key is in the app's hidden set — does not account
+   *  for an ancestor group also being hidden (the Outliner row's "hidden by
+   *  parent" dimming is a separate, DOM-visible concern); a plain read of
+   *  the same `hiddenKeys` the eye icons render from. */
+  isNodeHidden(node: { kind: string; id: string }): boolean
+  /** Set the Outliner's text filter through its real `<input>` (native
+   *  value setter + a dispatched `input` event, so React's `onChange`
+   *  fires exactly as a real keystroke would) — the Outliner is plain DOM,
+   *  not canvas, but state assertions here go through the harness anyway
+   *  for parity with the rest of this API and to stay robust against
+   *  incidental DOM-structure changes. Empty string clears the filter.
+   *  Throws if the panel isn't mounted (Outliner tray section collapsed,
+   *  or no document loaded). */
+  setOutlinerFilter(text: string): void
 
   // -------- section plane (session view state, non-destructive) --------
   /** "Toggle Section Plane Active" — flips the placed section's clip on/off
@@ -2004,6 +2030,27 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     toggleTagHidden: (path) => deps.toggleTagPath(path),
 
     deleteTag: (path) => deps.deleteTag(path),
+
+    // -------- outliner (Lane D) --------
+
+    toggleNodeHidden: (node) =>
+      deps.toggleNodeHidden({ kind: node.kind as NodeKind, id: BigInt(node.id) }),
+
+    isNodeHidden: (node) =>
+      deps.isNodeHidden({ kind: node.kind as NodeKind, id: BigInt(node.id) }),
+
+    setOutlinerFilter: (text) => {
+      const input = document.querySelector<HTMLInputElement>('input[aria-label="Filter outliner"]')
+      if (input === null) throw new Error('__hew_test: outliner filter input not mounted')
+      // React tracks the DOM input's value through its own instrumented
+      // setter, so a plain `input.value = text` assignment is invisible to
+      // its onChange — go through the native HTMLInputElement setter
+      // (bypassing React's override) and THEN dispatch a real `input`
+      // event, exactly as a keystroke would.
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, text)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    },
 
     // -------- components & instances --------
 

@@ -4340,6 +4340,14 @@ export default function Viewport({
           wasmScene.delete_sketch(sketch)
         }
       }
+      // World node deletes (object/group/instance, NOT a definition member
+      // edited in-place) are collected here and issued as ONE
+      // `delete_selection` call after the loop, so a multi-node Delete/Cut
+      // lands as a single undo entry instead of N (adversarial review
+      // finding 3) — sketch sub-entity/def-member deletes stay per-node
+      // above, since `delete_selection` only takes world NodeIds.
+      const worldDeleteKinds: number[] = []
+      const worldDeleteIds: bigint[] = []
       for (const n of ordered) {
         try {
           if (n.kind === 'sketch-island' && n.sketch !== undefined) {
@@ -4388,8 +4396,21 @@ export default function Viewport({
             wasmScene.delete_def_member(activeComponent, n.id)
           } else {
             const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
-            wasmScene.delete_node(kind, n.id)
+            worldDeleteKinds.push(kind)
+            worldDeleteIds.push(n.id)
           }
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        }
+      }
+      if (worldDeleteKinds.length > 0) {
+        try {
+          wasmScene.delete_selection(
+            new Uint8Array(worldDeleteKinds),
+            new BigUint64Array(worldDeleteIds),
+          )
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)

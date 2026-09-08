@@ -79,6 +79,17 @@ Move, Rotate, and Scale act on the whole selection: an object, a group (with eve
 
 Sketch geometry transforms at shape granularity. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that would land one shape on top of another is refused rather than welded.
 
+## Copy and paste
+
+Move+Alt (above) is the fastest way to duplicate something in place, but `⌘C`/`⌘V` work too, and they're the way to carry a selection somewhere the model doesn't reach on its own — a different open document, say.
+
+- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, and components. It needs at least one of those in the selection; a sketch-only selection refuses with a reminder to use Move+Alt instead, which does carry sketch geometry.
+- **Paste** (`⌘V` / `Ctrl+V`) arms a placement ghost that follows the cursor with the same inference snapping as Move — click to drop it, `Esc` to cancel. Paste again for another copy at a new spot.
+- **Paste In Place** (`⇧⌘V` / `Ctrl+Shift+V`) drops the copy back exactly where it was cut or copied from, with no click.
+- **Cut** (`⌘X` / `Ctrl+X`) copies, then deletes the selection — one undo step for the delete.
+
+A copy of a component instance reuses the original's definition (pasting the same clipboard twice doesn't mint two definitions); a copy of a plain object or group stays a plain object or group.
+
 ## Deleting
 
 `Delete` or `Backspace` removes the current selection with any tool active. The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` redoes, across the entire document history.

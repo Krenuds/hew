@@ -15,8 +15,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{
     menu::{
-        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
-        PredefinedMenuItem, SubmenuBuilder,
+        CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, MenuBuilder, MenuItem, MenuItemBuilder,
+        MenuItemKind, PredefinedMenuItem, SubmenuBuilder,
     },
     Emitter, Manager,
 };
@@ -307,6 +307,27 @@ fn check_item(
     Ok(item)
 }
 
+/// An Edit-menu clipboard item: on macOS an UNGATED item carrying its
+/// standard key equivalent (a disabled item has no key equivalent, and the
+/// key must reach a focused text field's own editing command — see the
+/// Edit menu comment where these are built); elsewhere a gated,
+/// accelerator-free item exactly like `gated_item`.
+fn edit_item(
+    handle: &tauri::AppHandle,
+    items: &mut HashMap<String, MenuItem<tauri::Wry>>,
+    id: &str,
+    label: &str,
+    mac_accel: &str,
+) -> tauri::Result<MenuItem<tauri::Wry>> {
+    if cfg!(target_os = "macos") {
+        MenuItemBuilder::with_id(id, label)
+            .accelerator(mac_accel)
+            .build(handle)
+    } else {
+        gated_item(handle, items, id, label, None, None)
+    }
+}
+
 /// Build a plain menu item and register its handle in `items` so
 /// `sync_menu_state` can enable/disable it (selection-dependent Edit
 /// commands: Group, Explode, …).
@@ -427,6 +448,31 @@ struct WindowStateCache {
 struct MenuHandles {
     checks: HashMap<String, CheckMenuItem<tauri::Wry>>,
     items: HashMap<String, MenuItem<tauri::Wry>>,
+}
+
+/// In-memory desktop clipboard for Copy/Cut/Paste/Paste In Place (Lane D,
+/// v1.1-cycle.md): raw `.hew` item bytes from `Scene::extract_item`, shared
+/// across every open document window in this process so a copy in one
+/// window pastes in another. Plain app state — never touches the OS
+/// clipboard, cleared on quit. `None` until the first copy.
+struct ClipboardState(Mutex<Option<Vec<u8>>>);
+
+/// Store `bytes` as the shared desktop clipboard (Copy/Cut).
+#[tauri::command]
+fn clipboard_set(app: tauri::AppHandle, bytes: Vec<u8>) -> Result<(), String> {
+    let state = app.state::<ClipboardState>();
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    *guard = Some(bytes);
+    Ok(())
+}
+
+/// Read the shared desktop clipboard (Paste/Paste In Place) — `None` if
+/// nothing has been copied yet in this process.
+#[tauri::command]
+fn clipboard_get(app: tauri::AppHandle) -> Result<Option<Vec<u8>>, String> {
+    let state = app.state::<ClipboardState>();
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(guard.clone())
 }
 
 /// Monotonic counter for extra document windows ("main-2", "main-3", …).
@@ -2510,6 +2556,8 @@ fn main() {
             library_popup_menu,
             library_confirm,
             sync_menu_state,
+            clipboard_set,
+            clipboard_get,
             push_recent,
             get_recents,
             clear_recent,
@@ -2710,13 +2758,45 @@ fn main() {
             // on the JS handler for the keyboard path is the documented
             // fallback when the menu lib's accelerator can't be scoped.
             let edit_delete = gated_item(handle, &mut gated, "edit-delete", "Delete", None, None)?;
-            // No accelerator, for the same reason as Delete above: a native
-            // CmdOrCtrl+A would fire even while typing in a text field,
-            // hijacking select-all-text into a scene-wide selection. The JS
-            // keydown handler (App.tsx) owns the keyboard path with a typing
-            // guard on every platform.
-            let edit_select_all =
-                MenuItemBuilder::with_id("edit-select-all", "Select All").build(handle)?;
+            // Cut / Copy / Select All / Paste In Place carry their standard
+            // key equivalents on macOS ONLY, ungated there (`edit_item`):
+            // WebKit hands a Command key equivalent to the page — and to a
+            // focused text field — before AppKit consults the menu bar, so
+            // the JS keydown handler (App.tsx) keeps the viewport path, and
+            // the menu item only fires when neither claimed the key. The
+            // dispatcher then forwards a fire that lands while a text field
+            // has focus to that field's own editing command, which is what
+            // makes Cmd+C/X/A work in a rename field at all: a WebKit text
+            // field has no editing key equivalents of its own on macOS and
+            // relies on the Edit menu for them. A gated (disabled) item has
+            // no key equivalent, hence ungated on macOS. Paste is the native
+            // menu action there (`PredefinedMenuItem::paste`, shown as ⌘V):
+            // the page cannot read the OS clipboard to paste into a field
+            // itself, and the viewport's Cmd+V still reaches the JS handler
+            // first. On Windows and Linux the menu library's accelerator
+            // table runs BEFORE the webview, so these items stay
+            // accelerator-free and gated there (the JS handler owns the
+            // keyboard path), exactly as before.
+            let edit_cut = edit_item(handle, &mut gated, "edit-cut", "Cut", "CmdOrCtrl+X")?;
+            let edit_copy = edit_item(handle, &mut gated, "edit-copy", "Copy", "CmdOrCtrl+C")?;
+            let edit_paste: MenuItemKind<tauri::Wry> = if cfg!(target_os = "macos") {
+                PredefinedMenuItem::paste(handle, Some("Paste"))?.kind()
+            } else {
+                gated_item(handle, &mut gated, "edit-paste", "Paste", None, None)?.kind()
+            };
+            let edit_paste_in_place = edit_item(
+                handle,
+                &mut gated,
+                "edit-paste-in-place",
+                "Paste In Place",
+                "Shift+CmdOrCtrl+V",
+            )?;
+            let edit_select_all = accel(
+                MenuItemBuilder::with_id("edit-select-all", "Select All"),
+                Some("CmdOrCtrl+A"),
+                None,
+            )
+            .build(handle)?;
             let edit_delete_guides =
                 MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
                     .build(handle)?;
@@ -2797,6 +2877,11 @@ fn main() {
             let edit_menu = SubmenuBuilder::new(handle, "Edit")
                 .item(&edit_undo)
                 .item(&edit_redo)
+                .separator()
+                .item(&edit_cut)
+                .item(&edit_copy)
+                .item(&edit_paste)
+                .item(&edit_paste_in_place)
                 .separator()
                 .item(&edit_delete)
                 .item(&edit_select_all)
@@ -3491,6 +3576,7 @@ fn main() {
                 checks,
                 items: gated,
             }));
+            app.manage(ClipboardState(Mutex::new(None)));
             // Seeded past any main-N recovery slot a crashed session left, so
             // this session's fresh window labels never alias an unclaimed
             // snapshot slot (see main_slot_suffix).
@@ -3715,6 +3801,10 @@ fn main() {
                 "file-close" => "close",
                 "edit-undo" => "undo",
                 "edit-redo" => "redo",
+                "edit-cut" => "edit-cut",
+                "edit-copy" => "edit-copy",
+                "edit-paste" => "edit-paste",
+                "edit-paste-in-place" => "edit-paste-in-place",
                 "edit-delete" => "edit-delete",
                 "edit-delete-guides" => "edit-delete-guides",
                 "edit-select-all" => "edit-select-all",

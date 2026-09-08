@@ -121,7 +121,9 @@ describe('3D Text one-off action parity (not a TOOL_REGISTRY tool)', () => {
     // item registers in the gated map for sync_menu_state to disable —
     // matching the web MenuBar/palette gating.
     const binding = new RegExp(
-      `let\\s+(\\w+)\\s*=\\s*(?:MenuItemBuilder::with_id\\(\\s*"${id}"|gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}")`,
+      // A plain, gated, or macOS-aware (`edit_item`) binding — Paste's is a
+      // platform `if` that picks the native item on macOS.
+      `let\\s+(\\w+)[^=]*=\\s*(?:if[^{]*\\{[^}]*\\}\\s*else\\s*\\{\\s*)?(?:MenuItemBuilder::with_id\\(\\s*"${id}"|(?:gated_item|edit_item)\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}")`,
     ).exec(mainRsSource)
     expect(binding, `no menu-item binding (with_id or gated_item) found for ${id}`).not.toBeNull()
     const variable = (binding as RegExpExecArray)[1]
@@ -295,5 +297,61 @@ describe('Components/Purge Unused menu items parity (v1.1 assets lane)', () => {
     expect(menuBarSource.includes('onToggleComponents')).toBe(true)
     expect(menuBarSource.includes('Purge Unused…')).toBe(true)
     expect(menuBarSource.includes('onPurgeUnused')).toBe(true)
+  })
+})
+
+/**
+ * Copy/Cut/Paste/Paste In Place (v1.1-cycle.md Lane D) — gated `MenuItemBuilder`
+ * items (macOS-only accelerators; App.tsx's keydown effect owns the keyboard
+ * path on both platforms — see the comment beside `edit_delete` in main.rs), each
+ * built, attached, dispatched, and offered from the web MenuBar's Edit menu.
+ */
+describe('Copy/Cut/Paste/Paste In Place menu parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const IDS: Record<string, string> = {
+    'edit-cut': 'edit-cut',
+    'edit-copy': 'edit-copy',
+    'edit-paste': 'edit-paste',
+    'edit-paste-in-place': 'edit-paste-in-place',
+  }
+
+  it('every id is built via gated_item, attached to a submenu, and has a dispatch arm', () => {
+    for (const [action, id] of Object.entries(IDS)) {
+      // A `gated_item` binding, the macOS-aware `edit_item` one, or (Paste)
+      // the platform `if` that picks the native item on macOS.
+      const binding = new RegExp(
+        `let\\s+(\\w+)[^=]*=\\s*(?:if[^{]*\\{[^}]*\\}\\s*else\\s*\\{\\s*)?(?:gated_item|edit_item)\\([^;]*?"${id}"`,
+        's',
+      ).exec(source)
+      expect(binding, `no gated_item/edit_item binding found for ${action} (${id})`).not.toBeNull()
+      const variable = (binding as RegExpExecArray)[1]
+      expect(
+        source.includes(`.item(&${variable})`),
+        `${action} (${id} -> ${variable}) is built but never attached to a SubmenuBuilder chain`,
+      ).toBe(true)
+      expect(
+        new RegExp(`"${id}"\\s*=>\\s*"${action}"`).test(source),
+        `${action} (${id}) has no dispatch arm forwarding it to the app`,
+      ).toBe(true)
+    }
+  })
+
+  it('is offered from the web MenuBar\'s Edit menu with the right gates', () => {
+    expect(menuBarSource).toContain('label="Cut"')
+    expect(menuBarSource).toContain('label="Copy"')
+    expect(menuBarSource).toContain('label="Paste"')
+    expect(menuBarSource).toContain('label="Paste In Place"')
+    expect(menuBarSource).toContain('hasStructuralSelection')
+    expect(menuBarSource).toContain('clipboardHasContent')
+  })
+
+  it('is offered from the command palette with the matching gates', () => {
+    const entries = paletteEntries()
+    const byId = new Map(entries.map((e) => [e.id, e]))
+    expect(byId.get('edit-cut')?.gate).toBe('hasStructuralSelection')
+    expect(byId.get('edit-copy')?.gate).toBe('hasStructuralSelection')
+    expect(byId.get('edit-paste')?.gate).toBe('clipboardHasContent')
+    expect(byId.get('edit-paste-in-place')?.gate).toBe('clipboardHasContent')
   })
 })

@@ -4193,6 +4193,25 @@ impl Scene {
         Ok(())
     }
 
+    /// [`Scene::delete_node`] across a whole selection as ONE undo step
+    /// (`kinds`/`ids` parallel, `make_component`'s convention) —
+    /// [`kernel::Document::delete_selection`]. The Outliner/Edit ▸ Delete
+    /// and Cut (Lane D, v1.1-cycle.md) both route every multi/single-node
+    /// delete through here now, so a batch is one undo entry, not N: a
+    /// stale handle anywhere in `kinds`/`ids` refuses the WHOLE batch with
+    /// nothing applied, matching `add_node_tag_many`'s all-or-nothing
+    /// posture.
+    pub fn delete_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
+        let nodes = node_ids(kinds, ids)?;
+        let change = self.doc.delete_selection(&nodes).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
+        Ok(())
+    }
+
     /// Deletes (hides) one free-standing sketch in one undoable step —
     /// whole-sketch granularity, mirroring `delete_guide`. The handle stays
     /// valid for redo. A sketch is a distinct FFI concept from a tree node
@@ -8204,6 +8223,38 @@ impl Scene {
         Ok(item.save())
     }
 
+    /// [`kernel::Document::extract_placement`]: the item→world transform
+    /// (row-major 3×4, the same 12-float shape `Scene::instance_pose`/
+    /// `transform_object` use) that reconstructs this SAME selection's
+    /// original world position — Paste In Place's affine (v1.1-cycle.md
+    /// Lane D), read BEFORE copying so the app never re-derives the walk
+    /// itself. Covers both re-origin cases `extract_item` has: identity
+    /// axes (a pure translation undoing the bottom-center re-origin) and
+    /// moved axes (the axes frame's own forward transform — `extract_item`
+    /// does not re-origin then, so a bare identity affine would NOT
+    /// reconstruct the original position). `undefined` only when the
+    /// selection resolves to no visible content under identity axes.
+    pub fn extract_item_placement(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+    ) -> Result<Option<Vec<f64>>, ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self
+            .doc
+            .extract_placement(&nodes)
+            .map(|t| t.to_affine().to_vec()))
+    }
+
     /// The whole document as a library "model item": a plain save (open
     /// sessions transparently closed, exactly like [`Scene::save`]) with
     /// `meta_json` stamped into the `hew.library` document attrs.
@@ -9500,6 +9551,9 @@ impl Scene {
                                 &format!("recorded API envelope was refused on replay: {err}"),
                             ));
                         }
+                    }
+                    DeleteSelection { kinds, ids } => {
+                        self.delete_selection(&kinds, &ids)?;
                     }
                 }
             }

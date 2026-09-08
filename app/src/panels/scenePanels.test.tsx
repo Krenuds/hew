@@ -8,7 +8,7 @@
  * with the right methods stands in as the Scene.
  */
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import { MaterialPalette } from './MaterialPalette'
@@ -1639,6 +1639,7 @@ describe('MaterialPalette', () => {
 
 const docTreeBase = {
   docRev: 0,
+  docGeneration: 0,
   watertightMap: new Map<bigint, boolean>(),
   selectedIds: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
   activeContext: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
@@ -1650,6 +1651,7 @@ const docTreeBase = {
   onSetContextDepth: vi.fn(),
   hiddenKeys: new Set<string>(),
   onToggleHidden: vi.fn(),
+  onSetHiddenMany: vi.fn(),
 }
 
 describe('DocumentTree', () => {
@@ -1668,9 +1670,67 @@ describe('DocumentTree', () => {
     expect(screen.queryByText(/^sketches$/i)).not.toBeInTheDocument()
   })
 
-  it('renders "Model" breadcrumb at the top level', () => {
+  it('renders "Model" breadcrumb AND the root Model row at the top level', () => {
     render(<DocumentTree {...docTreeBase} scene={makeScene()} />)
-    expect(screen.getByText('Model')).toBeInTheDocument()
+    // The breadcrumb's root crumb, plus the always-present, non-selectable
+    // root Model row above the tree (design: Lane D).
+    expect(screen.getAllByText('Model')).toHaveLength(2)
+  })
+
+  it('the root Model row is not selectable and its eye hides/shows everything', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [
+        { kind: 'object', id: 1n },
+        { kind: 'object', id: 2n },
+      ],
+      object_ids: () => new BigUint64Array([1n, 2n]),
+    })
+    const onSelect = vi.fn()
+    const onSetHiddenMany = vi.fn()
+    render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        watertightMap={new Map([[1n, true], [2n, true]])}
+        onSelect={onSelect}
+        onSetHiddenMany={onSetHiddenMany}
+      />,
+    )
+    const modelRows = screen.getAllByText('Model')
+    // Clicking the root row's own text does not select anything (it has no
+    // click handler wired to onSelect at all).
+    fireEvent.click(modelRows[1])
+    expect(onSelect).not.toHaveBeenCalled()
+    // Nothing hidden yet -> the control reads "Hide all children"; clicking
+    // it hides every top-level node.
+    fireEvent.click(screen.getByRole('button', { name: 'Hide all children' }))
+    expect(onSetHiddenMany).toHaveBeenCalledWith(
+      [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }],
+      true,
+    )
+  })
+
+  it('the Model row\'s "Show all children" clears every hidden descendant', () => {
+    // A plain top-level object (no group) so only the Model row itself
+    // renders a "show/hide all children" control — a nested group would
+    // ALSO read "Show all children" once its one member is hidden,
+    // ambiguating the query below.
+    const scene = makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }],
+      object_ids: () => new BigUint64Array([1n]),
+    })
+    const onSetHiddenMany = vi.fn()
+    render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        watertightMap={new Map([[1n, true]])}
+        hiddenKeys={new Set(['object:1'])}
+        onSetHiddenMany={onSetHiddenMany}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Show all children' }))
+    expect(onSetHiddenMany).toHaveBeenCalledWith([{ kind: 'object', id: 1n }], false)
   })
 
   it('has no action buttons — booleans/group/component ops live in the menus now', () => {
@@ -2133,8 +2193,9 @@ describe('DocumentTree', () => {
       expect(screen.getAllByText('Inner Group')).toHaveLength(2)
       // Both frame headers get the chip, not just the innermost.
       expect(screen.getAllByText('editing')).toHaveLength(2)
-      // The breadcrumb reflects both frames, outermost first.
-      expect(screen.getByText('Model')).toBeInTheDocument()
+      // The breadcrumb reflects both frames, outermost first (plus the
+      // root Model row itself, always present above the tree).
+      expect(screen.getAllByText('Model')).toHaveLength(2)
     })
 
     // -----------------------------------------------------------------------
@@ -2283,6 +2344,193 @@ describe('DocumentTree', () => {
       )
       expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
     })
+  })
+
+  // ---------------------------------------------------------------------
+  // Filter (Lane D)
+  // ---------------------------------------------------------------------
+  describe('filter', () => {
+    it('shows only matches and their ancestors, force-expanding collapsed ancestors', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [
+          { kind: 'group', id: 10n },
+          { kind: 'object', id: 2n },
+        ],
+        group_ids: () => new BigUint64Array([10n]),
+        object_ids: () => new BigUint64Array([1n, 2n]),
+        group_members: (id: bigint) => (id === 10n ? [{ kind: 'object', id: 1n }] : []),
+        object_name: (id: bigint) => (id === 1n ? 'Bridge Arch' : undefined),
+        group_name: () => undefined,
+      })
+      render(<DocumentTree {...docTreeBase} scene={scene} watertightMap={new Map([[1n, true], [2n, true]])} />)
+      // Before filtering: the group is collapsed, so "Bridge Arch" isn't
+      // rendered yet, and the unrelated top-level object (position 1 -> "Object 2") is visible.
+      expect(screen.queryByText('Bridge Arch')).not.toBeInTheDocument()
+      expect(screen.getByText('Object 2')).toBeInTheDocument()
+      fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'bridge' } })
+      // The match's ancestor group force-expands, revealing it...
+      expect(screen.getByText('Bridge Arch')).toBeInTheDocument()
+      // ...and the non-matching sibling object is hidden.
+      expect(screen.queryByText('Object 2')).not.toBeInTheDocument()
+    })
+
+    it('shows "No objects match" for an empty result and restores everything on clear', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+      })
+      render(<DocumentTree {...docTreeBase} scene={scene} watertightMap={new Map([[1n, true]])} />)
+      fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'nonexistent' } })
+      expect(screen.getByText('No objects match')).toBeInTheDocument()
+      expect(screen.queryByText('Object 1')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByLabelText('Clear filter'))
+      expect(screen.queryByText('No objects match')).not.toBeInTheDocument()
+      expect(screen.getByText('Object 1')).toBeInTheDocument()
+    })
+
+    it('does not clear the selection when a filter hides the selected row', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+      })
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          selectedIds={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'nothing matches this' } })
+      // The row is gone from the DOM, but nothing in DocumentTree ever
+      // calls onSelect([]) or otherwise clears the caller's selection.
+      expect(docTreeBase.onSelect).not.toHaveBeenCalled()
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Per-container "hide/show all children" control + eye rendering fix
+  // ---------------------------------------------------------------------
+  describe('hide/show all children', () => {
+    it('a group with no hidden members reads "Hide all children" and hides every direct child', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'group', id: 10n }],
+        group_ids: () => new BigUint64Array([10n]),
+        object_ids: () => new BigUint64Array([1n, 2n]),
+        group_members: (id: bigint) =>
+          id === 10n ? [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }] : [],
+      })
+      const onSetHiddenMany = vi.fn()
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true], [2n, true]])}
+          onSetHiddenMany={onSetHiddenMany}
+        />,
+      )
+      // Scoped to the group's own row: the Model row ABOVE it reads "Hide
+      // all children" too (nothing anywhere is hidden yet).
+      const groupRow = screen.getByText('Group 1').closest('div') as HTMLElement
+      fireEvent.click(within(groupRow).getByRole('button', { name: 'Hide all children' }))
+      expect(onSetHiddenMany).toHaveBeenCalledWith(
+        [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }],
+        true,
+      )
+    })
+
+    it('a group with ANY hidden descendant (including a hidden grandchild) reads "Show all children" and clears every one', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'group', id: 10n }],
+        group_ids: () => new BigUint64Array([10n, 11n]),
+        object_ids: () => new BigUint64Array([1n]),
+        group_members: (id: bigint) =>
+          id === 10n ? [{ kind: 'group', id: 11n }] : id === 11n ? [{ kind: 'object', id: 1n }] : [],
+      })
+      const onSetHiddenMany = vi.fn()
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          // The grandchild (object 1), two levels down, is individually hidden.
+          hiddenKeys={new Set(['object:1'])}
+          onSetHiddenMany={onSetHiddenMany}
+        />,
+      )
+      // Scoped to the outer group's own row (id 10n) — the Model row above
+      // it, and the nested group's own row, both also read "Show all
+      // children" here since something is hidden everywhere in this tree.
+      const groupRow = screen.getByText('Group 1').closest('div') as HTMLElement
+      fireEvent.click(within(groupRow).getByRole('button', { name: 'Show all children' }))
+      // Clears the container's own key, the hidden grandchild, AND every
+      // descendant key in between — not just the direct child (the nested
+      // group).
+      expect(onSetHiddenMany).toHaveBeenCalledWith(
+        [{ kind: 'group', id: 10n }, { kind: 'group', id: 11n }, { kind: 'object', id: 1n }],
+        false,
+      )
+    })
+
+    it('a child of a hidden group renders its eye as hidden-by-parent, dimmer than a directly-hidden row', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'group', id: 10n }],
+        group_ids: () => new BigUint64Array([10n]),
+        object_ids: () => new BigUint64Array([1n]),
+        group_members: (id: bigint) => (id === 10n ? [{ kind: 'object', id: 1n }] : []),
+        node_parent: (kind: number, id: bigint) => (kind === 0 && id === 1n ? 10n : undefined),
+      })
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          // The GROUP is hidden by its own key; the object inside carries
+          // no key of its own.
+          hiddenKeys={new Set(['group:10'])}
+        />,
+      )
+      // The group auto-expands (ancestor-of-nothing here, so force it via
+      // the chevron) to reach the child row.
+      fireEvent.click(screen.getByText('▸'))
+      const objectRow = screen.getByText('Object 1').closest('div') as HTMLElement
+      const eye = objectRow.querySelector('button[title="Show"]') as HTMLElement
+      expect(eye).not.toBeNull()
+      expect(eye.style.opacity).toBe('0.55')
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Expand state reset on a new document (adversarial review finding 1)
+  // ---------------------------------------------------------------------
+  it('resets expand/collapse state on a docGeneration bump — a stale key must not alias an unrelated node in the next document', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [{ kind: 'group', id: 10n }],
+      group_ids: () => new BigUint64Array([10n]),
+      object_ids: () => new BigUint64Array([1n]),
+      group_members: (id: bigint) => (id === 10n ? [{ kind: 'object', id: 1n }] : []),
+    })
+    const { rerender } = render(
+      <DocumentTree {...docTreeBase} scene={scene} watertightMap={new Map([[1n, true]])} />,
+    )
+    // Manually expand the group.
+    fireEvent.click(screen.getByText('▸'))
+    expect(screen.getByText('Object 1')).toBeInTheDocument()
+
+    // A new document loads (File ▸ New / Open — App.tsx bumps docGeneration).
+    // Handles are dense and generational PER DOCUMENT, so the fresh
+    // document's group can coincidentally reuse the exact same raw id
+    // (10n) the previous document's expanded group had — it must start
+    // collapsed regardless, not inherit the stale `group:10` expand key.
+    rerender(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        docGeneration={1}
+        watertightMap={new Map([[1n, true]])}
+      />,
+    )
+    expect(screen.queryByText('Object 1')).not.toBeInTheDocument()
   })
 })
 

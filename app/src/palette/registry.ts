@@ -59,6 +59,10 @@ export type PaletteGate =
   | 'sceneActive'
   /** At least one Scene exists — gates "Next Scene"/"Previous Scene". */
   | 'scenesAny'
+  /** Cut/Copy (Lane D): at least one structural node is selected. */
+  | 'hasStructuralSelection'
+  /** Paste/Paste In Place (Lane D): the clipboard has content. */
+  | 'clipboardHasContent'
 
 export interface PaletteEntry {
   /** Matches a `menuActionRef.current(id)` payload string in App.tsx. */
@@ -193,6 +197,10 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'undo', label: 'Undo', description: 'Undo the last change.', group: 'Actions' },
   { id: 'redo', label: 'Redo', description: 'Redo the last undone change.', group: 'Actions' },
   { id: 'edit-select-all', label: 'Select All', description: 'Select every visible object, group, component, and sketch.', group: 'Actions', synonyms: ['select everything'] },
+  { id: 'edit-cut', label: 'Cut', description: 'Copy the selection to the clipboard, then delete it.', group: 'Actions', gate: 'hasStructuralSelection' },
+  { id: 'edit-copy', label: 'Copy', description: 'Copy the selected objects, groups, and components to the clipboard.', group: 'Actions', gate: 'hasStructuralSelection' },
+  { id: 'edit-paste', label: 'Paste', description: 'Place a copy of the clipboard at the cursor.', group: 'Actions', gate: 'clipboardHasContent' },
+  { id: 'edit-paste-in-place', label: 'Paste In Place', description: 'Insert the clipboard at its original position.', group: 'Actions', synonyms: ['paste in-place'], gate: 'clipboardHasContent' },
   { id: 'edit-delete', label: 'Delete', description: 'Delete the current selection.', group: 'Actions', synonyms: ['remove', 'erase'], gate: 'selection' },
   { id: 'edit-delete-guides', label: 'Delete Guide Lines', description: 'Remove every construction guide.', group: 'Actions' },
   { id: 'edit-group', label: 'Group', description: 'Group the selected objects so they move together.', group: 'Actions', synonyms: ['make group'], gate: 'canGroup' },

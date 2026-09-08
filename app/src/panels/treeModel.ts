@@ -108,6 +108,82 @@ export function collectLeafIds(
 }
 
 /**
+ * All descendants of `children` (a container's DIRECT children), expanded
+ * recursively through nested groups — every level, not just the renderable
+ * leaves `collectLeafIds` returns. Used by the Outliner's "hide/show all
+ * children" control: it needs every descendant's own `nodeKey` (a nested
+ * group can carry its OWN hidden flag, independent of its parent's) both to
+ * test "is anything under here hidden" and, on Show All, to clear every one
+ * of them — not just the direct children — so a hidden grandchild doesn't
+ * stay stranded hidden under a freshly-shown group.
+ *
+ * Pure — the caller supplies `getGroupMembers` like `collectLeafIds`/
+ * `buildTreeIndexMap` do.
+ */
+export function collectDescendants(
+  children: readonly NodeRef[],
+  getGroupMembers: (groupId: bigint) => NodeRef[],
+): NodeRef[] {
+  const out: NodeRef[] = []
+  const walk = (nodes: readonly NodeRef[]) => {
+    for (const n of nodes) {
+      out.push(n)
+      if (n.kind === 'group') walk(getGroupMembers(n.id))
+    }
+  }
+  walk(children)
+  return out
+}
+
+/**
+ * Outliner text filter (MaterialPalette's filter pattern, applied to the
+ * document tree): case-insensitive substring match against each node's
+ * display label, walked recursively through group members. Returns `null`
+ * for a blank/whitespace-only query — the "no filter active" sentinel the
+ * caller uses to skip all of the visibility/dimming logic below.
+ *
+ * `matches` is every node whose OWN label matched; `ancestors` is every
+ * group that isn't itself a match but contains one (directly or nested) —
+ * the Outliner force-expands these and renders them dimmed, so a match deep
+ * in a collapsed group is reachable without hiding the path to it. A group
+ * that matches by name is naturally shown but its NON-matching children are
+ * not auto-revealed (only the path TO a match is forced open, not
+ * everything under one).
+ *
+ * Pure — `topNodes`/`getChildren`/`getLabel` mirror the callback shape
+ * `buildTreeIndexMap` already uses, so the caller (DocumentTree) can reuse
+ * the same closures for both.
+ */
+export function filterTreeKeys(
+  topNodes: readonly NodeRef[],
+  getChildren: (node: NodeRef) => NodeRef[],
+  getLabel: (node: NodeRef) => string,
+  query: string,
+): { matches: Set<string>; ancestors: Set<string> } | null {
+  const q = query.trim().toLowerCase()
+  if (q === '') return null
+  const matches = new Set<string>()
+  const ancestors = new Set<string>()
+  // Returns true when `node` itself matches or contains a match anywhere
+  // beneath it — the caller marks it as an ancestor to force-expand/dim.
+  const walk = (node: NodeRef, path: readonly NodeRef[]): boolean => {
+    const isMatch = getLabel(node).toLowerCase().includes(q)
+    let anyDescendantMatch = false
+    for (const child of getChildren(node)) {
+      if (walk(child, [...path, node])) anyDescendantMatch = true
+    }
+    if (isMatch) matches.add(nodeKey(node))
+    if (isMatch || anyDescendantMatch) {
+      for (const ancestor of path) ancestors.add(nodeKey(ancestor))
+      return true
+    }
+    return false
+  }
+  for (const node of topNodes) walk(node, [])
+  return { matches, ancestors }
+}
+
+/**
  * Positional index of every node as the Outliner displays it: position within
  * its parent container (top-level order at depth 0, member order inside each
  * group), keyed by `nodeKey`. This is the index `resolveLabel`'s positional

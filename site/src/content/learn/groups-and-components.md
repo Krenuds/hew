@@ -73,6 +73,8 @@ Expand **Components** in the right-hand tray (or View ▸ Components, `⇧⌘M` 
 
 Groups appear as folders you can expand; component instances get their own hexagon icon. Double-clicking a row in the Outliner opens every level between the top and that row in one step — group, nested group, instance, whatever the chain is — landing in the same state you'd reach clicking through the viewport one level at a time, with each level on the breadcrumb marked "editing". The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.
 
+Hover a group row for its second eye button — a stacked-eye glyph — to hide or show every one of its members at once, nested groups included; the root Model row above the tree has the same button for the whole document. Typing into the filter field above the tree narrows the list to matching rows and the groups standing between them and the top.
+
 ## Nesting
 
 A component definition can contain other components (and groups) as members, the same way it contains objects — place a wheel component inside a car component, and the car definition holds four wheel instances alongside its own geometry. Make Component builds this from a selection that includes instances: a selected group stays whole rather than being flattened, and a selected instance becomes a nested member instead of being refused.

@@ -131,6 +131,103 @@ fn extract_wrapped_object_is_definition_plus_identity_instance() {
     assert_eq!((pose[3], pose[7], pose[11]), (-0.5, -0.5, 0.0));
 }
 
+/// `extract_placement` returns the transform that reconstructs the ORIGINAL
+/// world position — checked directly against the item's resulting geometry
+/// (not by re-deriving the walk): a plain object's item bbox recenters so
+/// its bottom center sits exactly at the item origin, and applying the
+/// returned placement to that origin must land back on the original bbox's
+/// own bottom center.
+#[test]
+fn extract_placement_reconstructs_the_offset_extract_item_actually_applies() {
+    let mut doc = Document::new();
+    let oid = extrude_box(&mut doc, 2.0, 3.0, 3.0, 4.0, 1.0); // bbox x[2,3] y[3,4] z[0,1]
+
+    let placement = doc
+        .extract_placement(&[NodeId::Object(oid)])
+        .expect("placement exists under identity axes");
+    let reconstructed = placement.apply_point(Point3::ORIGIN);
+    assert!(reconstructed.approx_eq(Point3::new(2.5, 3.5, 0.0), 1e-12));
+
+    let item = doc.extract_item(&[NodeId::Object(oid)], false).unwrap();
+    let item_oid = item.visible_object_ids()[0];
+    let (lo, hi) = object_bbox(&item, item_oid);
+    let item_bottom_center = Point3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z);
+    assert!(
+        item_bottom_center.approx_eq(Point3::ORIGIN, 1e-12),
+        "extract_item's own re-origin lands its content's bottom center at the \
+         origin — extract_placement must reconstruct exactly that point: \
+         {item_bottom_center:?}"
+    );
+}
+
+/// A user-hidden descendant contributes no geometry to the placement anchor
+/// — matching `extract_item`'s own "anchor on what the user SEES" rule
+/// (round-3 review). The placement over a group with one visible + one
+/// hidden member equals the placement over the visible member alone.
+#[test]
+fn extract_placement_excludes_a_hidden_descendant() {
+    let mut doc = Document::new();
+    let visible = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 1.0); // bottom center (0.5, 0.5, 0)
+    let visible_only = doc
+        .extract_placement(&[NodeId::Object(visible)])
+        .expect("placement over the visible box alone")
+        .to_affine();
+
+    let hidden = extrude_box(&mut doc, 20.0, 20.0, 21.0, 21.0, 1.0);
+    doc.set_node_user_hidden(NodeId::Object(hidden), true);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(visible), NodeId::Object(hidden)])
+        .unwrap();
+
+    let with_hidden_sibling = doc
+        .extract_placement(&[NodeId::Group(g)])
+        .expect("the group has visible content")
+        .to_affine();
+    for i in 0..12 {
+        assert!(
+            (with_hidden_sibling[i] - visible_only[i]).abs() < 1e-12,
+            "index {i}: a hidden descendant must not skew the placement: \
+             {with_hidden_sibling:?} vs {visible_only:?}"
+        );
+    }
+}
+
+/// The axes-moved case: `extract_placement` is NOT `None` — `extract_item`
+/// doesn't re-origin then (the deliberately placed frame IS the chosen
+/// insertion point), so the reconstruction is the axes frame's own forward
+/// transform. Applying it to the item's own (frame-re-expressed, unshifted)
+/// geometry must land back on the ORIGINAL world position — the whole
+/// reason Paste In Place needs this rather than a bare identity affine.
+#[test]
+fn extract_placement_reconstructs_the_original_position_when_axes_are_moved() {
+    let mut doc = Document::new();
+    let oid = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 1.0); // world bbox (0,0,0)-(1,1,1)
+    doc.set_axes(
+        Point3::new(2.0, 3.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+
+    let placement = doc
+        .extract_placement(&[NodeId::Object(oid)])
+        .expect("placement exists even though the axes moved");
+
+    let item = doc.extract_item(&[NodeId::Object(oid)], false).unwrap();
+    let item_oid = item.visible_object_ids()[0];
+    let (item_lo, _) = object_bbox(&item, item_oid);
+    // The item's own min corner, mapped through `placement`, must land back
+    // on the ORIGINAL world min corner (0, 0, 0) — reconstructing exactly
+    // that is the whole point of `extract_placement`. A bare identity
+    // affine would instead leave it at the item's own (axes-frame-relative)
+    // coordinates, nowhere near the original.
+    let reconstructed_min = placement.apply_point(item_lo);
+    assert!(
+        reconstructed_min.approx_eq(Point3::new(0.0, 0.0, 0.0), 1e-9),
+        "reconstructed {reconstructed_min:?} should land back on the original (0,0,0) corner"
+    );
+}
+
 /// Extraction is read-only: the source document's saved bytes are untouched.
 #[test]
 fn extract_leaves_the_source_document_untouched() {

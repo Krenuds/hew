@@ -2115,6 +2115,76 @@ fn merge_doc_change(into: &mut DocChange, from: DocChange) {
     merge_unique(&mut into.guides_touched, from.guides_touched);
 }
 
+/// Whether `node` (in `doc`) is hidden from what the user visually sees —
+/// its own user-hidden flag, or any ancestor group's. Shared by
+/// [`Document::extract_item`]'s re-origin step and
+/// [`visible_world_bottom_center`]: an anchor/shift derived from invisible
+/// geometry would float the VISIBLE part off the cursor (round-3 review).
+fn visibly_hidden(doc: &Document, node: NodeId) -> bool {
+    if doc.node_user_hidden(node) {
+        return true;
+    }
+    let mut cursor = doc.node_parent(node);
+    while let Some(group) = cursor {
+        if doc.node_user_hidden(NodeId::Group(group)) {
+            return true;
+        }
+        cursor = doc.node_parent(NodeId::Group(group));
+    }
+    false
+}
+
+/// Bottom-center anchor of `doc`'s VISIBLE world content: every non-
+/// tombstoned, non-visibly-user-hidden WORLD object, plus every such WORLD
+/// instance expanded through its definition's placements (a definition
+/// member's own pose lives in the definition's local frame — anchoring on
+/// it, or shifting it, would corrupt the shared definition; nested content
+/// contributes only through the expanded placements of the world instances
+/// that render it). `None` when there's nothing to anchor on (no visible
+/// content at all).
+///
+/// Factored out of [`Document::extract_item`]'s own re-origin step
+/// (playtest round 2) so [`Document::extract_placement`] — the read-only
+/// query for where that re-origin will land — can share the identical
+/// walk instead of risking drift from a second implementation.
+fn visible_world_bottom_center(doc: &Document) -> Option<Point3> {
+    let mut lo = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut hi = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut extend = |p: Point3| {
+        lo = Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    };
+    for (oid, rec) in doc.objects.iter().filter(|(_, r)| !r.hidden) {
+        if matches!(rec.owner, ObjectOwner::World { .. })
+            && !visibly_hidden(doc, NodeId::Object(oid))
+        {
+            for v in rec.object.vertices().values() {
+                extend(v.position);
+            }
+        }
+    }
+    let instances: Vec<(Transform, ComponentId)> = doc
+        .instances
+        .iter()
+        .filter(|(id, r)| {
+            !r.hidden && r.owner_def.is_none() && !visibly_hidden(doc, NodeId::Instance(*id))
+        })
+        .map(|(_, r)| (r.pose, r.def))
+        .collect();
+    for (pose, def) in &instances {
+        for (m, local) in doc.expanded_def_placements(*def) {
+            let composed = local.then(pose);
+            for v in doc.objects[m].object.vertices().values() {
+                extend(composed.apply_point(v.position));
+            }
+        }
+    }
+    if !lo.x.is_finite() {
+        return None;
+    }
+    Some(Point3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z))
+}
+
 /// Typed failures of document operations. Nothing is repaired silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentError {
@@ -5123,6 +5193,152 @@ impl Document {
         roots: &[NodeId],
         wrap_as_component: bool,
     ) -> Result<Document, DocumentError> {
+        let mut item = self.extract_item_copy(roots, wrap_as_component)?;
+
+        // Re-origin (playtest round 2): with the drawing axes UNMOVED — the
+        // overwhelmingly common case — "insert at the axes origin" means
+        // "insert wherever this happened to sit in world space", which put
+        // an item meters from the cursor. An unmoved frame carries no
+        // intent, so the item instead re-origins to its content's BOTTOM
+        // CENTER (the natural grab point for placing something on ground
+        // or a face). A deliberately placed axes frame still wins — that
+        // placement IS the user choosing the insertion point.
+        //
+        // The anchor point itself is `visible_world_bottom_center` (factored
+        // out so [`Document::extract_placement`] can answer "where will
+        // this land" without duplicating the walk — see its doc comment).
+        if self.axes() == AxesFrame::IDENTITY
+            && let Some(anchor) = visible_world_bottom_center(&item)
+        {
+            let shift = Transform::translation(Vec3::new(-anchor.x, -anchor.y, -anchor.z));
+            let world_objects: Vec<ObjectId> = item
+                .objects
+                .iter()
+                .filter(|(_, r)| !r.hidden && matches!(r.owner, ObjectOwner::World { .. }))
+                .map(|(id, _)| id)
+                .collect();
+            for oid in world_objects {
+                item.objects[oid]
+                    .object
+                    .apply_transform(&shift)
+                    .expect("a pure translation cannot be refused");
+            }
+            // Same "what the user SEES" exclusion `visible_world_bottom_center`
+            // applied to the anchor itself — a visibly-hidden instance's pose
+            // is left untouched by the shift too (it never contributed to
+            // `anchor`, so shifting it would move it relative to the new
+            // origin for no reason tied to what's visible).
+            let shiftable_instances: Vec<InstanceId> = item
+                .instances
+                .iter()
+                .filter(|(id, r)| {
+                    !r.hidden
+                        && r.owner_def.is_none()
+                        && !visibly_hidden(&item, NodeId::Instance(*id))
+                })
+                .map(|(id, _)| id)
+                .collect();
+            for iid in shiftable_instances {
+                item.instances[iid].pose = item.instances[iid].pose.then(&shift);
+            }
+        }
+
+        // Register every carried tag path with this document's hidden flag.
+        let mut paths: Vec<Vec<String>> = Vec::new();
+        for (_, r) in item.objects.iter() {
+            paths.extend(r.tags.iter().cloned());
+        }
+        for (_, r) in item.groups.iter() {
+            paths.extend(r.tags.iter().cloned());
+        }
+        for (_, r) in item.instances.iter() {
+            paths.extend(r.tags.iter().cloned());
+        }
+        for path in paths {
+            if !path.is_empty() && !item.tag_meta.contains_key(&path) {
+                let hidden = self.tag_meta.get(&path).copied().unwrap_or(false);
+                item.register_tag(path, hidden);
+            }
+        }
+
+        item.debug_validate();
+        Ok(item)
+    }
+
+    /// Read-only preview of the item→world transform a caller must apply on
+    /// re-insert for a Paste-In-Place of `nodes` to land the copy exactly
+    /// overlapping the original (v1.1-cycle.md Lane D:
+    /// `Document::extract_item`'s bytes carry no placement metadata of
+    /// their own, so the caller has to ask this BEFORE copying, while
+    /// `nodes` still names live content in `self`). Exactly reverses
+    /// whatever coordinate change `extract_item` applied to get from
+    /// `self`'s world space into the item's own:
+    ///
+    /// - **Axes at identity** (the overwhelmingly common case):
+    ///   `extract_item` re-origins the copy to its visible content's
+    ///   bottom-center (see its own "Re-origin" doc comment), so undoing
+    ///   that is a pure translation BY that same bottom-center —
+    ///   [`visible_world_bottom_center`], the identical walk `extract_item`
+    ///   itself uses, so the two can never drift apart.
+    /// - **Axes moved**: `extract_item` does NOT re-origin then (the
+    ///   deliberately placed frame IS the chosen insertion point) — it only
+    ///   re-expresses geometry through the axes frame's WORLD-TO-ITEM
+    ///   transform. Undoing that is the axes frame's own FORWARD
+    ///   (item-to-world) transform: `self.axes()` read directly, with no
+    ///   shift on top (none was applied).
+    ///
+    /// `None` when `nodes` resolves to no visible content (an invalid/empty
+    /// selection, or every root invisible) — only reachable in the
+    /// axes-at-identity branch, since the axes-moved branch never needs to
+    /// look at the content at all.
+    pub fn extract_placement(&self, nodes: &[NodeId]) -> Option<Transform> {
+        let axes = self.axes();
+        if axes == AxesFrame::IDENTITY {
+            let item = self.extract_item_copy(nodes, false).ok()?;
+            let anchor = visible_world_bottom_center(&item)?;
+            return Some(Transform::translation(Vec3::new(
+                anchor.x, anchor.y, anchor.z,
+            )));
+        }
+        // The forward (item-to-world) transform of an orthonormal frame:
+        // origin/x/y/z as COLUMNS (this is `frame`'s own transpose — see
+        // `extract_item`'s "world → item" comment for that inverse
+        // direction's row-major construction).
+        let z = axes.z();
+        Some(Transform::from_affine(&[
+            axes.x.x,
+            axes.y.x,
+            z.x,
+            axes.origin.x,
+            axes.x.y,
+            axes.y.y,
+            z.y,
+            axes.origin.y,
+            axes.x.z,
+            axes.y.z,
+            z.z,
+            axes.origin.z,
+        ]))
+    }
+
+    /// The copy phase shared by [`Document::extract_item`] (which then
+    /// re-origins and tag-registers it) and [`Document::extract_placement`]
+    /// (whose identity-axes branch reads the anchor off this copy WITHOUT
+    /// the re-origin shift — the whole reason this is split out, rather
+    /// than calling the public `extract_item` and trying to measure an
+    /// already-shifted result). Validates and structurally copies `roots`
+    /// into a fresh `Document`, verbatim in the drawing-axes frame; no
+    /// re-origin, no tag registration, no `debug_validate` — callers that
+    /// return this directly to the outside world must finish those themselves
+    /// (`extract_item` does).
+    ///
+    /// # Errors
+    /// Same as [`Document::extract_item`] (this IS its validation).
+    fn extract_item_copy(
+        &self,
+        roots: &[NodeId],
+        wrap_as_component: bool,
+    ) -> Result<Document, DocumentError> {
         info!(target: "kernel::op", op = "extract_item");
         self.refuse_during_component_session()?;
         if roots.is_empty() {
@@ -5278,111 +5494,6 @@ impl Document {
             }
         }
 
-        // Re-origin (playtest round 2): with the drawing axes UNMOVED — the
-        // overwhelmingly common case — "insert at the axes origin" means
-        // "insert wherever this happened to sit in world space", which put
-        // an item meters from the cursor. An unmoved frame carries no
-        // intent, so the item instead re-origins to its content's BOTTOM
-        // CENTER (the natural grab point for placing something on ground
-        // or a face). A deliberately placed axes frame still wins — that
-        // placement IS the user choosing the insertion point.
-        if self.axes() == AxesFrame::IDENTITY {
-            let mut lo = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-            let mut hi = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-            let mut extend = |p: Point3| {
-                lo = Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
-                hi = Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
-            };
-            // Anchor on what the user SEES: user-hidden nested content
-            // (carried into the item deliberately) is excluded from the
-            // ghost, the thumbnail, and the viewport alike — an anchor
-            // derived from invisible geometry would float the visible part
-            // off the cursor (round-3 review).
-            let visibly_hidden = |item: &Document, node: NodeId| -> bool {
-                if item.node_user_hidden(node) {
-                    return true;
-                }
-                let mut cursor = item.node_parent(node);
-                while let Some(group) = cursor {
-                    if item.node_user_hidden(NodeId::Group(group)) {
-                        return true;
-                    }
-                    cursor = item.node_parent(NodeId::Group(group));
-                }
-                false
-            };
-            for (oid, rec) in item.objects.iter().filter(|(_, r)| !r.hidden) {
-                if matches!(rec.owner, ObjectOwner::World { .. })
-                    && !visibly_hidden(&item, NodeId::Object(oid))
-                {
-                    for v in rec.object.vertices().values() {
-                        extend(v.position);
-                    }
-                }
-            }
-            // WORLD instances only: a definition-owned member instance's
-            // pose is in its owning definition's local frame — anchoring on
-            // it (or shifting it below) would corrupt the shared
-            // definition. Nested content contributes through the expanded
-            // placements of the world instances that render it.
-            let instances: Vec<(InstanceId, Transform, ComponentId)> = item
-                .instances
-                .iter()
-                .filter(|(id, r)| {
-                    !r.hidden
-                        && r.owner_def.is_none()
-                        && !visibly_hidden(&item, NodeId::Instance(*id))
-                })
-                .map(|(id, r)| (id, r.pose, r.def))
-                .collect();
-            for (_, pose, def) in &instances {
-                for (m, local) in item.expanded_def_placements(*def) {
-                    let composed = local.then(pose);
-                    for v in item.objects[m].object.vertices().values() {
-                        extend(composed.apply_point(v.position));
-                    }
-                }
-            }
-            if lo.x.is_finite() {
-                let anchor = Point3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z);
-                let shift = Transform::translation(Vec3::new(-anchor.x, -anchor.y, -anchor.z));
-                let world_objects: Vec<ObjectId> = item
-                    .objects
-                    .iter()
-                    .filter(|(_, r)| !r.hidden && matches!(r.owner, ObjectOwner::World { .. }))
-                    .map(|(id, _)| id)
-                    .collect();
-                for oid in world_objects {
-                    item.objects[oid]
-                        .object
-                        .apply_transform(&shift)
-                        .expect("a pure translation cannot be refused");
-                }
-                for (iid, pose, _) in instances {
-                    item.instances[iid].pose = pose.then(&shift);
-                }
-            }
-        }
-
-        // Register every carried tag path with this document's hidden flag.
-        let mut paths: Vec<Vec<String>> = Vec::new();
-        for (_, r) in item.objects.iter() {
-            paths.extend(r.tags.iter().cloned());
-        }
-        for (_, r) in item.groups.iter() {
-            paths.extend(r.tags.iter().cloned());
-        }
-        for (_, r) in item.instances.iter() {
-            paths.extend(r.tags.iter().cloned());
-        }
-        for path in paths {
-            if !path.is_empty() && !item.tag_meta.contains_key(&path) {
-                let hidden = self.tag_meta.get(&path).copied().unwrap_or(false);
-                item.register_tag(path, hidden);
-            }
-        }
-
-        item.debug_validate();
         Ok(item)
     }
 
@@ -11209,6 +11320,60 @@ impl Document {
         self.debug_validate();
 
         Ok(delete_change(node, parent, &hidden_subtree))
+    }
+
+    /// [`Document::delete_node`] across a whole selection as ONE undo step (a
+    /// labeled compound, like `tag_many`) — the Delete key and Cut alike must
+    /// remove N nodes in a single undo entry, not N separate ones. A per-node
+    /// error (a stale handle anywhere in the batch) aborts the WHOLE batch
+    /// back to the pre-call snapshot, matching `tag_many`'s all-or-nothing
+    /// posture — nothing is silently partially deleted.
+    ///
+    /// `nodes` may be objects, groups, and instances mixed; an empty slice is
+    /// a no-op (`Ok` with a touching `DocChange`, no undo entry). The
+    /// compound's label names the sole node when there's exactly one
+    /// ("Delete 'Roof'", falling back to "Delete 1 item" when it has no
+    /// name), else the count ("Delete 3 items").
+    pub fn delete_selection(&mut self, nodes: &[NodeId]) -> Result<DocChange, DocumentError> {
+        if nodes.is_empty() {
+            return Ok(DocChange::default());
+        }
+        let label = if let [only] = *nodes {
+            match self.node_meta(only) {
+                Ok((Some(name), _)) if !name.trim().is_empty() => format!("Delete '{name}'"),
+                _ => "Delete 1 item".to_string(),
+            }
+        } else {
+            format!("Delete {} items", nodes.len())
+        };
+        let txn = self.begin_transaction();
+        let mut merged = DocChange::default();
+        let live_at_start: Vec<bool> = nodes.iter().map(|&n| self.node_is_live(n)).collect();
+        for (i, &node) in nodes.iter().enumerate() {
+            // A selection can list a group AND one of its members; once the
+            // group is gone its member is tombstoned with it, and deleting
+            // it again is not an error the user can act on — skip it, as the
+            // per-node loop this replaced did. A handle that was not live
+            // when the batch began still refuses typed through `delete_node`.
+            if live_at_start[i] && !self.node_is_live(node) {
+                continue;
+            }
+            match self.delete_node(node) {
+                Ok(change) => merge_doc_change(&mut merged, change),
+                Err(e) => {
+                    self.abort_transaction(txn);
+                    return Err(e);
+                }
+            }
+        }
+        self.commit_transaction(
+            txn,
+            CompoundMeta {
+                label,
+                origin: HistoryOrigin::User,
+            },
+        )?;
+        Ok(merged)
     }
 
     /// Move / rotate / scale a group: **bake** `t` into every world leaf object

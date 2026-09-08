@@ -93,6 +93,13 @@ import { buildLibraryItem } from './library/libraryModel'
 import { itemFileName } from './library/fileNaming'
 import type { LibraryCategory, LibraryItem } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
+import { parseInsertResult } from './tools/LibraryPlaceTool'
+import {
+  getClipboard,
+  hasClipboardContent,
+  setClipboardBytes,
+  refreshClipboardFromShell,
+} from './clipboard/modelClipboard'
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
@@ -333,6 +340,21 @@ export default function App() {
   const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
+  /** Whether Paste/Paste In Place have something to work with — gates the
+   *  Edit menu items, the native menu (sync_menu_state), and the palette.
+   *  Reflects THIS window's local clipboard cache; refreshed from the
+   *  shared Tauri shell state on focus (see the effect below) so switching
+   *  into a window after copying elsewhere picks it up promptly. */
+  const [clipboardAvailable, setClipboardAvailable] = useState(() => hasClipboardContent())
+  useEffect(() => {
+    if (!isTauri) return
+    const refresh = () => {
+      void refreshClipboardFromShell().then(() => setClipboardAvailable(hasClipboardContent()))
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [])
   /** Object-context path: app-only sticky editing of at most one plain
    *  object (or, via the K1/K2 fallback, a component instance whose pose/
    *  grouping can't support a real session), sitting logically inside the
@@ -1413,6 +1435,14 @@ export default function App() {
   reconcileRef.current = handleDocumentChanged
   const selectedIdsRef = useRef(selectedIds)
   selectedIdsRef.current = selectedIds
+  // Read live for the harness's toggleNodeHidden/isNodeHidden (Lane D:
+  // outliner.spec.ts) — handleToggleHidden is defined further down (it
+  // depends on later state), so it's reached through a ref like
+  // applyLoadedBytesRef below; hiddenKeys is simple state, kept current the
+  // same way selectedIdsRef is.
+  const hiddenKeysRef = useRef(hiddenKeys)
+  hiddenKeysRef.current = hiddenKeys
+  const handleToggleHiddenRef = useRef<(node: NodeRef) => void>(() => {})
   // applyLoadedBytes is defined further down (it depends on later state setters);
   // the harness installs once on mount, so reach it through a ref (kept current
   // below, beside that definition) like reconcileRef.
@@ -1434,6 +1464,8 @@ export default function App() {
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
       toggleTagPath: (path) => toggleTagPathRef.current(path),
       deleteTag: (path) => deleteTagRef.current(path),
+      toggleNodeHidden: (node) => handleToggleHiddenRef.current(node),
+      isNodeHidden: (node) => hiddenKeysRef.current.has(nodeKey(node)),
       setPrintRecorder: (r) => {
         printRecorderRef.current = r
       },
@@ -1727,10 +1759,20 @@ export default function App() {
       canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds),
       canExplode: canExplodeInstance(selectedIds),
       canMakeUnique: canMakeUnique(selectedIds),
+      // Copy/Cut (Lane D): at least one STRUCTURAL node selected — a
+      // sketch-only selection still refuses with a toast (doCopy), but the
+      // command doesn't even light up for one, matching every other
+      // selection-gated command's posture.
+      hasStructuralSelection: selectedIds.some(
+        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
+      ),
+      // Paste/Paste In Place: whether this window's clipboard cache has
+      // anything (kept fresh on focus — see the `clipboardAvailable` effect).
+      clipboardHasContent: clipboardAvailable,
     }
     // docRev: entity lists change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, selectedIds, activeContext, docRev, sessionStack])
+  }, [state, selectedIds, activeContext, docRev, sessionStack, clipboardAvailable])
 
   // Choosing a Draw tool at top level clears the selection: the user is
   // about to create geometry, so a still-selected object/group/component
@@ -3711,7 +3753,164 @@ export default function App() {
     setDocRev((r) => r + 1)
   }
 
+  // ── Copy / Cut / Paste / Paste In Place (Lane D) ─────────────────────────
+  // A stable per-mount tag for the clipboard content's informational
+  // `sourceDocId` (never read by `insert_item` itself — see modelClipboard's
+  // doc comment).
+  const clipboardSourceIdRef = useRef<string>(
+    typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : String(Date.now()),
+  )
+
+  const isStructuralNode = (n: NodeRef): boolean =>
+    n.kind === 'object' || n.kind === 'group' || n.kind === 'instance'
+
+  const SKETCH_COPY_TOAST = "Sketch geometry can't be copied yet — use Move with Option/Alt held"
+
+  /** Copy: `extract_item` (unwrapped — a copied plain box stays a plain box,
+   *  unlike Save to Library's component wrap) of the selection's structural
+   *  subset, then store it. Returns the copied nodes on success (so Cut can
+   *  delete exactly what was actually captured) or `null` on refusal/error —
+   *  Cut must NOT delete anything when this fails, or the geometry is lost
+   *  with no backup on the clipboard. */
+  const doCopy = (): NodeRef[] | null => {
+    const structural = selectedIds.filter(isStructuralNode)
+    if (structural.length === 0) {
+      if (selectedIds.length > 0) handleToast(SKETCH_COPY_TOAST)
+      return null
+    }
+    const scene = sceneRef.current
+    if (scene === null) return null
+    const sel = structuralSelection(structural)
+    if (sel === null) return null // unreachable — every entry is already structural
+    let bytes: Uint8Array
+    try {
+      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return null
+    }
+    const kinds = [...new Set(structural.map((n) => n.kind))]
+    // Paste In Place's affine (see ClipboardContent.placementAffine): the
+    // kernel's own reconstruction of this exact selection's original world
+    // position — `Scene.extract_item_placement` runs the SAME logic
+    // `extract_item` used above (crates/kernel's `extract_placement`/
+    // `visible_world_bottom_center`), covering BOTH the identity-axes
+    // re-origin case and the moved-axes case, so this can never drift from
+    // what extract_item actually did (hidden-descendant selections
+    // included) and Paste In Place never has to special-case either axes
+    // state itself. `undefined` (no visible content) falls back to `null`.
+    const placement = scene.extract_item_placement(sel.kinds, sel.ids)
+    const placementAffine = placement === undefined ? null : Array.from(placement)
+    void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine).then(() => {
+      setClipboardAvailable(true)
+      handleToast(`Copied ${structural.length} object${structural.length === 1 ? '' : 's'}`)
+    })
+    return structural
+  }
+
+  const handleCopy = () => {
+    doCopy()
+  }
+
+  const handleCut = () => {
+    const copied = doCopy()
+    if (copied === null) return
+    viewportApi.current?.runDelete(copied)
+    setSelectedIds((cur) => cur.filter((n) => !copied.some((c) => nodeEq(c, n))))
+    setDocRev((r) => r + 1)
+  }
+
+  /** Paste (cursor placement) / Paste In Place (identity affine, no
+   *  gesture). Both resolve the clipboard the same way: this window's own
+   *  cache first, else a fresh pull from the shared Tauri shell state (a
+   *  cross-window paste with nothing copied locally yet). */
+  const handlePaste = (inPlace: boolean) => {
+    void (async () => {
+      // ALWAYS await a fresh pull before reading — never trust the local
+      // cache outright. Under Tauri, the focus-triggered refresh effect
+      // may still be in flight (switch straight into this window and hit
+      // ⌘V before its `clipboard_get` round trip lands): reading local
+      // `current` unconditionally here could hand back a stale
+      // cross-window clipboard. `refreshClipboardFromShell` is a no-op on
+      // the web build and cheap (and correctly a no-op) when this
+      // window's own cache already matches the shell's bytes — see its
+      // doc comment.
+      await refreshClipboardFromShell()
+      const content = getClipboard()
+      if (content === null) return // nothing to paste; the shortcut/menu is a silent no-op
+      const scene = sceneRef.current
+      if (scene === null) return
+
+      if (inPlace) {
+        // The kernel-computed reconstruction affine — see
+        // `ClipboardContent.placementAffine`'s doc comment for why a bare
+        // identity affine would NOT overlap the original in EITHER axes
+        // state extract_item has (identity re-origin, or a moved frame).
+        // `null` (no content to anchor on) falls back to plain identity.
+        const affine = new Float64Array(
+          content.placementAffine ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+        )
+        let raw: unknown
+        try {
+          raw = scene.insert_item(content.bytes, affine, content.sourceId, content.contentHash)
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          return
+        }
+        const result = parseInsertResult(raw)
+        // Additive kernel mutation made outside a tool — refreshScene is the
+        // harness's own choke point for exactly this (re-tessellate +
+        // reconcile + docRev, see ViewportApi.refreshScene's doc comment).
+        viewportApi.current?.refreshScene()
+        const refs: NodeRef[] = result.rootKinds.map((k, i) => ({
+          kind: k === 0 ? 'object' as const : k === 1 ? 'group' as const : 'instance' as const,
+          id: result.rootIds[i],
+        }))
+        setSelectedGuide(null)
+        setSelectedAnnotation(null)
+        setSelectedIds(refs)
+        return
+      }
+
+      // Cursor placement: arm the same one-shot LibraryPlaceTool the Library
+      // browser uses, with a ghost built straight from the clipboard bytes.
+      let ghost: Awaited<ReturnType<typeof buildItemGhost>>
+      try {
+        ghost = await buildItemGhost(content.bytes)
+      } catch (err) {
+        handleToast(`Couldn't preview the paste: ${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
+      viewportApi.current?.armLibraryPlacement({
+        bytes: content.bytes,
+        sourceId: content.sourceId,
+        contentHash: content.contentHash,
+        displayName: 'Pasted objects',
+        ghost: ghost.group,
+        bboxMin: ghost.bboxMin,
+        bboxMax: ghost.bboxMax,
+      })
+    })()
+  }
+
   const menuActionRef = useRef<(payload: string) => void>(() => {})
+  /** Whether keyboard focus is in a text field (an input, a textarea, or a
+   *  contenteditable) — the same typing guard the keydown effects use. */
+  const textFieldFocused = (): boolean => {
+    const el = document.activeElement as HTMLElement | null
+    return el !== null && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+  }
+  /** Run a text editing command on the focused text field and report
+   *  whether one had focus (so the scene action must not run). */
+  const forwardToTextField = (command: 'copy' | 'cut' | 'selectAll'): boolean => {
+    if (!textFieldFocused()) return false
+    document.execCommand(command)
+    return true
+  }
   menuActionRef.current = (payload: string) => {
     // Palette "jump" entries (dynamic Model group) carry their target in the
     // id. Nodes: select + reveal in the Outliner/Object Info (the tree
@@ -3823,8 +4022,30 @@ export default function App() {
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
       case 'redo':     handleRedoRef.current(); break
-      case 'edit-select-all': viewportApi.current?.selectAll(); break
+      // On macOS the native Edit items carry key equivalents and are
+      // ungated, so a Cmd+C/X/A pressed while a text field has focus lands
+      // HERE (WebKit gave the page the key first; the field itself has no
+      // editing key equivalents of its own) — forward it to the field's
+      // editing command instead of the scene. Paste In Place in a field is
+      // simply not ours. See main.rs's Edit menu comment.
+      case 'edit-select-all':
+        if (forwardToTextField('selectAll')) break
+        viewportApi.current?.selectAll()
+        break
       case 'edit-delete': deleteSelection(); break
+      case 'edit-copy':
+        if (forwardToTextField('copy')) break
+        handleCopy()
+        break
+      case 'edit-cut':
+        if (forwardToTextField('cut')) break
+        handleCut()
+        break
+      case 'edit-paste': handlePaste(false); break
+      case 'edit-paste-in-place':
+        if (textFieldFocused()) break
+        handlePaste(true)
+        break
       case 'close':
         // Trigger the beforeunload / close-guard path by emitting the
         // Tauri window close request — handled by the close guard effect.
@@ -4528,10 +4749,13 @@ export default function App() {
   // Delete / Backspace → delete the current selection (guides).
   // Registered SEPARATELY from the global-shortcut effect above because that one
   // is disabled under Tauri (the native menu owns accelerators) — but Edit ▸
-  // Delete has *no* native accelerator (a bare Delete/Backspace would bypass the
-  // typing guard and collide with the tools' VCB Backspace), so the key must be
-  // handled in JS on BOTH web and desktop. It deletes from any tool; only a tool
-  // mid-VCB entry (isCapturingInput) keeps Backspace for the typed buffer.
+  // Delete's key must be handled in JS on BOTH web and desktop: on macOS the
+  // native item shows ⌫ yet WebKit hands the keydown to the page first, and on
+  // Windows/Linux the item has no accelerator at all (a native bare
+  // Delete/Backspace there would bypass the typing guard and collide with the
+  // tools' VCB Backspace — see main.rs's comment by `edit_delete`). It deletes
+  // from any tool; only a tool mid-VCB entry (isCapturingInput) keeps Backspace
+  // for the typed buffer.
   useEffect(() => {
     const onDeleteKey = (ev: KeyboardEvent) => {
       if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
@@ -4579,6 +4803,44 @@ export default function App() {
     }
     window.addEventListener('keydown', onSelectAllKey)
     return () => window.removeEventListener('keydown', onSelectAllKey)
+  }, [])
+
+  // Cmd/Ctrl+C / +X / +V / Shift+Cmd/Ctrl+V → Copy / Cut / Paste / Paste In
+  // Place. Same posture as Delete/Select All above: handled in JS on BOTH
+  // web and desktop. The native macOS items show these keys, but WebKit
+  // still hands the keydown to the page (and a focused text field's own
+  // copy/cut/paste) before the menu fires; on Windows/Linux the items carry
+  // no accelerator at all, because a native CmdOrCtrl+C/X/V there fires even
+  // while typing in a text field or renaming a node, hijacking the OS's own
+  // text clipboard — see main.rs's comment by `edit_delete`. A focused text
+  // field keeps the browser's own copy/cut/paste.
+  // Shift+Cmd/Ctrl+C is Toggle Materials (MenuBar/main.rs) — never claimed
+  // here.
+  useEffect(() => {
+    const onClipboardKey = (ev: KeyboardEvent) => {
+      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
+      const key = ev.key.toLowerCase()
+      if (key !== 'c' && key !== 'x' && key !== 'v') return
+      if (welcomeOpenRef.current) return // let the modal alone; no scene action underneath it
+      const target = ev.target as HTMLElement
+      const isTyping =
+        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+      if (isTyping) return // let the focused field's own copy/cut/paste run
+      if (key === 'c') {
+        if (ev.shiftKey) return // Shift+Cmd/Ctrl+C is Toggle Materials
+        ev.preventDefault()
+        menuActionRef.current('edit-copy')
+      } else if (key === 'x') {
+        if (ev.shiftKey) return
+        ev.preventDefault()
+        menuActionRef.current('edit-cut')
+      } else {
+        ev.preventDefault()
+        menuActionRef.current(ev.shiftKey ? 'edit-paste-in-place' : 'edit-paste')
+      }
+    }
+    window.addEventListener('keydown', onClipboardKey)
+    return () => window.removeEventListener('keydown', onClipboardKey)
   }, [])
 
   // Mirror the View ▸ Axes / Grid / Guides toggles into the viewport. The
@@ -4651,6 +4913,10 @@ export default function App() {
       'edit-union': menuGates?.canBoolean ?? false,
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
+      'edit-cut': menuGates?.hasStructuralSelection ?? false,
+      'edit-copy': menuGates?.hasStructuralSelection ?? false,
+      'edit-paste': menuGates?.clipboardHasContent ?? false,
+      'edit-paste-in-place': menuGates?.clipboardHasContent ?? false,
       'view-section-plane': sectionPlaneMenuState.exists,
       // Import and 3D Text refuse only while a COMPONENT frame is open
       // (ExplodeSessionScope) — gate the NATIVE items the same way the web
@@ -4776,6 +5042,33 @@ export default function App() {
     const kindNum = nodeKindToNumber(node.kind)
     if (kindNum >= 0) sceneRef.current?.set_node_user_hidden(kindNum, node.id, nowHidden)
   }
+  handleToggleHiddenRef.current = handleToggleHidden
+
+  /**
+   * Batch hide/show for many nodes at once (Lane D: the Outliner's
+   * per-container "hide/show all children" control, plus the root Model
+   * row's own eye, which has no single node of its own to toggle). One Set
+   * mutation, one `pushUnionHidden` push, N `set_node_user_hidden` calls —
+   * not N individual `handleToggleHidden` round trips.
+   */
+  const handleSetHiddenMany = useCallback((nodes: NodeRef[], hidden: boolean) => {
+    if (nodes.length === 0) return
+    const next = new Set(hiddenKeys)
+    for (const n of nodes) {
+      const k = nodeKey(n)
+      if (hidden) next.add(k)
+      else next.delete(k)
+    }
+    setHiddenKeys(next)
+    pushUnionHidden(next, hiddenTagPaths)
+    const scene = sceneRef.current
+    if (scene !== null) {
+      for (const n of nodes) {
+        const kindNum = nodeKindToNumber(n.kind)
+        if (kindNum >= 0) scene.set_node_user_hidden(kindNum, n.id, hidden)
+      }
+    }
+  }, [hiddenKeys, hiddenTagPaths, pushUnionHidden])
 
   const handleToggleTagPath = useCallback((path: string[]) => {
     const key = tagPathKey(path)
@@ -5238,6 +5531,8 @@ export default function App() {
           canBoolean,
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
+          hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,
+          clipboardHasContent: menuGates?.clipboardHasContent ?? false,
         }}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
@@ -5658,6 +5953,7 @@ export default function App() {
             <DocumentTree
               scene={state.scene}
               docRev={docRev}
+              docGeneration={docGeneration}
               watertightMap={watertightMap}
               selectedIds={selectedIds}
               activeContext={activeContext}
@@ -5669,6 +5965,7 @@ export default function App() {
               onSetContextDepth={handleSetPathDepth}
               hiddenKeys={hiddenKeys}
               onToggleHidden={handleToggleHidden}
+              onSetHiddenMany={handleSetHiddenMany}
             />
           </TraySection>
           <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -6163,6 +6460,8 @@ export default function App() {
           canDrawText: !componentFrameOpen,
           sceneActive: scenes.activeSid !== null,
           scenesAny: scenes.entries.length > 0,
+          hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,
+          clipboardHasContent: menuGates?.clipboardHasContent ?? false,
         }}
       />
 

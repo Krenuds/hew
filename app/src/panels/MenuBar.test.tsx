@@ -226,6 +226,50 @@ describe('MenuBar', () => {
     expect(onEditAction).not.toHaveBeenCalled()
   })
 
+  // --- Edit menu: Cut/Copy/Paste/Paste In Place (Lane D) ---
+
+  it('dispatches Cut/Copy/Paste/Paste In Place through onEditAction when their gates are open', () => {
+    const onEditAction = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        editGates={{ ...openGates, hasStructuralSelection: true, clipboardHasContent: true }}
+        onEditAction={onEditAction}
+      />,
+    )
+    const commands: Array<[string, string]> = [
+      ['Cut', 'edit-cut'],
+      ['Copy', 'edit-copy'],
+      ['Paste', 'edit-paste'],
+      ['Paste In Place', 'edit-paste-in-place'],
+    ]
+    for (const [label, action] of commands) {
+      fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+    expect(onEditAction).toHaveBeenCalledTimes(commands.length)
+  })
+
+  it('does NOT dispatch Cut/Copy without a structural selection, or Paste/Paste In Place with an empty clipboard', () => {
+    const onEditAction = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        editGates={{ ...openGates, hasStructuralSelection: false, clipboardHasContent: false }}
+        onEditAction={onEditAction}
+      />,
+    )
+    // A disabled MenuItem's mousedown never calls withClose (MenuItem's own
+    // `if (!disabled) onClick()`), so the menu stays open across every
+    // disabled click below — opening it once is correct, not an oversight.
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    for (const label of ['Cut', 'Copy', 'Paste', 'Paste In Place']) {
+      fireEvent.mouseDown(screen.getByText(label))
+    }
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
   // --- Tools menu: active tool checkmark ---
 
   it('shows a checkmark next to the active tool in the Tools menu', () => {

@@ -1,19 +1,21 @@
 /**
  * DocumentTree — the document outliner ( navigation).
  *
- * One unified tree list: the document's top-level nodes (Objects, Groups,
- * Component instances — recursive, with expand/collapse for groups) followed
- * by free-standing sketches as ordinary rows in the same list. Breadcrumb
- * shows the combined path: Model → open session frames (outermost first) →
- * object context (docs/design/group-session.md).
+ * One unified tree list: a non-selectable root "Model" row, then the
+ * document's top-level nodes (Objects, Groups, Component instances —
+ * recursive, with expand/collapse for groups) followed by free-standing
+ * sketches as ordinary rows in the same list. Breadcrumb shows the combined
+ * path: Model → open session frames (outermost first) → object context
+ * (docs/design/group-session.md).
  *
  * Click to select; double-click to enter context. Structural actions
  * (booleans, group/ungroup, component ops) live in the menus/dock — this
- * panel is purely navigational. Node types are distinguished by small
- * stroke-based inline SVG icons tinted per type (see NodeIcon).
+ * panel is purely navigational plus visibility (the eye toggles) and a text
+ * filter. Node types are distinguished by small stroke-based inline SVG
+ * icons tinted per type (see NodeIcon).
  */
 
-import { useMemo, useState, useEffect, useRef } from 'react'
+import { useMemo, useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   entityLabel,
@@ -23,6 +25,9 @@ import {
   isTreeRowDimmed,
   nodeRefFromJs,
   nodeKey,
+  nodeKindToNumber,
+  collectDescendants,
+  filterTreeKeys,
   type NodeRef,
   type NodeKind,
 } from './treeModel'
@@ -31,6 +36,15 @@ interface Props {
   scene: WasmScene
   /** Bumped by the parent on any document change to trigger a re-query. */
   docRev: number
+  /** Bumped by the parent on every File ▸ New / Open (App.tsx's
+   *  `applyLoadedBytes`) — a NEW document, not just a mutation of this one.
+   *  Resets `expandedMap` (below) when it changes: handles are dense and
+   *  generational per-document, so a `kind:id` key left over from the
+   *  PREVIOUS document can alias an unrelated node in the new one (the same
+   *  hazard `hiddenKeys` is reset for on load) — a stale key surviving here
+   *  would force-expand or misrender a node that just happens to reuse that
+   *  slot. */
+  docGeneration: number
   /** Per-object watertight state, for the solid/leaky icon state. */
   watertightMap: Map<bigint, boolean>
   /** Selected nodes (ordered; index 0 = primary). */
@@ -78,8 +92,14 @@ interface Props {
   onSetContextDepth: (depth: number) => void
   /** Set of nodeKey strings for nodes that are currently hidden. */
   hiddenKeys: Set<string>
-  /** Toggle hide/show for a node (and its descendants if it's a group). */
+  /** Toggle hide/show for a single node (and its descendants if it's a group). */
   onToggleHidden: (node: NodeRef) => void
+  /** Batch hide/show — the per-container "hide/show all children" control
+   *  (every group row, plus the root Model row's own eye button, which has
+   *  no single node of its own to toggle) and its E2E-facing counterpart.
+   *  One Set mutation + one kernel push for the whole batch, not N
+   *  individual toggles. */
+  onSetHiddenMany: (nodes: NodeRef[], hidden: boolean) => void
 }
 
 const ROW_BASE: React.CSSProperties = {
@@ -96,9 +116,58 @@ const ROW_BASE: React.CSSProperties = {
   minWidth: 0,
 }
 
+/**
+ * Decide and run one "hide/show all children" click for a container row
+ * (the root Model row, or a group row). State rule (design):
+ * - If ANY descendant (or the container's own node, when it has one) is
+ *   currently hidden, the action is "Show all": clear every descendant's
+ *   hidden key plus the container's own.
+ * - Otherwise the action is "Hide all": set every DIRECT child's own hidden
+ *   key (descendants inherit visibility from their hidden direct ancestor —
+ *   `unionHiddenLeafIds`'s recursive expansion already resolves that at
+ *   push time, so only the direct children need their own key set).
+ *
+ * `ownNode` is `null` for the Model row (no NodeRef of its own to carry a
+ * hidden key).
+ */
+function toggleContainerVisibility(
+  ownNode: NodeRef | null,
+  directChildren: NodeRef[],
+  getGroupMembers: (groupId: bigint) => NodeRef[],
+  hiddenKeys: Set<string>,
+  onSetHiddenMany: (nodes: NodeRef[], hidden: boolean) => void,
+): void {
+  const descendants = collectDescendants(directChildren, getGroupMembers)
+  const anyHidden =
+    (ownNode !== null && hiddenKeys.has(nodeKey(ownNode))) ||
+    descendants.some((d) => hiddenKeys.has(nodeKey(d)))
+  if (anyHidden) {
+    onSetHiddenMany(ownNode !== null ? [ownNode, ...descendants] : descendants, false)
+  } else {
+    onSetHiddenMany(directChildren, true)
+  }
+}
+
+/** Whether `node` is hidden only because an ANCESTOR group is hidden (not
+ *  its own key) — walks the parent chain via `node_parent`, mirroring the
+ *  ancestor walk `DocumentTree`'s selection auto-expand already does. Used
+ *  to render the eye as "hidden by parent" (dimmed ○) rather than the
+ *  ordinary hidden ○, per the design's "eye rendering fix". */
+function isHiddenByAncestor(node: NodeRef, scene: WasmScene, hiddenKeys: Set<string>): boolean {
+  if (node.kind !== 'object' && node.kind !== 'group' && node.kind !== 'instance') return false
+  const kindNum = nodeKindToNumber(node.kind)
+  let parentId = scene.node_parent(kindNum, node.id)
+  while (parentId !== undefined) {
+    if (hiddenKeys.has(nodeKey({ kind: 'group', id: parentId }))) return true
+    parentId = scene.node_parent(1, parentId)
+  }
+  return false
+}
+
 export function DocumentTree({
   scene,
   docRev,
+  docGeneration,
   watertightMap,
   selectedIds,
   activeContext,
@@ -110,6 +179,7 @@ export function DocumentTree({
   onSetContextDepth,
   hiddenKeys,
   onToggleHidden,
+  onSetHiddenMany,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -118,6 +188,8 @@ export function DocumentTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, docRev],
   )
+  const getGroupMembers = (groupId: bigint): NodeRef[] =>
+    scene.group_members(groupId).map(nodeRefFromJs)
   const sessionMemberKeySet = useMemo(
     () => (sessionMembers === null ? null : new Set(sessionMembers.map(nodeKey))),
     [sessionMembers],
@@ -324,7 +396,8 @@ export function DocumentTree({
     [sessionStack],
   )
 
-  // Label resolver for breadcrumbs.
+  // Label resolver for breadcrumbs AND the filter below (same text, so a
+  // filter match is exactly what the row itself displays).
   const labelFor = (node: NodeRef): string => {
     const frameLabel = frameLabelByKey.get(nodeKey(node))
     if (frameLabel !== undefined) return frameLabel
@@ -339,6 +412,63 @@ export function DocumentTree({
       return resolveLabel(scene.object_name(node.id), undefined, 'object', idx)
     }
   }
+
+  // ---------------------------------------------------------------------
+  // Filter (MaterialPalette's filter pattern): case-insensitive substring
+  // on the same label text the rows themselves render. While active, only
+  // matches and their ancestors render; ancestors force-expand and dim.
+  // ---------------------------------------------------------------------
+  const [filter, setFilter] = useState('')
+  const filterInputRef = useRef<HTMLInputElement>(null)
+  const filterResult = useMemo(() => {
+    const getChildren = (node: NodeRef): NodeRef[] =>
+      node.kind === 'group' ? getGroupMembers(node.id) : []
+    return filterTreeKeys(topNodes, getChildren, labelFor, filter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topNodes, filter, scene, docRev])
+  const filterActive = filterResult !== null
+  const filterQuery = filter.trim().toLowerCase()
+  // Sketches aren't part of the group-nested tree `filterTreeKeys` walks
+  // (they're a flat, separately-numbered list) — filtered here directly
+  // against the same "Sketch N" label each row renders.
+  const visibleSketches = filterActive
+    ? sketches.filter((_, index) => entityLabel('sketch', index).toLowerCase().includes(filterQuery))
+    : sketches
+  const filterEmpty =
+    filterActive && (filterResult?.matches.size ?? 0) === 0 && visibleSketches.length === 0
+
+  // Expand/collapse state, lifted out of each NodeRow's own local state
+  // (design: a Map<key, boolean> here) so applying and then clearing a
+  // filter doesn't reset whatever the user had manually expanded/collapsed
+  // before it.
+  const [expandedMap, setExpandedMap] = useState<Map<string, boolean>>(new Map())
+  // Reset SYNCHRONOUSLY on a new document (docGeneration bump — File ▸ New
+  // / Open), before this render reads `expandedMap`: handles are dense and
+  // generational PER DOCUMENT, so a `kind:id` key left over from the
+  // previous document (adversarial review finding 1) can alias an unrelated
+  // node in the new one — force-expanding, or misapplying filter-ancestor
+  // styling to, a node that just happens to reuse that slot. An effect-time
+  // clear would run one render too late (the same reasoning DocumentTree's
+  // own session-reveal-key derivation above uses, and MaterialPalette's
+  // `thumbGenRef` docRev-generation guard uses for its thumbnail cache).
+  const [expandedMapGeneration, setExpandedMapGeneration] = useState(docGeneration)
+  if (expandedMapGeneration !== docGeneration) {
+    setExpandedMapGeneration(docGeneration)
+    setExpandedMap(new Map())
+  }
+  // Stable identity (setExpandedMap, the only external dep, is itself a
+  // stable setState function) — part of NodeRow's React.memo payoff below:
+  // a freshly-recreated callback prop on every render would invalidate
+  // memo for every row regardless of whether anything that row actually
+  // renders from changed.
+  const setNodeExpanded = useCallback((key: string, value: boolean) => {
+    setExpandedMap((prev) => {
+      if (prev.get(key) === value) return prev
+      const next = new Map(prev)
+      next.set(key, value)
+      return next
+    })
+  }, [])
 
   const crumbs = breadcrumb(fullPath, labelFor)
 
@@ -386,22 +516,80 @@ export function DocumentTree({
         ))}
       </div>
 
-      {/* Unified node tree: top-level nodes first, then free-standing sketches.
-          An empty document renders no rows at all — no placeholder text. */}
+      {/* Filter — MaterialPalette's filter pattern (⌕ / × clear). Matches
+          the same label text every row renders below. */}
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: '6px',
+            color: 'var(--text-faint, #888)',
+            fontSize: '11px',
+            pointerEvents: 'none',
+          }}
+        >
+          ⌕
+        </span>
+        <input
+          ref={filterInputRef}
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter outliner…"
+          aria-label="Filter outliner"
+          style={{
+            flex: 1,
+            fontSize: '11px',
+            fontFamily: 'monospace',
+            background: 'var(--surface-input, #444)',
+            color: 'var(--text-primary, #eee)',
+            border: 'none',
+            borderRadius: '3px',
+            padding: '3px 20px',
+            boxSizing: 'border-box',
+          }}
+        />
+        {filter !== '' && (
+          <button
+            type="button"
+            onClick={() => {
+              setFilter('')
+              // This button unmounts the instant the filter becomes empty
+              // (it only renders while filter !== ''); without this, focus
+              // would drop to <body> rather than staying in the filter flow.
+              filterInputRef.current?.focus()
+            }}
+            aria-label="Clear filter"
+            style={{
+              position: 'absolute',
+              right: '4px',
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-faint, #888)',
+              cursor: 'pointer',
+              fontSize: '13px',
+              lineHeight: 1,
+              padding: '2px',
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {/* Unified node tree: root Model row, top-level nodes, then
+          free-standing sketches. An empty document renders no content rows
+          at all (just the Model row) — no placeholder text; an empty FILTER
+          result gets one, below. */}
       <div>
-        {/* One synthetic, non-selectable header row per open session frame,
-            outermost first, each indented one level deeper — reuses the
-            exact "active context" row treatment (accent tint, bold, inset
-            rail, "editing" chip) so it reads as the same kind of thing as a
-            context-breadcrumb row. No expand chevron (a frame's own node is
-            hidden, so it has no real children to toggle) and no hide toggle
-            (it isn't a selectable node). Only the INNERMOST frame's members
-            are listed (nested one level deeper still) — an ancestor frame's
-            own live members aren't independently reachable from the app
-            side (docs/design/group-session.md: no per-ancestor scope
-            tracking), so it renders as a plain labeled waypoint on the
-            path, matching "outer frames' nodes render undimmed on the
-            path." */}
+        <ModelRow
+          hidden={false}
+          onToggleAllHidden={() =>
+            toggleContainerVisibility(null, topNodes, getGroupMembers, hiddenKeys, onSetHiddenMany)
+          }
+          anyChildHidden={collectDescendants(topNodes, getGroupMembers).some((d) => hiddenKeys.has(nodeKey(d)))}
+        />
         {sessionStack.map((frame, i) => (
           <Row
             key={`session-frame:${nodeKey(frame.node)}`}
@@ -442,8 +630,12 @@ export function DocumentTree({
             ancestorGroupKeys={ancestorGroupKeys}
             hiddenKeys={hiddenKeys}
             onToggleHidden={onToggleHidden}
+            onSetHiddenMany={onSetHiddenMany}
             onSelect={onSelect}
             onEnterContext={onEnterContext}
+            filterResult={null}
+            expandedMap={expandedMap}
+            setNodeExpanded={setNodeExpanded}
           />
         ))}
         {topNodes.map((node, index) => {
@@ -453,6 +645,13 @@ export function DocumentTree({
           // excluded from `topNodes` by the kernel's hidden filter — see
           // the session-frame header block above.)
           if (sessionMemberKeySet !== null && sessionMemberKeySet.has(nodeKey(node))) {
+            return null
+          }
+          if (
+            filterResult !== null &&
+            !filterResult.matches.has(nodeKey(node)) &&
+            !filterResult.ancestors.has(nodeKey(node))
+          ) {
             return null
           }
           return (
@@ -473,13 +672,18 @@ export function DocumentTree({
               ancestorGroupKeys={ancestorGroupKeys}
               hiddenKeys={hiddenKeys}
               onToggleHidden={onToggleHidden}
+              onSetHiddenMany={onSetHiddenMany}
               onSelect={onSelect}
               onEnterContext={onEnterContext}
+              filterResult={filterResult}
+              expandedMap={expandedMap}
+              setNodeExpanded={setNodeExpanded}
             />
           )
         })}
-        {sketches.map(({ sketch, island }, index) => {
+        {visibleSketches.map(({ sketch, island }) => {
           const node: NodeRef = { kind: 'sketch-island', id: island, sketch }
+          const index = sketches.findIndex((s) => s.sketch === sketch && s.island === island)
           return (
             <Row
               key={`${sketch}:${island}`}
@@ -495,13 +699,100 @@ export function DocumentTree({
             />
           )
         })}
+        {filterEmpty && (
+          <div
+            style={{
+              padding: '6px 8px',
+              fontSize: '12px',
+              fontFamily: 'var(--font-family-ui)',
+              color: 'var(--text-faint, #888)',
+              fontStyle: 'italic',
+            }}
+          >
+            No objects match
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
+/** The root "Model" row: always present, always expanded (no chevron — it
+ *  is not collapsible), not selectable, not filterable-away. Its own eye
+ *  button IS the whole-document "hide/show all" control — there is no
+ *  individual per-node hidden flag for the Model row itself the way a
+ *  group/object has one, so a single button covers what a container row
+ *  splits into two (its own eye plus the "all children" control). */
+function ModelRow({
+  hidden,
+  anyChildHidden,
+  onToggleAllHidden,
+}: {
+  hidden: boolean
+  anyChildHidden: boolean
+  onToggleAllHidden: () => void
+}) {
+  return (
+    <div
+      style={{
+        ...ROW_BASE,
+        paddingLeft: '8px',
+        paddingRight: '4px',
+        cursor: 'default',
+        fontWeight: 'bold',
+      }}
+    >
+      <ModelIcon />
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: hidden ? 0.6 : 1 }}>
+        Model
+      </span>
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggleAllHidden()
+        }}
+        aria-label={anyChildHidden ? 'Show all children' : 'Hide all children'}
+        title={anyChildHidden ? 'Show all children' : 'Hide all children'}
+        style={{
+          background: 'none',
+          border: 'none',
+          color: anyChildHidden ? 'var(--text-section)' : 'var(--text-muted)',
+          cursor: 'pointer',
+          padding: '0 2px',
+          fontSize: '11px',
+          lineHeight: 1,
+          flexShrink: 0,
+        }}
+      >
+        {anyChildHidden ? '○○' : '●●'}
+      </button>
+    </div>
+  )
+}
+
+function ModelIcon() {
+  return (
+    <svg
+      {...ICON_SVG_PROPS}
+      data-node-icon="model"
+      style={{ ...ICON_SVG_PROPS.style, color: 'var(--text-section, #9ab)' }}
+    >
+      <path d="M2 6.6 7 2.4 12 6.6 12 12 2 12 Z" />
+      <path d="M5.4 12 5.4 8.4 8.6 8.4 8.6 12" />
+    </svg>
+  )
+}
+
 /** One tree row that may be an object or a group (with expand/collapse). */
-function NodeRow({
+// Wrapped in React.memo (adversarial review finding 5): DocumentTree can
+// re-render often (docRev bumps, selection changes, an expand toggle
+// anywhere in the tree), and a group with many members re-renders every
+// child NodeRow along with it — memo skips a row whose own props are
+// unchanged. The inner function is named `NodeRowInner`, NOT `NodeRow`, so
+// the recursive `<NodeRow>` JSX below resolves to the memoized `const`
+// (a same-named function expression's own name would shadow it and bypass
+// memo for every nested row).
+const NodeRow = memo(function NodeRowInner({
   node,
   index,
   depth,
@@ -517,8 +808,12 @@ function NodeRow({
   ancestorGroupKeys,
   hiddenKeys,
   onToggleHidden,
+  onSetHiddenMany,
   onSelect,
   onEnterContext,
+  filterResult,
+  expandedMap,
+  setNodeExpanded,
 }: {
   node: NodeRef
   index: number
@@ -543,19 +838,32 @@ function NodeRow({
   ancestorGroupKeys: Set<string>
   hiddenKeys: Set<string>
   onToggleHidden: (node: NodeRef) => void
+  onSetHiddenMany: (nodes: NodeRef[], hidden: boolean) => void
   onSelect: (n: NodeRef, additive: boolean) => void
   onEnterContext: (n: NodeRef) => void
+  /** Active text filter (`null` = no filter): drives force-expand of an
+   *  ancestor group and the dimmed "ancestor, not a match itself" styling. */
+  filterResult: { matches: Set<string>; ancestors: Set<string> } | null
+  expandedMap: Map<string, boolean>
+  setNodeExpanded: (key: string, value: boolean) => void
 }) {
-  // Auto-expand when this group is an ancestor of the primary selected node.
-  const isAncestor = node.kind === 'group' && ancestorGroupKeys.has(nodeKey(node))
+  const key = nodeKey(node)
+  // Auto-expand when this group is an ancestor of the primary selected node,
+  // OR (filter active) an ancestor of a filter match — either reason forces
+  // it open so the thing being revealed is actually visible.
+  const isAncestor = node.kind === 'group' && ancestorGroupKeys.has(key)
+  const isFilterAncestor = node.kind === 'group' && (filterResult?.ancestors.has(key) ?? false)
+  const forceExpand = isAncestor || isFilterAncestor
   // Nested containers start COLLAPSED — an outliner full of pre-expanded
-  // hierarchy is noise; the auto-expand effect below still opens the
-  // ancestors of whatever is selected.
-  const [expanded, setExpanded] = useState(false)
-  // Force expand when this group is in the ancestor path of the primary selection.
+  // hierarchy is noise; the force-expand effect below still opens the
+  // ancestors of whatever is selected/matched. Lifted into the parent's
+  // `expandedMap` (design: filter/unfilter must not lose manual expand
+  // state) rather than local useState.
+  const expanded = expandedMap.get(key) ?? false
   useEffect(() => {
-    if (isAncestor) setExpanded(true)
-  }, [isAncestor])
+    if (forceExpand && !expanded) setNodeExpanded(key, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forceExpand, expanded, key])
 
   const selected = isSelected(node)
   const isPrimary = primaryKey !== null && nodeKey(node) === primaryKey
@@ -565,8 +873,26 @@ function NodeRow({
   const pathEntry = fullPath[depth]
   const active = pathEntry !== undefined &&
     pathEntry.kind === node.kind && pathEntry.id === node.id
-  const dimmed = isTreeRowDimmed(fullPath, node, depth)
-  const hidden = hiddenKeys.has(nodeKey(node))
+  // Dimmed either by the active editing context (existing behavior) or by
+  // being a non-matching ANCESTOR of a filter match (design: "non-matching
+  // ancestors render dimmed") — a plain filter match renders full-strength.
+  const dimmedByFilter =
+    filterResult !== null && !filterResult.matches.has(key) && filterResult.ancestors.has(key)
+  const dimmed = isTreeRowDimmed(fullPath, node, depth) || dimmedByFilter
+  const ownHidden = hiddenKeys.has(key)
+  // "Hidden by parent" (eye rendering fix): a child of a hidden ancestor is
+  // effectively hidden too (unionHiddenLeafIds's recursive expansion), so
+  // its eye reflects that — dimmed ○, not the normal ●, and NOT because
+  // its own key is set. Memoized (adversarial review finding 5): the walk
+  // is O(depth) per row, redone on every render otherwise — keyed on the
+  // node identity, `scene`/`docRev` (a group can be reparented across
+  // mutations, changing its ancestor chain), and `hiddenKeys`.
+  const hiddenByParent = useMemo(
+    () => !ownHidden && isHiddenByAncestor(node, scene, hiddenKeys),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [node.kind, node.id, scene, docRev, hiddenKeys, ownHidden],
+  )
+  const hidden = ownHidden || hiddenByParent
   // Whether THIS row is the node a just-closed session frame returned to
   // (see the parent component's `sessionRevealKey` comment) — mutually
   // exclusive with `isPrimary` in practice (a session boundary always clears
@@ -587,6 +913,7 @@ function NodeRow({
         active={active}
         dimmed={dimmed}
         hidden={hidden}
+        hiddenByParent={hiddenByParent}
         indent={depth}
         rowRef={rowRef}
         onClick={(additive) => onSelect(node, additive)}
@@ -599,6 +926,15 @@ function NodeRow({
   if (node.kind === 'instance') {
     const def = scene.instance_def(node.id)
     const defName = def !== undefined ? scene.component_name(def) : undefined
+    // No `onToggleAllHidden`/`anyChildHidden` here, unlike the group branch
+    // below: an instance's members live in its SHARED definition, not in
+    // this instance alone (every other instance of the same component
+    // renders the same members) — a per-INSTANCE "hide all children"
+    // control has no node-local set of children to represent; hiding the
+    // whole instance (the primary eye above) is the only representable
+    // granularity. This row also doesn't expand/nest its members in the
+    // tree at all (unlike a group), so there is no visible child list a
+    // second control would even be toggling.
     return (
       <Row
         label={resolveLabel(scene.instance_name(node.id), defName, 'instance', index)}
@@ -608,6 +944,7 @@ function NodeRow({
         active={active}
         dimmed={dimmed}
         hidden={hidden}
+        hiddenByParent={hiddenByParent}
         indent={depth}
         rowRef={rowRef}
         onClick={(additive) => onSelect(node, additive)}
@@ -624,6 +961,23 @@ function NodeRow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, node.id, docRev],
   )
+  const getGroupMembers = (groupId: bigint): NodeRef[] =>
+    scene.group_members(groupId).map(nodeRefFromJs)
+  // Memoized (adversarial review finding 5): a full recursive descendant
+  // walk (every nested member, every level) on EVERY render otherwise —
+  // keyed on `members` (already memoized above) and `hiddenKeys`, the only
+  // two things that can change the answer.
+  const anyChildHidden = useMemo(
+    () => collectDescendants(members, getGroupMembers).some((d) => hiddenKeys.has(nodeKey(d))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [members, hiddenKeys],
+  )
+  const visibleMembers = members.filter(
+    (child) =>
+      filterResult === null ||
+      filterResult.matches.has(nodeKey(child)) ||
+      filterResult.ancestors.has(nodeKey(child)),
+  )
 
   return (
     <>
@@ -635,16 +989,21 @@ function NodeRow({
         active={active}
         dimmed={dimmed}
         hidden={hidden}
+        hiddenByParent={hiddenByParent}
         indent={depth}
         isGroup
         expanded={expanded}
-        onToggleExpand={() => setExpanded((e) => !e)}
+        onToggleExpand={() => setNodeExpanded(key, !expanded)}
         rowRef={rowRef}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
         onToggleHidden={() => onToggleHidden(node)}
+        onToggleAllHidden={() =>
+          toggleContainerVisibility(node, members, getGroupMembers, hiddenKeys, onSetHiddenMany)
+        }
+        anyChildHidden={anyChildHidden}
       />
-      {expanded && members.map((child, childIdx) => (
+      {expanded && visibleMembers.map((child, childIdx) => (
         <NodeRow
           key={`${child.kind}:${child.id}`}
           node={child}
@@ -662,13 +1021,17 @@ function NodeRow({
           ancestorGroupKeys={ancestorGroupKeys}
           hiddenKeys={hiddenKeys}
           onToggleHidden={onToggleHidden}
+          onSetHiddenMany={onSetHiddenMany}
           onSelect={onSelect}
           onEnterContext={onEnterContext}
+          filterResult={filterResult}
+          expandedMap={expandedMap}
+          setNodeExpanded={setNodeExpanded}
         />
       ))}
     </>
   )
-}
+})
 
 // ---------------------------------------------------------------------------
 // NodeIcon — 14px stroke-based inline SVG per node type.
@@ -757,6 +1120,7 @@ function Row({
   active,
   dimmed,
   hidden,
+  hiddenByParent,
   indent,
   isGroup,
   expanded,
@@ -765,6 +1129,8 @@ function Row({
   onClick,
   onDoubleClick,
   onToggleHidden,
+  onToggleAllHidden,
+  anyChildHidden,
 }: {
   label: string
   icon: React.ReactNode
@@ -773,6 +1139,9 @@ function Row({
   active: boolean
   dimmed: boolean
   hidden?: boolean
+  /** Hidden only because an ancestor group is hidden, not this row's own
+   *  key — renders the eye more faintly than a directly-hidden row. */
+  hiddenByParent?: boolean
   indent: number
   isGroup?: boolean
   expanded?: boolean
@@ -781,6 +1150,10 @@ function Row({
   onClick: (additive: boolean) => void
   onDoubleClick?: () => void
   onToggleHidden?: () => void
+  /** Container "hide/show all children" control (design): a second,
+   *  hover/focus-visible eye-stack button, present on group rows only. */
+  onToggleAllHidden?: () => void
+  anyChildHidden?: boolean
 }) {
   // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
   // selected node is highlighted with accent/tint background + accent text"),
@@ -794,11 +1167,21 @@ function Row({
       ? 'var(--accent-tint-15)'
       : 'transparent'
 
+  // "Hide/show all children" is visible on hover/focus only (design) — kept
+  // in the DOM at all times (never `display:none`) so keyboard Tab still
+  // reaches it; visibility is purely `opacity`, driven by hovering the row
+  // OR focusing the button itself.
+  const [rowHovered, setRowHovered] = useState(false)
+  const [allHiddenFocused, setAllHiddenFocused] = useState(false)
+  const showAllHiddenControl = rowHovered || allHiddenFocused
+
   return (
     <div
       ref={rowRef}
       onClick={(e) => onClick(e.shiftKey || e.ctrlKey || e.metaKey)}
       onDoubleClick={onDoubleClick}
+      onMouseEnter={() => setRowHovered(true)}
+      onMouseLeave={() => setRowHovered(false)}
       style={{
         ...ROW_BASE,
         paddingLeft: `${8 + indent * 16}px`,
@@ -832,7 +1215,33 @@ function Row({
       {icon}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
       {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}>editing</span>}
-      {/* Eye toggle — only visible on hover via CSS would require class, so always show */}
+      {onToggleAllHidden !== undefined && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleAllHidden()
+          }}
+          onFocus={() => setAllHiddenFocused(true)}
+          onBlur={() => setAllHiddenFocused(false)}
+          aria-label={anyChildHidden === true ? 'Show all children' : 'Hide all children'}
+          title={anyChildHidden === true ? 'Show all children' : 'Hide all children'}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: anyChildHidden === true ? 'var(--text-section)' : 'var(--text-muted)',
+            cursor: 'pointer',
+            padding: '0 2px',
+            fontSize: '11px',
+            lineHeight: 1,
+            flexShrink: 0,
+            opacity: showAllHiddenControl ? 1 : 0,
+          }}
+        >
+          {anyChildHidden === true ? '○○' : '●●'}
+        </button>
+      )}
+      {/* Primary eye toggle — always visible (no hover-only class
+          infrastructure here), same as before this Lane. */}
       {onToggleHidden !== undefined && (
         <button
           onClick={(e) => {
@@ -849,6 +1258,7 @@ function Row({
             fontSize: '11px',
             lineHeight: 1,
             flexShrink: 0,
+            opacity: hiddenByParent === true ? 0.55 : 1,
           }}
         >
           {hidden === true ? '○' : '●'}

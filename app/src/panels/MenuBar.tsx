@@ -190,6 +190,11 @@ export interface MenuBarProps {
      *  `canImport` — 3D Text placement is an instance placement. Defaults
      *  to enabled when omitted. */
     canDrawText?: boolean
+    /** Cut/Copy (Lane D): at least one structural (object/group/instance)
+     *  node is selected. */
+    hasStructuralSelection?: boolean
+    /** Paste/Paste In Place (Lane D): this window's clipboard has content. */
+    clipboardHasContent?: boolean
   }
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
@@ -827,6 +832,31 @@ export function MenuBar({
               shortcut={`${mod}⇧Z`}
               disabled={!canRedo}
               onClick={withClose(onRedo)}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Cut"
+              shortcut={`${mod}X`}
+              disabled={!(editGates?.hasStructuralSelection ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-cut'))}
+            />
+            <MenuItem
+              label="Copy"
+              shortcut={`${mod}C`}
+              disabled={!(editGates?.hasStructuralSelection ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-copy'))}
+            />
+            <MenuItem
+              label="Paste"
+              shortcut={`${mod}V`}
+              disabled={!(editGates?.clipboardHasContent ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-paste'))}
+            />
+            <MenuItem
+              label="Paste In Place"
+              shortcut={`⇧${mod}V`}
+              disabled={!(editGates?.clipboardHasContent ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-paste-in-place'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem

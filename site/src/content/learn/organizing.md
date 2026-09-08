@@ -12,11 +12,13 @@ Once a model outgrows a dozen objects, you stop finding things by orbiting aroun
 
 ## The Outliner
 
-The Outliner (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the document tree: every object, group (expandable), component instance, and free-standing sketch.
+The Outliner (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the document tree under a root **Model** row: every object, group (expandable), component instance, and free-standing sketch.
 
 - **Click** a row to select it, `Shift`/`⌘`/`Ctrl`-click for multi-select.
 - **Double-click** a row to enter that item's editing context, exactly like double-clicking it in the viewport. The breadcrumb at the top shows your current context and steps you back out.
-- **The dot at the row's right edge** toggles visibility: ● shown, ○ hidden. Hiding a group hides everything inside it.
+- **The dot at the row's right edge** toggles visibility: ● shown, ○ hidden. Hiding a group hides everything inside it — a child of a hidden group shows a fainter ○ to say "hidden because its parent is."
+- **Filter** the list with the search field above it: type a few letters and only matches (plus the collapsed groups standing between them and the top, shown dimmed) stay visible. Clear it to get everything back, including whatever you'd expanded or collapsed by hand.
+- **Hide or show everything at once** from the Model row's own eye, or hover a group row for a second, stacked-eye button that hides or shows every one of its members in one click, reaching into nested groups too.
 - Icons carry meaning: a cube is an object (drawn with a **dashed outline if the object is leaky**), a folder is a group, a hexagon is a component instance, a pen curve is a sketch.
 
 ## Object Info: names and tags

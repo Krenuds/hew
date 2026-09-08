@@ -22,6 +22,8 @@ import {
   nodeKey,
   structuralSelection,
   pruneDeadSelection,
+  collectDescendants,
+  filterTreeKeys,
   type NodeRef,
 } from './treeModel'
 
@@ -617,6 +619,79 @@ describe('buildTreeIndexMap', () => {
 
   it('returns an empty map for an empty document', () => {
     expect(buildTreeIndexMap([], () => []).size).toBe(0)
+  })
+})
+
+describe('collectDescendants', () => {
+  const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
+  const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
+
+  it('returns the direct children of a leaf-only container', () => {
+    const out = collectDescendants([obj(1n), obj(2n)], () => [])
+    expect(out).toEqual([obj(1n), obj(2n)])
+  })
+
+  it('recurses through nested groups, including the intermediate groups themselves', () => {
+    const members = new Map<bigint, NodeRef[]>([
+      [10n, [grp(11n)]],
+      [11n, [obj(1n)]],
+    ])
+    const out = collectDescendants([grp(10n)], (id) => members.get(id) ?? [])
+    // Every level, not just the leaves: the intermediate group (11n) is
+    // itself a descendant, since it can carry its own independent hidden
+    // key (App.tsx's `handleSetHiddenMany`/`toggleContainerVisibility`
+    // needs exactly this to clear a hidden grandchild).
+    expect(out).toEqual([grp(10n), grp(11n), obj(1n)])
+  })
+
+  it('returns an empty array for no children', () => {
+    expect(collectDescendants([], () => [])).toEqual([])
+  })
+})
+
+describe('filterTreeKeys', () => {
+  const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
+  const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
+  const labels = new Map<string, string>([
+    [nodeKey(grp(10n)), 'Chassis'],
+    [nodeKey(obj(1n)), 'Bridge Arch'],
+    [nodeKey(obj(2n)), 'Wheel'],
+  ])
+  const getLabel = (n: NodeRef): string => labels.get(nodeKey(n)) ?? ''
+  const members = new Map<bigint, NodeRef[]>([[10n, [obj(1n), obj(2n)]]])
+  const getChildren = (n: NodeRef): NodeRef[] => (n.kind === 'group' ? members.get(n.id) ?? [] : [])
+  const topNodes = [grp(10n)]
+
+  it('returns null for a blank query — "no filter active"', () => {
+    expect(filterTreeKeys(topNodes, getChildren, getLabel, '')).toBeNull()
+    expect(filterTreeKeys(topNodes, getChildren, getLabel, '   ')).toBeNull()
+  })
+
+  it('matches case-insensitively on the same label text the row renders', () => {
+    const result = filterTreeKeys(topNodes, getChildren, getLabel, 'bridge')
+    expect(result).not.toBeNull()
+    expect(result?.matches.has(nodeKey(obj(1n)))).toBe(true)
+    expect(result?.matches.has(nodeKey(obj(2n)))).toBe(false)
+  })
+
+  it('marks a non-matching ancestor of a match as an ancestor, not a match', () => {
+    const result = filterTreeKeys(topNodes, getChildren, getLabel, 'bridge')
+    expect(result?.matches.has(nodeKey(grp(10n)))).toBe(false)
+    expect(result?.ancestors.has(nodeKey(grp(10n)))).toBe(true)
+  })
+
+  it('a group that matches by its own name does not pull in its non-matching children', () => {
+    const result = filterTreeKeys(topNodes, getChildren, getLabel, 'chassis')
+    expect(result?.matches.has(nodeKey(grp(10n)))).toBe(true)
+    expect(result?.matches.has(nodeKey(obj(1n)))).toBe(false)
+    expect(result?.ancestors.has(nodeKey(obj(1n)))).toBe(false)
+  })
+
+  it('an empty result carries empty match/ancestor sets, not null', () => {
+    const result = filterTreeKeys(topNodes, getChildren, getLabel, 'nonexistent')
+    expect(result).not.toBeNull()
+    expect(result?.matches.size).toBe(0)
+    expect(result?.ancestors.size).toBe(0)
   })
 })
 

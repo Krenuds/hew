@@ -43,6 +43,10 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, 
 | Undo | `⌘Z` | `Ctrl+Z` |
 | Redo | `⇧⌘Z` | `Ctrl+Shift+Z` |
 | Select All | `⌘A` | `Ctrl+A` |
+| Cut | `⌘X` | `Ctrl+X` |
+| Copy | `⌘C` | `Ctrl+C` |
+| Paste | `⌘V` | `Ctrl+V` |
+| Paste In Place | `⇧⌘V` | `Ctrl+Shift+V` |
 | Delete selection | `Delete` / `⌫` | `Delete` / `Backspace` |
 | Group | `⌘G` | `Ctrl+G` |
 | Ungroup | `⇧⌘G` | `Ctrl+Shift+G` |

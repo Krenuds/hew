@@ -1929,6 +1929,118 @@ fn delete_unknown_or_already_deleted_node_errors() {
     );
 }
 
+/// `delete_selection` batches N `delete_node`s into ONE undo step (the Cut/
+/// Delete-key fix): a single `undo()` restores every one of the deleted
+/// nodes, not just the last, and the compound is labeled with the count.
+#[test]
+fn delete_selection_batches_multiple_nodes_into_one_undo_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let before = top_set(&doc);
+
+    let change = doc
+        .delete_selection(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("delete a and b");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(c)]));
+    assert!(change.objects_touched.contains(&a) && change.objects_touched.contains(&b));
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.as_str()),
+        Some("Delete 2 items"),
+        "the compound is labeled with the count for a multi-node batch"
+    );
+
+    // ONE undo step restores BOTH nodes.
+    doc.undo().expect("undo delete_selection");
+    assert_eq!(
+        top_set(&doc),
+        before,
+        "one undo restores every deleted node"
+    );
+
+    doc.redo().expect("redo delete_selection");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(c)]));
+}
+
+/// A single-node `delete_selection` labels the compound with the node's own
+/// name (falling back to a generic label when it has none) — the same
+/// batching path Cut/Delete now always use, singular selection included.
+#[test]
+fn delete_selection_labels_a_single_node_by_name_or_falls_back() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(a), Some("Roof".to_string()))
+        .expect("name the object");
+
+    doc.delete_selection(&[NodeId::Object(a)])
+        .expect("delete the named object");
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.as_str()),
+        Some("Delete 'Roof'"),
+        "a single named node names the compound after it"
+    );
+    doc.undo().expect("undo");
+
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    doc.delete_selection(&[NodeId::Object(b)])
+        .expect("delete the unnamed object");
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.as_str()),
+        Some("Delete 1 item"),
+        "an unnamed single node falls back to the generic singular label"
+    );
+}
+
+/// A stale handle anywhere in the batch aborts the WHOLE `delete_selection`
+/// call — the same all-or-nothing posture as `tag_many` — leaving the
+/// document byte-identical to before the call, not partially deleted.
+/// A selection may list a group AND one of its members (an additive
+/// Outliner click, a marquee across both): once the group is deleted its
+/// member is tombstoned with it, so the batch skips it instead of refusing
+/// the whole delete — one entry, and one undo restores everything.
+#[test]
+fn delete_selection_skips_a_member_its_own_batch_already_removed() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group");
+    let depth = doc.undo_depth();
+    doc.delete_selection(&[NodeId::Group(g), NodeId::Object(a)])
+        .expect("group first, then its already-gone member");
+    assert_eq!(doc.undo_depth(), depth + 1, "one entry");
+    assert!(top_set(&doc).is_empty());
+    doc.undo().expect("undo");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
+    assert!(doc.visible_object_ids().contains(&a));
+    // Member listed FIRST: it is deleted on its own, then the group.
+    doc.delete_selection(&[NodeId::Object(a), NodeId::Group(g)])
+        .expect("member first, then the group");
+    assert!(top_set(&doc).is_empty());
+    doc.undo().expect("undo again");
+    assert!(doc.visible_object_ids().contains(&a));
+}
+
+#[test]
+fn delete_selection_aborts_the_whole_batch_on_a_stale_node() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let before = doc.save();
+
+    let stale = NodeId::Object(ObjectId::default());
+    assert_eq!(
+        doc.delete_selection(&[NodeId::Object(a), stale]),
+        Err(DocumentError::UnknownObject)
+    );
+    assert_eq!(
+        doc.save(),
+        before,
+        "a refused batch leaves the document byte-identical to before the call"
+    );
+}
+
 // ----------------------------------------------------------------- helper
 
 /// The +Z (top) face of an extruded box.
