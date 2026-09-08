@@ -213,6 +213,57 @@ test.describe('Walkthrough exit re-seeds the orbit target (Viewport.tsx switchTo
     // fix re-seeds it at (approximately) the ORIGINAL orbit distance.
     expect(eyeToTarget).toBeGreaterThan(orbitDistance * 0.5)
   })
+
+  /**
+   * Adversarial-review coverage gap: the test above uses fovDeg 45, which
+   * (deliberately, per its own comment) is CameraRig's
+   * `EFFECTIVE_DISTANCE_REFERENCE_FOV_DEG` — at exactly that fov,
+   * `rig.effectiveDistance(d)` is numerically IDENTICAL to the raw distance
+   * `d`. That test therefore cannot distinguish the CORRECT reseed
+   * (Viewport.tsx: perspective uses the raw `controls.getDistance()`) from
+   * the WRONG one (always `rig.effectiveDistance(controls.getDistance())`
+   * regardless of projection) — both land at the same ~10 either way, so a
+   * regression back to "always effectiveDistance" would sail through it.
+   *
+   * At fovDeg 90, `effectiveDistance` scales the raw distance by
+   * `tanHalf(90°)/tanHalf(45°) ≈ 2.414` (`cameraRig.ts`'s own doc comment
+   * derives this exact ~2.4x from a 10 m distance toggling projection at
+   * fov 90). A wrong "always effectiveDistance" reseed would therefore land
+   * the pivot at ~24.14, not ~10 — trivially distinguished from the correct
+   * raw-distance reseed by a tight (1%) tolerance, unlike the fov-45 test's
+   * necessarily loose ">50%" bound (which a ~2.4x-too-far pivot would also
+   * pass).
+   */
+  test('orbit distance survives entering and exiting Look Around at fov 90 (perspective reseeds with the RAW distance, not effectiveDistance)', async ({ page }) => {
+    await setup(page)
+    const orbitDistance = 10
+    await page.evaluate((dist) => {
+      window.__hew_test!.setCamera({ position: [dist, 0, 0], target: [0, 0, 0], up: [0, 0, 1], fovDeg: 90 })
+    }, orbitDistance)
+    await page.waitForTimeout(100)
+
+    const before = await readCameraState(page)
+    expect(before.fovDeg).toBeCloseTo(90, 6)
+    expect(Math.hypot(...before.eye.map((v, i) => v - before.target[i]))).toBeCloseTo(orbitDistance, 3)
+
+    // Enter Look Around, exit immediately via Escape without ever
+    // dragging — isolating the exit-reseed logic exactly as the fov-45
+    // test above does.
+    await openCameraMenu(page)
+    await page.getByText('Look Around', { exact: true }).click()
+    await page.locator('text=Drag to look around').first().waitFor({ timeout: 5000 })
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(100)
+
+    const after = await readCameraState(page)
+    const eyeToTarget = Math.hypot(...after.eye.map((v, i) => v - after.target[i]))
+    // Correct (raw distance): stays at ~10, within 1%. The old
+    // always-effectiveDistance code lands at ~24.14 (10 * 2.414) — nowhere
+    // near this band, so this assertion FAILS on that code while the
+    // fov-45 test above (>50%) would still pass it.
+    expect(eyeToTarget).toBeGreaterThan(orbitDistance * 0.99)
+    expect(eyeToTarget).toBeLessThan(orbitDistance * 1.01)
+  })
 })
 
 test.describe('Camera persistence (docs/design/camera.md §5)', () => {

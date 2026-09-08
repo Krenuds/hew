@@ -134,18 +134,28 @@ vi.mock('./io/fileHost', async (importOriginal) => {
 // IndexedDB, so the real WebRecoveryStore silently no-ops and could never
 // report a snapshot). Tests seed `recoveryState.listings` to simulate a
 // crash snapshot awaiting recovery; shouldPromptRecovery stays real.
+//
+// `write`/`clear` are `vi.fn()`s (not bare closures) so the autosave
+// arm/disarm describe block below can observe call counts and override
+// resolve/reject behavior per test (a write failure must re-arm the tick).
+// Every OTHER describe block only cares that these no-op successfully,
+// which `vi.clearAllMocks()` (already called in most `beforeEach`s here)
+// preserves — it clears call history, not the resolved-value implementation
+// installed once at hoist time.
 const recoveryState = vi.hoisted(() => ({
   listings: [] as { slot: string; meta: { version: 1; savedAt: number; name: string; path: string | null } }[],
+  write: vi.fn(async (_bytes: Uint8Array, _meta: unknown) => {}),
+  clear: vi.fn(async () => {}),
 }))
 vi.mock('./io/recoveryStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/recoveryStore')>()
   return {
     ...actual,
     makeRecoveryStore: () => ({
-      write: async () => {},
+      write: recoveryState.write,
       list: async () => recoveryState.listings,
       claim: async () => null,
-      clear: async () => {},
+      clear: recoveryState.clear,
       discardAll: async () => {},
     }),
   }
@@ -168,7 +178,7 @@ import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/tr
 import { setShowWelcome } from './settings/welcomeScreen'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
 import { makeFileHost, type FileHost } from './io/fileHost'
-import { isPristineDocument, sameSessionStackIdentity } from './App'
+import { isPristineDocument, sameSessionStackIdentity, AUTOSAVE_INTERVAL_MS } from './App'
 import type { DocSessionState } from './io/documentSession'
 import type { Scene } from './wasm/loader'
 
@@ -188,6 +198,12 @@ beforeEach(() => {
   setShowWelcome(false)
   // No crash snapshot unless a test seeds one.
   recoveryState.listings = []
+  // Reset call history AND any per-test resolve/reject override (the
+  // autosave arm/disarm describe block installs `mockRejectedValueOnce` —
+  // reset back to a clean always-succeeds no-op so no override leaks into
+  // an unrelated later test).
+  recoveryState.write.mockReset().mockResolvedValue(undefined)
+  recoveryState.clear.mockReset().mockResolvedValue(undefined)
 })
 
 /**
@@ -2153,5 +2169,167 @@ describe('App — document changes prune dead handles from the selection', () =>
     act(() => harness.undo())
 
     expect(harness.getSelection()).toEqual([{ kind: 'object', id: '1' }])
+  })
+})
+
+describe('App — autosave arm/disarm (recovery-snapshot timer, Lane F adversarial-review finding)', () => {
+  /**
+   * `armAutosaveTick`/`runAutosaveTick`/`clearRecoverySnapshot` (App.tsx
+   * ~540-720, ~1862-1869) are component-internal closures — nothing to
+   * import and unit-test directly. Their only externally-observable effect
+   * is exactly two calls: `recoveryState.write` (the mocked
+   * `io/recoveryStore`'s write, above) and `recoveryState.clear`. Driving a
+   * REAL document mutation through the harness and asserting on those call
+   * counts under fake timers tests the real arm/disarm state machine (a
+   * used-to-be-unconditional `setInterval` replaced with an armed-on-dirty/
+   * disarmed-on-clean `setTimeout`) end to end, rather than reimplementing
+   * its internals in the test.
+   *
+   * `mutateDocument()` uses `undo()` purely as a MUTATION TRIGGER, not
+   * because undo itself matters: in this headless (viewport-less) test
+   * environment the harness's `undo()` falls back to `act((s) =>
+   * s.scene_undo().free())` (harness.ts), which calls `deps.reconcile()` —
+   * the SAME `handleDocumentChanged` choke point every real edit (draw,
+   * push/pull, paint, …) funnels through, including the `armAutosaveTick()`
+   * call at its end (mirrors the "document changes prune dead handles"
+   * describe block above, which established this exact pattern).
+   * `can_scene_undo()` is never consulted on this headless path, so the
+   * stub scene needs nothing beyond a `scene_undo` stub.
+   */
+  function mutateDocument(): void {
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => { /* no-op */ } })
+    const harness = (window as unknown as { __hew_test: { undo(): void } }).__hew_test
+    act(() => harness.undo())
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    // Belt-and-suspenders: a test that throws mid-body before reaching its
+    // own `finally` must not leave fake timers installed for the NEXT
+    // test/describe block in this file.
+    vi.useRealTimers()
+  })
+
+  it('a document mutation arms exactly one autosave timer (repeated mutations coalesce)', async () => {
+    await renderAndLoad()
+    vi.useFakeTimers()
+
+    mutateDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS / 2)
+    })
+    // A second mutation while the first timer is still pending must NOT
+    // arm an independent second timer (armAutosaveTick's `if
+    // (autosaveTimerRef.current === null)` guard).
+    mutateDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS / 2)
+    })
+    // The one (coalesced) timer fires here, 12s after the FIRST mutation.
+    expect(recoveryState.write).toHaveBeenCalledTimes(1)
+    // If the second mutation HAD armed its own independent timer (due 12s
+    // after ITS OWN arm time, i.e. 6s from here), it would fire during this
+    // advance — it must not.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS / 2)
+    })
+    expect(recoveryState.write).toHaveBeenCalledTimes(1)
+  })
+
+  it('a successful recovery write disarms the tick until the next mutation', async () => {
+    await renderAndLoad()
+    vi.useFakeTimers()
+
+    mutateDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS)
+    })
+    expect(recoveryState.write).toHaveBeenCalledTimes(1)
+
+    // No new mutation — advancing further must not fire another write: the
+    // successful write's `.then()` left the tick disarmed.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS * 2)
+    })
+    expect(recoveryState.write).toHaveBeenCalledTimes(1)
+
+    // A fresh mutation re-arms it.
+    mutateDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS)
+    })
+    expect(recoveryState.write).toHaveBeenCalledTimes(2)
+  })
+
+  it('a write failure re-arms the tick (retries on the next interval, not silently)', async () => {
+    await renderAndLoad()
+    recoveryState.write.mockRejectedValueOnce(new Error('write failed'))
+    vi.useFakeTimers()
+
+    mutateDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS)
+    })
+    expect(recoveryState.write).toHaveBeenCalledTimes(1)
+
+    // No new mutation this time — the FAILED write's `.catch()` must have
+    // re-armed the tick on its own (unlike the successful-write case
+    // above, where nothing re-arms without a fresh edit).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS)
+    })
+    expect(recoveryState.write).toHaveBeenCalledTimes(2)
+  })
+
+  it('no autosave write ever fires on a clean, never-edited document', async () => {
+    await renderAndLoad()
+    vi.useFakeTimers()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS * 3)
+    })
+    expect(recoveryState.write).not.toHaveBeenCalled()
+  })
+
+  it('File ▸ New (discarding a dirty document) cancels the pending autosave timer outright', async () => {
+    await renderAndLoad()
+    vi.useFakeTimers()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    // Dirty the document — armAutosaveTick fires, a timer is pending.
+    mutateDocument()
+
+    // File ▸ New on a dirty (non-pristine) document: `isPristineDocument`
+    // is false, `isTauri` is false in this jsdom/web test build, so
+    // `newDocument()` awaits `confirmDiscard()` -> `window.confirm` (mocked
+    // to accept) before resetting in place and calling
+    // `clearRecoverySnapshot()`.
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('New'))
+    // Flush the confirm()/applyLoadedBytes/clearRecoverySnapshot chain —
+    // a small fake-time advance (rather than `waitFor`, which polls on
+    // REAL timers and would hang here) covers both pending microtasks and
+    // any short setTimeout/rAF step along the way.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50)
+    })
+    expect(recoveryState.clear).toHaveBeenCalled()
+
+    // The ORIGINAL pending timer (armed by the pre-New mutation, still
+    // ~11.95s from firing) must not go on to fire a write —
+    // `clearRecoverySnapshot` cancels it outright (`clearTimeout`), rather
+    // than merely relying on the next tick finding a clean document (which
+    // would look identical from `write`'s call count alone at the FIRST
+    // interval, but is a materially different — weaker — guarantee than
+    // "cancelled").
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS * 2)
+    })
+    expect(recoveryState.write).not.toHaveBeenCalled()
+
+    confirmSpy.mockRestore()
   })
 })

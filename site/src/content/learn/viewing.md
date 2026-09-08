@@ -16,7 +16,7 @@ Camera navigation never interrupts your work. With any tool active, at any momen
 | Pan | Drag with the **right mouse button** |
 | Zoom | **Scroll wheel** — zooms toward the cursor |
 
-Zooming follows the cursor, so point at what you want to get closer to and scroll. The camera has gentle inertia and clamps its distance between 0.1 m and 50 m from its target.
+Zooming follows the cursor, so point at what you want to get closer to and scroll. Orbiting pivots around whatever is under the cursor when you start the drag, and each scroll step covers a fixed fraction of the distance to the surface you're pointing at — so a small detail on a large model is a few scrolls away, and orbiting around it keeps it on screen. The camera has gentle inertia.
 
 ## With the camera tools
 

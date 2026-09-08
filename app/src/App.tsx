@@ -45,6 +45,7 @@ import {
   afterImport,
   type DocSessionState,
 } from './io/documentSession'
+import { nextRelativeTimeBoundary } from './io/relativeTime'
 import { makeRecoveryStore, shouldPromptRecovery, type RecoveryListing, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
 import { loadHewBytes, isPanicError, isSceneEmpty, seedHiddenKeysFromRegistry, seedHiddenTagPathsFromRegistry, unionHiddenLeafIds } from './io/documentLoad'
 import { writeShellModeOverride } from './shop/shellMode'
@@ -97,8 +98,9 @@ import * as inputRecorder from './recording/inputRecorder'
 import { generateBugReport } from './log/reportBug'
 import { TOOLS, type ToolName } from './tools/toolRegistry'
 
-/** Autosave tick interval (ms). */
-const AUTOSAVE_INTERVAL_MS = 12000
+/** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
+ *  drives fake timers by this exact value rather than hardcoding it). */
+export const AUTOSAVE_INTERVAL_MS = 12000
 /** Right-tray width: default/bounds (px) + localStorage persistence key.
  *  Default is sized so typical nested tag/outliner labels fit untruncated. */
 const TRAY_WIDTH_DEFAULT = 304
@@ -107,9 +109,6 @@ const TRAY_WIDTH_MAX = 560
 const TRAY_WIDTH_KEY = 'hew.trayWidth'
 const clampTrayWidth = (w: number): number =>
   Math.min(TRAY_WIDTH_MAX, Math.max(TRAY_WIDTH_MIN, Math.round(w)))
-/** Refresh interval (ms) for the "Edited/Saved <relative time>" indicator. */
-const SAVE_STATE_TICK_MS = 30000
-
 /** Help ▸ Hew Help target — the online user guide's index. */
 const USER_GUIDE_URL = 'https://hew3d.com/learn/'
 
@@ -349,9 +348,10 @@ export default function App() {
   }
   /** Document session: currentRef + dirty flag. */
   const [docSession, setDocSession] = useState<DocSessionState>(INITIAL_SESSION)
-  /** Ticks every SAVE_STATE_TICK_MS purely to refresh the "Edited/Saved
-   * <relative time>" indicator — nothing else reads this state.
-   * Coarse (30s) since the label only needs minute-level freshness. */
+  /** Ticks purely to refresh the "Edited/Saved <relative time>" indicator —
+   * nothing else reads this state. Scheduled on demand, at the exact next
+   * moment the label's text would change (see the save-state-indicator-tick
+   * effect below), not on a fixed interval. */
   const [nowTick, setNowTick] = useState(() => Date.now())
   /** Tray-section expanded state ( sections; the showX names predate the
    * tray — they used to mean floating-panel visibility). Initialized from and
@@ -541,6 +541,31 @@ export default function App() {
   // the first write. clearRecoverySnapshot awaits it so a discard's clear
   // can't interleave with a write of the very snapshot being discarded.
   const autosaveWriteRef = useRef<Promise<void> | null>(null)
+  // The pending autosave `setTimeout` handle, or null while disarmed. Used
+  // to be an unconditional `setInterval` running for the component's whole
+  // lifetime, polling every 12s forever even on a clean, unedited document
+  // (Lane F, "Render loop on demand" — the same idle-cost concern the render
+  // loop had, applied to this timer). Now armed only by `armAutosaveTick`
+  // (called wherever a mutation used to set `dirtySinceAutosaveRef.current =
+  // true` directly) and disarmed the moment there's nothing left to do: a
+  // successful write, an explicit Save/discard (`clearRecoverySnapshot`), or
+  // a tick that finds the document already clean.
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Indirection for `armAutosaveTick` to reach the tick body defined by the
+  // autosave effect below — same forward-reference-via-ref pattern as
+  // `resyncTagVisibilityRef` above, needed because `armAutosaveTick` must be
+  // callable from callbacks declared earlier in the component than that
+  // effect.
+  const runAutosaveTickRef = useRef<() => void>(() => {})
+  const armAutosaveTick = useCallback((): void => {
+    dirtySinceAutosaveRef.current = true
+    if (autosaveTimerRef.current === null) {
+      autosaveTimerRef.current = setTimeout(() => {
+        autosaveTimerRef.current = null
+        runAutosaveTickRef.current()
+      }, AUTOSAVE_INTERVAL_MS)
+    }
+  }, [])
   // Resolved once this window's menu-open-path listener is registered (or
   // registration failed) — the startup-handoff effect awaits it before
   // telling the shell this webview is ready for live open delivery. Created
@@ -653,51 +678,91 @@ export default function App() {
   }, [])
 
   // ---------------------------------------------------------------- autosave
-  // Periodically snapshot the scene to the RecoveryStore so a crash or forced
-  // quit doesn't lose work. Only writes when the document is dirty AND has
+  // Snapshot the scene to the RecoveryStore so a crash or forced quit
+  // doesn't lose work. Only writes when the document is dirty AND has
   // mutated since the last successful write (avoids redundant IO on an idle,
-  // already-autosaved document). Runs once for the component's lifetime.
+  // already-autosaved document) — armed on the first dirty mutation
+  // (`armAutosaveTick`) and disarmed the instant there's nothing left to do,
+  // rather than polling on a fixed interval for the component's whole
+  // lifetime.
+  const runAutosaveTick = useCallback((): void => {
+    const scene = sceneRef.current
+    const session = docSessionRef.current
+    if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
+    // `Scene.save()` is transparent to an open explode session (it
+    // serializes as-if-closed), so autosave needs no special-casing here.
+    // Crash-recovered documents should reopen at the last view too —
+    // same posture as an explicit Save (docs/design/camera.md §5).
+    pushCameraStateToScene(scene)
+    const bytes = new Uint8Array(scene.save())
+    const meta: RecoveryMeta = {
+      version: 1,
+      name: session.currentRef?.name ?? session.importedName ?? 'Untitled',
+      path: typeof session.currentRef?.handle === 'string' ? session.currentRef.handle : null,
+      savedAt: Date.now(),
+    }
+    // Keep the in-flight write observable so clearRecoverySnapshot can
+    // wait it out — the shell does not order recovery_write against
+    // recovery_clear, so a clear overlapping a write can leave the
+    // snapshot (or half of it) on disk. The stored promise never rejects.
+    const write = recoveryStoreRef.current.write(bytes, meta).then(() => {
+      // Only mark clean while this write is still the latest — a stale
+      // disarm could suppress the re-write that follows a superseding
+      // edit-plus-clear interleave.
+      if (autosaveWriteRef.current === write) dirtySinceAutosaveRef.current = false
+    }).catch(() => {
+      // Best effort — re-arm so the next tick retries instead of going
+      // permanently silent (the old setInterval retried every 12s
+      // regardless; a one-shot timer needs to re-schedule itself here to
+      // match).
+      armAutosaveTick()
+    })
+    autosaveWriteRef.current = write
+  }, [pushCameraStateToScene, armAutosaveTick])
   useEffect(() => {
-    const interval = setInterval(() => {
-      const scene = sceneRef.current
-      const session = docSessionRef.current
-      if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
-      // `Scene.save()` is transparent to an open explode session (it
-      // serializes as-if-closed), so autosave needs no special-casing here.
-      // Crash-recovered documents should reopen at the last view too —
-      // same posture as an explicit Save (docs/design/camera.md §5).
-      pushCameraStateToScene(scene)
-      const bytes = new Uint8Array(scene.save())
-      const meta: RecoveryMeta = {
-        version: 1,
-        name: session.currentRef?.name ?? session.importedName ?? 'Untitled',
-        path: typeof session.currentRef?.handle === 'string' ? session.currentRef.handle : null,
-        savedAt: Date.now(),
-      }
-      // Keep the in-flight write observable so clearRecoverySnapshot can
-      // wait it out — the shell does not order recovery_write against
-      // recovery_clear, so a clear overlapping a write can leave the
-      // snapshot (or half of it) on disk. The stored promise never rejects.
-      const write = recoveryStoreRef.current.write(bytes, meta).then(() => {
-        // Only mark clean while this write is still the latest — a stale
-        // disarm could suppress the re-write that follows a superseding
-        // edit-plus-clear interleave.
-        if (autosaveWriteRef.current === write) dirtySinceAutosaveRef.current = false
-      }).catch(() => { /* ignore — try again next tick */ })
-      autosaveWriteRef.current = write
-    }, AUTOSAVE_INTERVAL_MS)
-    return () => clearInterval(interval)
-  }, [pushCameraStateToScene])
+    runAutosaveTickRef.current = runAutosaveTick
+  }, [runAutosaveTick])
+  // Clear any pending autosave timer on unmount — nothing left to arm it
+  // again once the component is gone.
+  useEffect(() => () => {
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+  }, [])
 
   // ---------------------------------------------------------------- save-state indicator tick
   // The "Edited/Saved <relative time>" text in TitleBar/MenuBar needs to
   // advance even when nothing else changes (e.g. sitting idle after an edit,
-  // "Edited just now" should become "Edited 2 minutes ago"). Runs once for
-  // the component's lifetime.
+  // "Edited just now" should become "Edited 2 minutes ago"). Used to be a
+  // flat 30s `setInterval` for the App's whole lifetime — re-rendering this
+  // (large) component every 30s forever, including on a blank document with
+  // no label to show at all. Instead, tick only while there's a reference
+  // point to report from (`lastEditAt` while dirty, `lastSavedAt` while
+  // clean — exactly `saveStateLabel`'s own two cases; docs/design/
+  // v1.1-cycle.md Lane F applies the same on-demand principle to this timer
+  // as to the render loop), and schedule exactly one `setTimeout` at the
+  // next moment the text would actually change (`nextRelativeTimeBoundary`)
+  // rather than polling on a fixed cadence. Re-armed whenever the reference
+  // point itself changes (a fresh edit, a save); goes idle entirely once the
+  // label settles on a fixed date string past 24h.
   useEffect(() => {
-    const interval = setInterval(() => setNowTick(Date.now()), SAVE_STATE_TICK_MS)
-    return () => clearInterval(interval)
-  }, [])
+    const refMs = docSession.dirty ? docSession.lastEditAt : docSession.lastSavedAt
+    if (refMs === null) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const scheduleNext = () => {
+      const boundary = nextRelativeTimeBoundary(refMs, Date.now())
+      if (boundary === null) return
+      timer = setTimeout(() => {
+        setNowTick(Date.now())
+        scheduleNext()
+      }, Math.max(0, boundary - Date.now()))
+    }
+    scheduleNext()
+    return () => {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [docSession.dirty, docSession.lastEditAt, docSession.lastSavedAt])
 
   // (The startup recovery check lives in the startup-handoff effect below —
   // it must run strictly AFTER any pending file-association open or recovery
@@ -1120,8 +1185,8 @@ export default function App() {
   }, [])
   const scenesMarkDirty = useCallback(() => {
     setDocSession((s) => afterMutation(s, Date.now()))
-    dirtySinceAutosaveRef.current = true
-  }, [])
+    armAutosaveTick()
+  }, [armAutosaveTick])
   const scenesToast = useCallback((message: string) => handleToastRef.current?.(message), [])
   const scenes = useScenesController({
     scene: state?.scene ?? null,
@@ -1206,9 +1271,9 @@ export default function App() {
     // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
     if (!suppressDirtyRef.current) {
       setDocSession((s) => afterMutation(s, Date.now()))
-      dirtySinceAutosaveRef.current = true
+      armAutosaveTick()
     }
-  }, [activeContext, trimContextPath])
+  }, [activeContext, trimContextPath, armAutosaveTick])
 
   // Re-derive the View ▸ Section Cut menu state from the section
   // manager's own truth (`getSectionState`) — called by the viewport
@@ -1796,6 +1861,14 @@ export default function App() {
   // applies to clearing the snapshot of a just-saved document.
   const clearRecoverySnapshot = useCallback(async (): Promise<void> => {
     dirtySinceAutosaveRef.current = false
+    // Cancel any pending timer outright — a discard/Save has nothing left
+    // for it to do, and letting it fire anyway (to find `dirtySinceAutosave
+    // Ref.current` already false and no-op) would just be idle wakeups; the
+    // next mutation re-arms via `armAutosaveTick`.
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
     const inFlight = autosaveWriteRef.current
     await inFlight
     // A newer write while we awaited means the document changed under us
@@ -2425,11 +2498,11 @@ export default function App() {
     })
     // The recovered document still only exists in the recovery snapshot —
     // claim() re-homed it to this window's own slot (the next autosave tick
-    // refreshes it in place); mark dirty-since-autosave so a tick will
-    // actually fire if nothing else changes.
-    dirtySinceAutosaveRef.current = true
+    // refreshes it in place); arm the tick so it will actually fire if
+    // nothing else changes.
+    armAutosaveTick()
     return true
-  }, [applyLoadedBytes])
+  }, [applyLoadedBytes, armAutosaveTick])
   const adoptSnapshotRef = useRef(adoptSnapshot)
   useEffect(() => { adoptSnapshotRef.current = adoptSnapshot }, [adoptSnapshot])
 

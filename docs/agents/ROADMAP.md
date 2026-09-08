@@ -171,6 +171,12 @@ below.
   protractor/rotate disks, section-plane and slice previews) correctly
   sized in both projections; a typed Field of View control; Zoom Window
   (drag a rectangle to frame it)
+- Orbit and zoom pivot on the geometry under the cursor: a middle-drag
+  orbits around the surface being pointed at and each scroll step covers
+  a fixed fraction of the distance to it, with a near-absolute zoom floor
+  (a millimetre at model scale) and clipping planes that follow the eye —
+  so a small detail of a large model is reachable, stays on screen while
+  orbiting, and renders without z-fighting
 - Position Camera, Look Around, and Walk: first-person camera placement
   and walkthrough navigation (click or drag to stand and look, mouse-look,
   and forward/turn/strafe movement), sharing one session eye height that's
@@ -447,6 +453,10 @@ below.
   Hew is already running opens it in the running instance instead of
   spawning a second app
 - Browser build with offline support and PWA install
+- The viewport renders on demand: no frame is requested while nothing
+  changes or the window is hidden, and the periodic app timers (save-state
+  label, autosave) arm only when they have work — an idle Hew costs the
+  machine nothing
 - A labeled tool rail, a command palette (Ctrl/Cmd-K) for finding any tool
   or action by name, a contextual action dock that follows the current
   selection (including Group for a multi-selection and Make Component for

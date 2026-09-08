@@ -856,6 +856,15 @@ export interface HewTestHarness {
 
   // -------- camera --------
 
+  /**
+   * Count of animation-frame callbacks the on-demand render pump
+   * (`viewport/renderScheduler.ts`, docs/design/v1.1-cycle.md Lane F —
+   * "Render loop on demand") has actually run since the viewport mounted.
+   * `idle.spec.ts` asserts this barely advances while nothing is happening
+   * and advances-then-settles across an orbit drag.
+   */
+  frameCount(): number
+
   /** Frame all visible geometry (View ▸ Zoom Extents). */
   zoomExtents(): void
 
@@ -1934,6 +1943,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       }),
 
     // -------- camera --------
+
+    frameCount: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.frameCount()
+    },
 
     zoomExtents: () => {
       const api = deps.getViewportApi()

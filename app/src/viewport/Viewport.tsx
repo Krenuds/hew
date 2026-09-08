@@ -24,6 +24,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
+import { RenderScheduler } from './renderScheduler'
 import {
   renderPrintPages as runPrintPass,
   computeViewPlaneExtent,
@@ -84,9 +85,12 @@ import {
   scaleCameraAboutOrigin,
   scaleViewLimits,
   zoomExtentsViewLimits,
+  intersectGroundPlane,
   MOUNT_LIMITS,
   HOME_EYE_OFFSET,
+  type CameraViewLimits,
 } from './math'
+import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
 import { CameraRig, type Projection, isBehindCamera } from './cameraRig'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
@@ -838,6 +842,15 @@ export interface ViewportApi {
    * robustly, instead of hard-coding pixels read off a screenshot.
    */
   worldToScreen: (world: [number, number, number]) => { x: number; y: number; behind: boolean }
+
+  /**
+   * Count of animation-frame callbacks the on-demand render pump
+   * (`renderScheduler.ts`, docs/design/v1.1-cycle.md Lane F — "Render loop
+   * on demand") has actually run since mount. Test-only instrumentation:
+   * `idle.spec.ts` asserts this barely advances while the viewport sits
+   * idle, and advances-then-settles across an orbit drag.
+   */
+  frameCount: () => number
 
   /**
    * The camera's current pose (position, orbit target, vertical FOV) —
@@ -2338,6 +2351,18 @@ export default function Viewport({
     // effort converts explicitly.
     const rig = new CameraRig(el.clientWidth / el.clientHeight, MOUNT_LIMITS.near, MOUNT_LIMITS.far)
     let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = rig.active
+    // The WORLD-LENGTH view state (docs/design/camera.md §1, cameraDepth.ts):
+    // `far` sizes the grid footprint and axes half-length, `maxDistance`
+    // bounds the dolly-out, and `syncWorldLengthViewState` scales all of it
+    // in lockstep with a Zoom Extents fit or a Tape Measure rescale. The
+    // camera's OWN clip planes and the dolly-in floor are derived from it
+    // per frame (`applyClipPlanes`) rather than being this state: the
+    // floor is a near-absolute `zoomFloorFor(far)` (1 mm at mount scale)
+    // and `near`/`far` follow the eye→target distance, so a 5 cm detail of
+    // a 30 m model is reachable and renders without z-fighting — the
+    // "can't zoom in any further / orbit swings wildly" bug was the old
+    // model-scale `minDistance` floor doing exactly what it said.
+    let worldLimits: CameraViewLimits = { ...MOUNT_LIMITS, minDistance: zoomFloorFor(MOUNT_LIMITS.far) }
     // Person-scale default: frames a ~2–3 m region; classic SketchUp 3/4 angle.
     // Distance ≈ 4.7 m; a 1.8 m figure reads as substantial, not dwarfed.
     // Scaled down for small-scale display units (cm/mm/inches imply a small
@@ -3812,12 +3837,17 @@ export default function Viewport({
       const ndcY = -(cy / vpH) * 2 + 1
       const ray = makeWorldRay(ndcX, ndcY, camera)
 
-      const { snap } = snapService.resolve(ray, vpH, apertureBasis())
+      // The geometry under the rectangle's center (`pickDepthAlongRay` —
+      // a solid face, a sketch region, or a NEARBY ground hit), never the
+      // snap resolver: that one never misses (it falls back to the
+      // infinite ground plane), so a grazing rectangle used to re-target
+      // hundreds of metres away and teleport the eye there.
+      const depth = pickDepthAlongRay(ray)
       const rayOrigin = new THREE.Vector3(ray.origin[0], ray.origin[1], ray.origin[2])
       const rayDir = new THREE.Vector3(ray.direction[0], ray.direction[1], ray.direction[2])
       let newTarget: THREE.Vector3
-      if (snap !== null) {
-        newTarget = new THREE.Vector3(snap.x, snap.y, snap.z)
+      if (depth !== null) {
+        newTarget = rayOrigin.clone().addScaledVector(rayDir, depth)
       } else {
         const viewDir = new THREE.Vector3()
         camera.getWorldDirection(viewDir)
@@ -3841,6 +3871,11 @@ export default function Viewport({
       } else {
         camera.position.copy(newTarget).addScaledVector(dir, oldDistance)
         rig.scaleOrthoFrustum(scale)
+        // The same bounds every other ortho dolly path honors
+        // (`orthoZoomBounds` via configureControls/syncWorldLengthViewState).
+        // `controls.update()` below re-clamps too; this keeps the contract
+        // explicit rather than relying on OrbitControls' internal branch.
+        rig.orthographic.zoom = Math.min(controls.maxZoom, Math.max(controls.minZoom, rig.orthographic.zoom))
       }
       camera.updateProjectionMatrix()
       controls.update()
@@ -4943,15 +4978,16 @@ export default function Viewport({
       // assignment this ratio form replaced, a single 0 or NaN would
       // poison every later multiplicative sync unrecoverably.
       if (ratio === 1 || !Number.isFinite(ratio) || ratio <= 0) return
-      const limits = scaleViewLimits(
-        { near: camera.near, far: camera.far, minDistance: controls.minDistance, maxDistance: controls.maxDistance },
-        ratio,
-      )
-      camera.near = limits.near
-      camera.far = limits.far
-      controls.minDistance = limits.minDistance
-      controls.maxDistance = limits.maxDistance
-      camera.updateProjectionMatrix()
+      const scaled = scaleViewLimits(worldLimits, ratio)
+      // The dolly floor is re-derived from the scaled `far`, not scaled
+      // along (it is a near-absolute floor, not a model-scale one).
+      worldLimits = { ...scaled, minDistance: zoomFloorFor(scaled.far) }
+      controls.minDistance = worldLimits.minDistance
+      controls.maxDistance = worldLimits.maxDistance
+      const { minZoom, maxZoom } = orthoZoomBounds(worldLimits.minDistance, worldLimits.maxDistance)
+      controls.minZoom = minZoom
+      controls.maxZoom = maxZoom
+      applyClipPlanes()
 
       infiniteGrid.scaleAboutOrigin(ratio)
       axesHalfLength *= ratio
@@ -5015,7 +5051,7 @@ export default function Viewport({
       // via a ratio is exactly as self-healing here as the absolute
       // recompute it replaces, while also being the form the grid/axes need.
       const limits = zoomExtentsViewLimits(distance)
-      const ratio = limits.far / camera.far
+      const ratio = limits.far / worldLimits.far
       syncWorldLengthViewState(ratio)
 
       // Keep the current view direction; re-target at box center.
@@ -5046,7 +5082,7 @@ export default function Viewport({
       const distance = rig.perspectiveFramingDistance(halfDiag, 1.2)
 
       const limits = zoomExtentsViewLimits(distance)
-      const ratio = limits.far / camera.far
+      const ratio = limits.far / worldLimits.far
       syncWorldLengthViewState(ratio)
 
       const dir = new THREE.Vector3()
@@ -5100,7 +5136,7 @@ export default function Viewport({
         // `zoomExtents` had already recovered. Same shared helper, same
         // ratio derivation.
         const limits = zoomExtentsViewLimits(distance)
-        const ratio = limits.far / camera.far
+        const ratio = limits.far / worldLimits.far
         syncWorldLengthViewState(ratio)
       }
 
@@ -5891,7 +5927,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -6689,7 +6725,14 @@ export default function Viewport({
       if (WALKTHROUGH_TOOL_NAMES.has(toolController.activeToolName)) {
         controls.enabled = true
         camera.getWorldDirection(walkthroughForwardV)
-        const dist = rig.effectiveDistance(controls.getDistance())
+        // The RAW distance under perspective. `effectiveDistance` normalizes
+        // by the fov so screen-constant sizing (grid LOD, guide dashes) reads
+        // the same under either projection — a different quantity from the
+        // eye→pivot distance being reseeded here, and applying it put the
+        // pivot up to 4× too far after a wide-fov Look Around.
+        const dist = rig.projection === 'perspective'
+          ? controls.getDistance()
+          : rig.effectiveDistance(controls.getDistance())
         controls.target.copy(camera.position).addScaledVector(walkthroughForwardV, dist)
         controls.update()
       }
@@ -6919,8 +6962,12 @@ export default function Viewport({
       c.enableDamping = true
       c.dampingFactor = 0.08
       c.screenSpacePanning = true
-      c.minDistance = 0.1
-      c.maxDistance = 50
+      // From the world-length state, never re-hardcoded: a controls rebuild
+      // (projection toggle, `setCamera`, a parallel Scene restore) used to
+      // reset these to the mount constants and silently discard whatever
+      // Zoom Extents/rescale had derived.
+      c.minDistance = worldLimits.minDistance
+      c.maxDistance = worldLimits.maxDistance
       c.enablePan = true
       // Free orbit must not reach the ±Z poles. Exactly at a pole the view
       // basis is gimbal-degenerate (look ∥ up), and even NEAR one it is
@@ -6994,6 +7041,108 @@ export default function Viewport({
       c.addEventListener('change', noteCameraMoved)
     }
     attachControlsListeners(controls)
+
+    // ------------------------------------------------------------------ clip planes + orbit pivot (cameraDepth.ts)
+    /**
+     * Re-derive the active camera's clip planes from the world-length
+     * state: perspective follows the eye→target distance
+     * (`dynamicClipPlanes`), parallel keeps the static world planes (its
+     * eye never dollies, only its frustum scales). A no-op when nothing
+     * changed, so it is safe per frame.
+     */
+    function applyClipPlanes(): void {
+      const { near, far } = rig.projection === 'perspective'
+        ? dynamicClipPlanes(controls.getDistance(), worldLimits)
+        : { near: worldLimits.near, far: worldLimits.far }
+      if (camera.near === near && camera.far === far) return
+      camera.near = near
+      camera.far = far
+      camera.updateProjectionMatrix()
+    }
+
+    /**
+     * The depth along `ray` of what the cursor is over — a solid face
+     * first (`pick_face`, BVH-backed and cheap), else a sketch region, else
+     * the ground plane when its hit is not absurdly far compared to the
+     * current target distance (`groundHitIsUsable`). `null` means "leave
+     * the pivot where it is": a grazing ray meeting z = 0 hundreds of
+     * metres away is exactly the off-screen pole the fix removes.
+     */
+    function pickDepthAlongRay(ray: Ray): number | null {
+      const face = wasmScene.pick_face(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      if (face !== undefined) {
+        try {
+          return face.depth()
+        } finally {
+          face.free()
+        }
+      }
+      const region = wasmScene.pick_sketch_region(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      if (region !== undefined) {
+        try {
+          return region.depth()
+        } finally {
+          region.free()
+        }
+      }
+      const ground = intersectGroundPlane(ray)
+      if (ground !== null) {
+        const depth = Math.hypot(ground.x - ray.origin[0], ground.y - ray.origin[1], ground.z - ray.origin[2])
+        if (groundHitIsUsable(depth, controls.getDistance())) return depth
+      }
+      return null
+    }
+
+    /**
+     * Move `controls.target` along the CURRENT view axis to the depth of
+     * whatever is under the cursor, leaving the eye and the view direction
+     * untouched (nothing on screen moves). Run before a wheel dolly and
+     * before a middle-button orbit begins: the dolly radius becomes the
+     * real distance to the surface (so zoom converges on it instead of on a
+     * floor) and the orbit pivots at that surface's depth — "orbit around
+     * what I'm pointing at". See cameraDepth.ts for the full rationale.
+     */
+    function retargetToCursorDepth(clientX: number, clientY: number): void {
+      if (!controls.enabled) return
+      const r = renderer.domElement.getBoundingClientRect()
+      if (r.width <= 0 || r.height <= 0) return
+      const ndcX = ((clientX - r.left) / r.width) * 2 - 1
+      const ndcY = -((clientY - r.top) / r.height) * 2 + 1
+      const ray = makeWorldRay(ndcX, ndcY, camera)
+      const depth = pickDepthAlongRay(ray)
+      if (depth === null) return
+      const hit: [number, number, number] = [
+        ray.origin[0] + ray.direction[0] * depth,
+        ray.origin[1] + ray.direction[1] * depth,
+        ray.origin[2] + ray.direction[2] * depth,
+      ]
+      const viewDir = camera.getWorldDirection(new THREE.Vector3())
+      const target = targetAtDepth(
+        [camera.position.x, camera.position.y, camera.position.z],
+        [viewDir.x, viewDir.y, viewDir.z],
+        hit,
+        controls.minDistance,
+      )
+      if (target === null) return
+      controls.target.set(target[0], target[1], target[2])
+    }
+    function onRetargetWheelCapture(ev: WheelEvent): void {
+      // Shift+wheel is the fov gesture (onFovWheelCapture), not a dolly.
+      if (ev.shiftKey) return
+      retargetToCursorDepth(ev.clientX, ev.clientY)
+    }
+    function onRetargetPointerDownCapture(ev: PointerEvent): void {
+      // Middle button = orbit (configureControls). Right-drag pans, which
+      // OrbitControls keeps screen-relative regardless of target depth.
+      if (ev.button !== 1) return
+      retargetToCursorDepth(ev.clientX, ev.clientY)
+    }
 
     // Prevent the browser context menu on right-drag so pan isn't interrupted.
     function onContextMenu(ev: MouseEvent): void {
@@ -7464,26 +7613,50 @@ export default function Viewport({
     window.addEventListener('blur', onWindowBlurClearsLoupe)
 
     // ------------------------------------------------------------------ animation loop
-    let rafId = 0
+    // On-demand pump (docs/design/v1.1-cycle.md, Lane F — "Render loop on
+    // demand"): `render()` below no longer re-arms requestAnimationFrame
+    // unconditionally. `renderScheduler` owns WHEN a frame is requested —
+    // see its own doc for the full design — while `needsRender`/`changed`
+    // here still decide what happens INSIDE one, exactly as before.
     let needsRender = true
 
+    /**
+     * One frame. `renderFrame` does the work and says whether something is
+     * still animating; this wrapper ALWAYS hands the scheduler its
+     * `onFrame`, even if a frame throws — otherwise an exception would leave
+     * the scheduler believing a frame is still pending and no later
+     * `scheduleRender()` could ever request another one (the old
+     * free-running pump re-armed itself as its first statement, so it
+     * never had this failure mode). A throwing frame does not re-arm on
+     * its own; the next explicit `scheduleRender()` does.
+     */
     function render(): void {
-      rafId = requestAnimationFrame(render)
+      let stillAnimating = false
+      try {
+        stillAnimating = renderFrame()
+      } finally {
+        renderScheduler.onFrame(stillAnimating)
+      }
+    }
+    function renderFrame(): boolean {
       // Shop Mode's isolate-fade opt-in (SceneRenderer.setHiddenFaded/
       // tickFades, driven by Viewport.setHidden's `{fadeMs}` option): a
       // single `Map.size` check that's always false outside Shop Mode, so
       // this costs nothing on the editor's own hot path. An opacity-only
       // change doesn't otherwise mark the scene dirty, so force a render
-      // this frame while any tween is still in flight.
-      if (sceneRenderer.tickFades(performance.now())) needsRender = true
+      // this frame while any tween is still in flight — `fadesActive` also
+      // keeps the on-demand pump armed below until the tween settles.
+      const fadesActive = sceneRenderer.tickFades(performance.now())
+      if (fadesActive) needsRender = true
       // Tape loupe (round-3 playtest finding 4): force a render EVERY frame
       // while engaged, same idiom as `tickFades` above — the finger can
       // hold perfectly still (no pointermove of its own to `scheduleRender`
       // from), but the magnified copy still has to reflect whatever the
       // scene is doing right now (a live measurement readout, a theme
       // change, anything else that repaints). Free outside engagement: a
-      // single phase check.
-      if (loupeState.phase === 'engaged') needsRender = true
+      // single phase check. `loupeEngaged` also keeps the pump armed below.
+      const loupeEngaged = loupeState.phase === 'engaged'
+      if (loupeEngaged) needsRender = true
       // `controls.enabled` only gates OrbitControls' OWN input listeners —
       // `update()` itself runs its full position/orientation recomputation
       // regardless, including an unconditional `camera.lookAt(controls.
@@ -7495,6 +7668,9 @@ export default function Viewport({
       // run it while controls actually own the camera.
       const changed = controls.enabled && controls.update()
       if (changed || needsRender) {
+        // Clip planes follow the eye (cameraDepth.ts) — cheap: two
+        // comparisons when nothing changed.
+        applyClipPlanes()
         // effectiveDistance (not the raw controls distance) so this reacts to
         // an ortho zoom exactly like a perspective dolly would
         // (docs/design/camera.md §1 — CameraRig.effectiveDistance).
@@ -7593,13 +7769,41 @@ export default function Viewport({
         if (loupeState.phase === 'engaged') copyLoupeSource(loupeState.x, loupeState.y)
         needsRender = false
       }
+      // Re-arm only while something is still actively animating —
+      // OrbitControls damping in flight (`changed`), a fade tween, or the
+      // loupe. A frame that rendered once and settled leaves the pump idle
+      // until the next explicit `scheduleRender()`. (The 'change' event
+      // OrbitControls dispatches from inside `controls.update()` above also
+      // calls `scheduleRender()`/`request()` on its own — see
+      // `attachControlsListeners` — so this is belt-and-suspenders for the
+      // damping tail, not the only thing keeping it going; `request()` is
+      // idempotent so the overlap is free.)
+      return changed || fadesActive || loupeEngaged
     }
-    render()
+    const renderScheduler = new RenderScheduler(
+      { requestFrame: (cb) => requestAnimationFrame(cb), cancelFrame: (h) => cancelAnimationFrame(h) },
+      render,
+    )
+    renderScheduler.setVisible(document.visibilityState === 'visible')
+    renderScheduler.request()
 
     function scheduleRender(): void {
       needsRender = true
+      renderScheduler.request()
     }
     scheduleRenderRef.current = scheduleRender
+
+    // `document.visibilitychange`: hidden (backgrounded tab, minimized/
+    // occluded window — WKWebView reports hidden in both cases) cancels any
+    // pending frame and blocks further requests; visible re-requests one
+    // explicitly (`setVisible(true)` alone does not — see RenderScheduler's
+    // doc) so whatever was on screen when it was hidden is current again.
+    function onVisibilityChange(): void {
+      const visible = document.visibilityState === 'visible'
+      renderScheduler.setVisible(visible)
+      if (visible) scheduleRender()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     // Low-level capture: camera state on every orbit/pan/zoom change, and
     // keys (Shift axis-lock, Esc/Enter/Del). All no-ops unless recording.
@@ -7640,7 +7844,7 @@ export default function Viewport({
     let contextLostOverlay: HTMLDivElement | null = null
     function onContextLost(ev: Event): void {
       ev.preventDefault()
-      cancelAnimationFrame(rafId)
+      renderScheduler.cancel()
       console.warn('[viewport] WebGL context lost')
       if (contextLostOverlay === null) {
         contextLostOverlay = buildViewportOverlay(
@@ -7659,7 +7863,7 @@ export default function Viewport({
       }
       sceneRenderer.refresh()
       needsRender = true
-      render()
+      renderScheduler.request()
     }
     renderer.domElement.addEventListener('webglcontextlost', onContextLost)
     renderer.domElement.addEventListener('webglcontextrestored', onContextRestored)
@@ -8974,6 +9178,10 @@ export default function Viewport({
     // wouldn't run early enough to beat OrbitControls' own listener).
     el.addEventListener('pointerdown', onFovDragPointerDownCapture, true)
     el.addEventListener('wheel', onFovWheelCapture, { capture: true, passive: false })
+    // Pivot-at-cursor-depth (cameraDepth.ts): capture phase so these run
+    // BEFORE OrbitControls' own wheel/pointerdown handlers on the canvas.
+    el.addEventListener('wheel', onRetargetWheelCapture, { capture: true, passive: true })
+    el.addEventListener('pointerdown', onRetargetPointerDownCapture, { capture: true })
     // A real pointer-capture loss (unrelated to our own release/abort
     // paths, e.g. the OS reclaiming capture) — abort exactly like Escape,
     // scoped to the arming pointer (findings 1+2, camera-playtest2 DELTA
@@ -9008,7 +9216,8 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ cleanup
     return () => {
-      cancelAnimationFrame(rafId)
+      renderScheduler.cancel()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       // A Scene camera tween and its settle timer outlive nothing: cancel
       // both so no post-unmount frame or callback fires into a torn-down
       // tree (docs/design/scenes.md §5).
@@ -9063,6 +9272,8 @@ export default function Viewport({
       window.removeEventListener('keydown', onKeyDownTracked)
       el.removeEventListener('pointerdown', onFovDragPointerDownCapture, true)
       el.removeEventListener('wheel', onFovWheelCapture, true)
+      el.removeEventListener('wheel', onRetargetWheelCapture, true)
+      el.removeEventListener('pointerdown', onRetargetPointerDownCapture, true)
       renderer.domElement.removeEventListener('lostpointercapture', onFovDragLostPointerCapture)
       window.removeEventListener('blur', onFovDragWindowBlur)
       resizeObserver.disconnect()
