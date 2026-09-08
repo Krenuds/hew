@@ -12,6 +12,7 @@
 
 pub mod host;
 pub mod live;
+mod live_library;
 pub mod mcp;
 pub mod print;
 pub mod run;

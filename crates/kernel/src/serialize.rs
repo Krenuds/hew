@@ -2082,9 +2082,14 @@ fn zip_add_stored_entry<W: Write + Seek>(
 /// footprint while still bounding a load to a survivable allocation.
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Read a named entry from a zip archive, returning its bytes.
-fn zip_read_entry(
-    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+/// Read a named entry from a zip archive, returning its bytes. Generic over
+/// the archive's underlying reader — an in-memory `Cursor<&[u8]>` for every
+/// full load/save, or a plain `Read + Seek` (a `std::fs::File`, say) for
+/// [`read_item_summary_from_reader`], which wants to read ONLY the entries
+/// a summary needs without first loading a whole multi-megabyte item into
+/// memory just to list it.
+fn zip_read_entry<R: Read + Seek>(
+    zip: &mut zip::ZipArchive<R>,
     name: &str,
 ) -> Result<Vec<u8>, LoadError> {
     let entry = zip.by_name(name).map_err(|_| LoadError::MissingAsset {
@@ -4380,12 +4385,33 @@ pub struct ItemSummary {
     pub material_entries: Vec<MaterialSummary>,
 }
 
-/// Reads an [`ItemSummary`] from `.hew` bytes — `manifest.json` only, never
-/// geometry buffers or textures. Applies the same container and version
-/// gates as a full load ([`LoadError::NotAContainer`] /
-/// [`LoadError::UnsupportedVersion`] / [`LoadError::MalformedManifest`]).
+/// Reads an [`ItemSummary`] from `.hew` bytes — `manifest.json` (plus, for
+/// each material's swatch, its texture asset entry) only, never geometry
+/// buffers. Applies the same container and version gates as a full load
+/// ([`LoadError::NotAContainer`] / [`LoadError::UnsupportedVersion`] /
+/// [`LoadError::MalformedManifest`]).
 pub fn read_item_summary(bytes: &[u8]) -> Result<ItemSummary, LoadError> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    read_item_summary_impl(zip)
+}
+
+/// [`read_item_summary`], generic over the archive's reader — a caller that
+/// already has a seekable stream OTHER than an in-memory byte slice (a
+/// `std::fs::File`, notably: `crates/library`'s `list()`, which lists many
+/// items and does not want to load each one's full geometry/texture
+/// payload into memory just to summarize it) can hand that in directly
+/// instead of reading the whole file first. `zip`'s own lazy central-
+/// directory reads mean only `manifest.json` and each referenced texture
+/// asset are actually pulled off `reader` — never anything else in the
+/// container.
+pub fn read_item_summary_from_reader<R: Read + Seek>(reader: R) -> Result<ItemSummary, LoadError> {
+    let zip = zip::ZipArchive::new(reader).map_err(|_| LoadError::NotAContainer)?;
+    read_item_summary_impl(zip)
+}
+
+fn read_item_summary_impl<R: Read + Seek>(
+    mut zip: zip::ZipArchive<R>,
+) -> Result<ItemSummary, LoadError> {
     let manifest_bytes = zip_read_entry(&mut zip, "manifest.json")?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).map_err(|e| LoadError::MalformedManifest {

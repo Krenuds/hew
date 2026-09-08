@@ -1,0 +1,25 @@
+[package]
+name = "library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The single owner of the Hew Library's on-disk layout (docs/agents/HEW_API.md
+# §8.1, v1.1-cycle design "Lane B"): folder resolution, file naming, item
+# metadata parsing, and the atomic list/read/write/remove primitives. Used by
+# every HOST that offers a filesystem-backed library — `hew-cli`'s `CliHost`
+# and the Tauri shell — never by `crates/api` itself, which stays I/O-free
+# (DEVELOPMENT.md rule 1's posture extended to this crate's neighbors: the
+# host supplies the effect, `api` only the contract). Real filesystem I/O
+# (`std::fs`) lives here on purpose, which is exactly why `api` must not
+# depend on it.
+[dependencies]
+kernel = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+# Reads ONLY the `manifest.json` central-directory entry of a `.hew`
+# container for `list()`'s summaries — the same `zip` version `crates/
+# kernel` itself depends on (so the two never disagree about the container
+# format), used here from a seekable `File` so a multi-megabyte item's
+# geometry/texture buffers are never read off disk just to list it.
+zip = { workspace = true }

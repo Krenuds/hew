@@ -286,6 +286,46 @@ pub(super) fn encode_base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The inverse of [`encode_base64`] — `hew.library.insert`'s `bytes_base64`
+/// param is the only caller today. `None` on any character outside the
+/// alphabet, a bad length, or misplaced padding: a malformed payload is
+/// refused typed (`CmdError::Params`), never guessed at.
+pub(super) fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let s = s.trim().as_bytes();
+    if !s.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for chunk in s.chunks(4) {
+        let pad = chunk.iter().filter(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && chunk[3] != b'=') {
+            return None;
+        }
+        let mut acc: u32 = 0;
+        for (i, &c) in chunk.iter().enumerate() {
+            let v = if c == b'=' {
+                if i < 4 - pad {
+                    return None;
+                }
+                0
+            } else {
+                ALPHABET.iter().position(|&a| a == c)? as u32
+            };
+            acc = (acc << 6) | v;
+        }
+        let bytes = acc.to_be_bytes();
+        out.push(bytes[1]);
+        if pad < 2 {
+            out.push(bytes[2]);
+        }
+        if pad < 1 {
+            out.push(bytes[3]);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +344,29 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(encode_base64(input), *expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn decode_base64_inverts_encode_base64_at_every_padding_length() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"", ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ];
+        for (plain, encoded) in cases {
+            assert_eq!(decode_base64(encoded).as_deref(), Some(*plain), "{encoded}");
+        }
+    }
+
+    #[test]
+    fn decode_base64_refuses_malformed_input() {
+        for bad in ["Zg=", "Zm9vY", "Zg===", "Z!==", "=Zm8", "Zm=8"] {
+            assert!(decode_base64(bad).is_none(), "should refuse {bad:?}");
         }
     }
 }

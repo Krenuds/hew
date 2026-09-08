@@ -514,6 +514,61 @@ your namespace and goes through. Reading a `hew.*` dictionary is
 allowed. Writes are ordinary mutations — transactional and undoable. The contract that matters: your data survives a
 round-trip through clients, and users, that know nothing about it.
 
+## Save and insert library items
+
+`hew.library.*` is the same Library a person browses with Window ▸
+Library — a folder of `.hew` files a script or an agent can read and
+write too, on any host with a filesystem. Save the table you built
+above as a reusable component:
+
+```sh
+hew-cli dispatch hew.library.save \
+  '{"selection": ["obj_1"], "name": "Side Table", "keywords": ["furniture", "table"]}' \
+  --file table.hew
+# {"result": {"path": "Components/side-table-3f2a99.hew", "id": "3f2a9900-…"}}
+```
+
+Leave out `selection` and it saves the whole document as a `model`
+item instead. `hew.library.list` browses what is there — filter by
+`category`, `collection`, or a text `query` — and `hew.library.describe`
+gets one item's full metadata and manifest counts:
+
+```sh
+hew-cli dispatch hew.library.list '{"category": "component"}' --file table.hew
+# {"result": {"folder": "/Users/you/Hew Library", "items": [{"path": "Components/side-table-3f2a99.hew", "name": "Side Table", …}]}}
+```
+
+Insert it into a document — by the id `save` returned, or by its
+path — and it lands wired for reuse: inserting the same item version
+again shares the existing definition instead of copying it a second
+time, exactly like dragging it from the Library browser.
+
+```sh
+hew-cli dispatch hew.library.insert \
+  '{"item": "3f2a9900-…", "at": [2, 0, 0]}' \
+  --file room.hew
+```
+
+`hew.library.remove` deletes an item; `hew.library.update_meta` edits
+its name, keywords, or collection without touching the file it was
+saved as. All six commands work identically in `--live` — the
+Library lives on whichever machine runs `hew-cli`, so `list`/
+`describe`/`remove`/`update_meta` never even need a running desktop
+instance, and `insert`/`save` read or write the item on this side
+while the geometry itself lands in the live document (§12.1 of the
+spec has the full mechanics).
+
+Two differences from saving through the app's own Library browser,
+worth knowing: `save` stamps the item's "saved from" bookkeeping
+(`sourceDoc`) from the document `--file` opened automatically — pass
+`source_doc` yourself to override it, or when dispatching against a
+fresh, never-saved document there is nothing to default from and the
+field is just left off. And an item saved through the API gets no
+thumbnail — the app renders and caches one at save time, but there is
+no headless equivalent of that render yet, so the item shows a
+generic tile in the Library browser until a UI session opens the
+folder and saves over it.
+
 ## Connect an AI agent over MCP
 
 `hew-cli mcp` serves the Model Context Protocol on stdio. It is a

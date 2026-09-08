@@ -13,6 +13,16 @@ license = "AGPL-3.0-only"
 tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
+# The Hew Library's on-disk layout (docs/agents/HEW_API.md §8.1;
+# docs/design/v1.1-cycle.md's Lane B): folder resolution, file naming, and
+# atomic list/read/write/remove, shared with `hew-cli`'s own `hew.library.*`.
+# A path dependency into the main cargo workspace at ../../../ (this crate
+# is deliberately its own separate workspace — the root Cargo.toml's
+# `exclude` comment explains why — but a path dependency needs no shared
+# workspace, only a valid relative path). Pulls in only `crates/library`
+# (+ its own `kernel`/`serde_json`/`sha2`), never the wasm boundary or
+# anything UI-facing.
+library = { path = "../../../crates/library" }
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.7.1"
 # Second launches (Windows/Linux file-association double-clicks) must join the

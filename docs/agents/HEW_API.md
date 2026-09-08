@@ -666,6 +666,7 @@ for, not shipped.
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
+| `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin) | Required |
 | `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2) | Standard (`core` grants `snapshot` and `line_drawing` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
@@ -827,6 +828,40 @@ Semantics notes, normative:
   direct storage write), so the desktop app's separate Settings window
   stays in sync via the existing cross-window broadcast; a headless host
   has no display preference to set and refuses `host_capability_missing`.
+- `hew.library.*` addresses an item by its stable `id` (the `hew.library`
+  metadata's UUID) or by its library-relative path — either works
+  anywhere an `item` parameter appears. `hew.library.insert` goes through
+  the same `Document::insert_document` the UI's own library-insert flow
+  uses: giving a provenance-bearing `item` (or `bytes_base64` with a
+  `content_hash`) makes a second insert of the same item version reuse
+  the in-document definition instead of copying it again, exactly as
+  described in §8.1. `hew.library.save` extracts a `selection` (wrapped
+  as a component, UI parity) or, with no selection, the whole document
+  (a `model` item); either way it stamps the saved selection's source
+  nodes with the new item's provenance (`Document::stamp_library_source`)
+  — a real document mutation, but not an undoable one, which is why it is
+  `ReadOnly` class like `hew.scenes.*` rather than `ModelMutating`. A
+  host lacking a library (no filesystem, or none configured) refuses
+  every `hew.library.*` command `host_capability_missing`; `--live`'s own
+  pre-resolve posture is §12.1. `hew.library.save`'s `source_doc`
+  parameter is the `hew.library` metadata's `sourceDoc` key (§8.1):
+  display-only "saved from" bookkeeping, an explicit value always wins,
+  and absent one it defaults to `Host::working_document_path` — a
+  headless `hew-cli dispatch ... --file model.hew` stamps `model.hew`
+  automatically; a fresh, never-saved document (or a host with no notion
+  of a current file) leaves the key off entirely. Two differences from
+  the UI's own Save-to-Library flow, deliberately not replicated by this
+  command: the UI always writes a `savedAt`/`sourceDoc` pair together
+  (this command's `savedAt` is unconditional, `sourceDoc` conditional —
+  the API surface a script drives has no equivalent of "the document the
+  human currently has open" to fall back to when neither is known), and
+  the UI renders and caches a content-hash-keyed PNG thumbnail after
+  every save (`renderItemThumbnail`, `app/src/App.tsx`) — `hew.library.save`
+  never does: there is no `hew.library.*` command for it today (a future
+  one would go through `hew.view.snapshot`'s same software rasterizer),
+  so an item saved through the API shows a generic/no-thumbnail tile in
+  the browser until a UI session opens the library folder and renders one
+  itself.
 
 ### 7.1 Scenes
 
@@ -1254,6 +1289,49 @@ Subcommands:
 `hew-cli` links `crates/api` and the kernel directly; headless mode is
 the same dispatcher with file I/O in the CLI host, per the purity rules.
 
+### 12.1 Library commands in `--live`
+
+A live host (`crates/wasm-api`'s `LiveHost`, behind the desktop app) has
+no filesystem — the library folder lives on whichever machine `hew-cli`
+itself runs on — so `hew-cli`'s live transport pre-resolves every
+`hew.library.*` envelope on the CLIENT side before it reaches the wire,
+for every live entry point (`dispatch --live`, `run --live`, `mcp
+--live`) alike:
+
+- `list`/`describe`/`remove`/`update_meta` never touch the document at
+  all, so they are answered ENTIRELY by `hew-cli` itself — the exact
+  `crates/api/src/commands/library.rs` handlers headless dispatch uses,
+  run directly against `hew-cli`'s own `CliHost`, with no socket
+  round-trip and no running desktop instance required. `LiveHost` itself
+  refuses all four `host_capability_missing`, naming this pre-resolve as
+  what a client should do instead — a raw (non-`hew-cli`) client reaches
+  these the same way `hew-cli` does internally: resolve the library
+  folder itself and never send these four over the wire at all.
+- `insert {item}` rewrites `item` to `bytes_base64` (plus `content_hash`)
+  before forwarding: `hew-cli` reads the item locally and hands the
+  remote its bytes, since the remote's own host cannot read a path or an
+  id it has no filesystem to resolve. `LiveHost::library_read` likewise
+  refuses `host_capability_missing`, so `bytes_base64` is the only shape
+  that works over `--live` regardless of client.
+- `save` is forwarded with `return_bytes: true` forced (whatever the
+  caller asked): `LiveHost::library_write` — unlike the other three
+  `library_*` methods — does NOT refuse, because it needs no filesystem
+  to do its part: it hashes the bytes (the same SHA-256
+  `crates/library::sha256_hex` computes, so a live-stamped
+  `content_hash` and the on-disk item's real hash always agree) and
+  answers a placeholder `path` (nothing on the live side is a meaningful
+  filesystem location). This is what lets `crates/api`'s handler complete
+  `extract_item`/`stamp_library_source` against the LIVE document and
+  hand real bytes back over an unmodified `--live` connection — a raw
+  client gets a fully working save, just with that placeholder path,
+  which is exactly why `hew-cli` takes the returned bytes and writes them
+  to its OWN library folder, then reports the local `path` in place of
+  the placeholder.
+
+Either shape a mutating command can arrive in — bare, or as the sole
+command of a one-command `hew.doc.transact` (§6.4's canonical MCP
+invocation) — is handled identically.
+
 ## 13. MCP mapping
 
 The MCP server does not expose one tool per command — eighty near-flat
@@ -1266,7 +1344,9 @@ chunky tools, all generated from the registry:
 - `hew_transact` — the workhorse: a full transaction envelope (§6),
   returning per-command results or the typed refusal.
 - `hew_query` — the read surface: any read-only command (§6.4 —
-  `hew.query.*`, `hew.meta.*`, `hew.attr.get`) and its params.
+  `hew.query.*`, `hew.meta.*`, `hew.attr.get`, and `hew.library.list`/
+  `describe`/`remove`/`update_meta`, §8.1 — none of those touch the
+  document, so they are `ReadOnly` class too) and its params.
 - `hew_describe_scene` — `hew.query.scene` presented as a structured
   summary tuned for reasoning over (names, kinds, bounding boxes,
   watertightness, tree shape).

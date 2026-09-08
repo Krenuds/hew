@@ -34,3 +34,7 @@ js-sys.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `LiveHost::library_write`'s content hash (docs/agents/HEW_API.md §8.1) —
+# see the workspace-level `sha2` entry's doc comment. Pure Rust, no
+# randomness, compiles cleanly for wasm32-unknown-unknown.
+sha2.workspace = true

@@ -11,8 +11,12 @@
 //! reconcile derived caches after a mutation), not just `&mut
 //! kernel::Document`.
 
-use api::{Host, Refusal, SnapshotProjection, StandardView, ViewCameraSpec};
+use api::{
+    Host, LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget, Refusal,
+    SnapshotProjection, StandardView, ViewCameraSpec,
+};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// A viewport/app-settings effect requested by `hew.view.camera`,
 /// `hew.view.zoom_extents`, or `hew.view.units` that `LiveHost` cannot
@@ -319,6 +323,84 @@ impl Host for LiveHost {
         self.directive = Some(ViewDirective::ActivateScene { sid });
         Ok(())
     }
+
+    /// `hew.library.list`/`describe`/`remove`/`update_meta` need the
+    /// library folder itself — this WASM boundary has no filesystem
+    /// access of its own to list, read, or delete from (the library lives
+    /// wherever the CONNECTING client resolves it, not inside the
+    /// browser/webview sandbox). Refuses pointing specifically at
+    /// `hew-cli --live`'s own answer to this: it pre-resolves exactly
+    /// these four commands on ITS side before they ever reach the wire
+    /// (docs/agents/HEW_API.md §12.1), so a real `--live` session never
+    /// actually calls this — only a raw client bypassing that pre-resolve
+    /// would ever see this refusal.
+    fn library_list(&self) -> Result<LibraryListing, Refusal> {
+        Err(refuse(
+            "list the library",
+            "The live desktop connection has no filesystem of its own here — hew-cli --live \
+             answers hew.library.list/describe/remove/update_meta locally instead of forwarding \
+             them; a raw client should do the same.",
+        ))
+    }
+
+    fn library_read(&self, path: &str) -> Result<LibraryReadResult, Refusal> {
+        let _ = path;
+        Err(refuse(
+            "read library items",
+            "The live desktop connection has no filesystem of its own here — hew-cli --live \
+             pre-resolves hew.library.insert's item to bytes_base64 locally before forwarding; a \
+             raw client should do the same rather than sending item.",
+        ))
+    }
+
+    /// `hew.library.save`'s write step — the ONE `library_*` effect this
+    /// boundary CAN perform without a filesystem, the same way
+    /// [`Self::save_document`] and [`Self::export_document`] answer their
+    /// own bytes-only requests: it has no disk to put the bytes on, but
+    /// hashing them needs none either. `path` is a placeholder — nothing
+    /// on this side of the connection is a meaningful filesystem location,
+    /// and `hew-cli --live` already knows to discard it and mint its OWN
+    /// local path from the returned item's `hew.library` id/name/category
+    /// after decoding the bytes (docs/agents/HEW_API.md §12.1) — this
+    /// method's real job is letting `hew.library.save`'s handler
+    /// (`crates/api/src/commands/library.rs`) complete `extract_item` +
+    /// `stamp_library_source` against the LIVE document and hand the bytes
+    /// back, which is the whole point of a live save.
+    fn library_write(
+        &mut self,
+        target: LibraryWriteTarget,
+        bytes: &[u8],
+    ) -> Result<LibraryWriteResult, Refusal> {
+        let _ = target;
+        Ok(LibraryWriteResult {
+            path: "(no filesystem on the live desktop connection)".to_string(),
+            content_hash: sha256_hex(bytes),
+        })
+    }
+
+    fn library_remove(&mut self, path: &str) -> Result<(), Refusal> {
+        let _ = path;
+        Err(refuse(
+            "remove library items",
+            "The live desktop connection has no filesystem of its own here — hew-cli --live \
+             answers hew.library.remove locally instead of forwarding it; a raw client should do \
+             the same.",
+        ))
+    }
+}
+
+/// SHA-256 of `bytes`, lowercase hex — identical scheme to
+/// `crates/library::sha256_hex` (every host that computes a
+/// `LibraryProvenance.content_hash` must agree, or a live-saved item's
+/// stamped hash would mismatch what `hew-cli --live` computes for the same
+/// bytes when it writes them to disk).
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -450,6 +532,93 @@ mod tests {
         let err = r.error.expect("hew.doc.new refuses on a live host");
         let data = err.data.expect("refusal carries data");
         assert_eq!(data["refusal"], "host_capability_missing");
+    }
+
+    /// `hew.library.save` over a LIVE connection (docs/agents/HEW_API.md
+    /// §12.1): `LiveHost::library_write` has no filesystem, but it must
+    /// still let the command complete `extract_item`/`stamp_library_source`
+    /// against the real live document and hand real bytes back — a
+    /// regression test for the bug where `LiveHost` implemented none of
+    /// the four `library_*` methods at all, so this refused
+    /// `host_capability_missing` before `crates/api`'s handler ever got to
+    /// build anything. Dispatches through a REAL `api::Connection`, not a
+    /// unit call on the handler — the whole point is proving the
+    /// dispatcher's `hew.doc.transact` wrapping, the kernel-side
+    /// extract/stamp, and this host's write all compose correctly, exactly
+    /// as a real `--live` save would exercise them.
+    #[test]
+    fn library_save_over_a_live_connection_extracts_stamps_and_returns_bytes() {
+        let mut conn = Connection::new(Profile::App, "test");
+        let mut doc = box_document();
+        let mut host = LiveHost::default();
+        conn.dispatch(
+            &mut doc,
+            &mut host,
+            req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
+        );
+        conn.dispatch(
+            &mut doc,
+            &mut host,
+            req(1, "hew.doc.attach", serde_json::json!({})),
+        );
+
+        // The box object's own public id, to save it as a selection (not
+        // the whole-document path) — the shape that ALSO exercises
+        // `Document::stamp_library_source`, which the whole-document save
+        // has nothing to stamp.
+        let kernel::NodeId::Object(box_id) = doc
+            .top_level_nodes()
+            .into_iter()
+            .next()
+            .expect("box_document has one top-level object")
+        else {
+            panic!("box_document's root is an object");
+        };
+        let public_id = api::IdResolver::new(&doc)
+            .public_of(&doc, &kernel::EntityRef::Object(box_id))
+            .expect("a live object carries a stable id");
+
+        let DispatchOutcome::Reply(r) = conn.dispatch(
+            &mut doc,
+            &mut host,
+            req(
+                2,
+                "hew.library.save",
+                serde_json::json!({
+                    "selection": [public_id],
+                    "name": "Box",
+                    "return_bytes": true,
+                }),
+            ),
+        ) else {
+            panic!("dispatch replies")
+        };
+        assert!(r.error.is_none(), "live save should succeed: {:?}", r.error);
+        let saved = r.result.expect("a successful reply carries a result");
+        // `hew.library.save` is `ReadOnly` class (records no undo entry —
+        // docs/agents/HEW_API.md's Library semantics note), so a plain
+        // request runs BARE, unlike a `ModelMutating` command — no
+        // `results[0]` transaction wrapper to unwrap here.
+        assert!(saved["id"].is_string(), "{saved}");
+        let b64 = saved["bytes_base64"]
+            .as_str()
+            .unwrap_or_else(|| panic!("return_bytes: true must hand bytes back — {saved}"));
+        assert!(!b64.is_empty());
+
+        // `Document::stamp_library_source` ran against the LIVE document:
+        // the saved object now carries `hew.library` provenance — the
+        // effect `LiveHost::library_write`'s real (not placeholder) content
+        // hash makes possible.
+        let dict = doc
+            .attr_get(&kernel::AttrTarget::Entity(kernel::EntityRef::Object(
+                box_id,
+            )))
+            .expect("the object is still live")
+            .expect("provenance was stamped");
+        assert!(
+            dict.contains_key("hew.library"),
+            "the saved object should carry hew.library provenance"
+        );
     }
 
     /// `hew.view.snapshot` is core-granted (docs/agents/HEW_API.md §10) but

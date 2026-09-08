@@ -15,6 +15,7 @@ members = [
     "crates/gltf-import",
     "crates/skp-import",
     "crates/stl-import",
+    "crates/library",
     "crates/hew-cli",
     "crates/hew-relay",
 ]
@@ -51,6 +52,7 @@ dae-import = { path = "crates/dae-import" }
 gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }
 stl-import = { path = "crates/stl-import" }
+library = { path = "crates/library" }
 # Clean-room SketchUp 2017 .skp reader: a crates.io semver pin on the hosted
 # OpenSKP releases, so CI resolves it like any other dependency. No Trimble
 # SDK material anywhere in its chain (rule 7 admissibility test). Local dev
@@ -64,6 +66,12 @@ js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 zip = { version = "8", default-features = false }
+# Library item content hashing (docs/agents/HEW_API.md §8.1's
+# `LibraryProvenance.content_hash`): `crates/library` (the headless/desktop
+# hosts) and `crates/wasm-api` (`LiveHost::library_write`, which computes the
+# hash itself since it has no filesystem to defer the write to) both need
+# the identical SHA-256, so it's pinned once here.
+sha2 = "0.10"
 # Structured diagnostic logging (docs/dev/DEVELOPMENT.md, M14). kernel/inference use only
 # the `tracing` facade (events, no I/O); wasm-api owns the Subscriber + the
 # wasm→shell drain seam. default-features=false drops the `#[instrument]` proc

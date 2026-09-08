@@ -2182,100 +2182,37 @@ fn clear_recent(app: tauri::AppHandle) -> Result<(), String> {
 // flat items directly in the folder still work), plus a thumbnail cache in
 // `<folder>/.thumbnails/`. The configured folder is stored as JSON in the
 // app config dir (`library.json`, `{"dir": "..."}`), mirroring
-// `recents.json` above. Every command below resolves `name`/`key` against
-// that ONE folder and validates it first — at most one `/`-separated
-// subfolder segment (and only one of the three category names), no `..`,
-// item names must end `.hew`, thumbnail keys must be lowercase hex — which
-// is what makes these commands safe without the `ApprovedPaths` registry
-// `read_file`/`write_file` use: they can never address a path outside the
-// configured folder.
+// `recents.json` above.
+//
+// The on-disk layout itself — folder resolution, item-name/thumbnail-key
+// validation, atomic list/read/write/remove — is owned by `crates/library`
+// (docs/design/v1.1-cycle.md's Lane B), the SAME crate `hew-cli` uses for
+// `hew.library.*`: this shell used to carry its own copy of every one of
+// those rules, which is exactly the two-implementations-that-can-drift
+// problem that crate exists to close. What stays HERE, necessarily
+// Tauri-specific: the native folder-picker dialog, the `settings-changed`/
+// `library-changed` cross-window broadcast, and the config file's own
+// read/write (`crates/library` only ever READS it, via `library::LibraryDir::
+// resolve` — the desktop app is what WRITES a user's folder choice, so this
+// half stays the shell's job, at the exact path `library::config_path()`
+// gives it, so the two directions can never resolve to different files).
 // ---------------------------------------------------------------------------
-
-/// The category subfolders an item name's first segment may name.
-const LIBRARY_CATEGORY_DIRS: [&str; 3] = ["Components", "Materials", "Models"];
-
-/// Reject a name that could escape the library folder (path separators
-/// beyond one, `..`) or that isn't a Hew document — the only kind of file
-/// `library_read` / `library_write` / `library_delete` / `library_reveal`
-/// ever address. A valid name is 1 or 2 `/`-separated segments: each
-/// segment non-empty, with no `\`, no `..`, no `:`, and no leading `.`; the
-/// last segment must end `.hew`; when there are 2 segments, the first must
-/// be exactly one of `LIBRARY_CATEGORY_DIRS` — this is what lets
-/// `Path::join` of a validated name stay safely inside the library folder
-/// (no other subfolder nesting is ever accepted).
-fn valid_library_item_name(name: &str) -> bool {
-    let segments: Vec<&str> = name.split('/').collect();
-    if segments.is_empty() || segments.len() > 2 {
-        return false;
-    }
-    for segment in &segments {
-        if segment.is_empty()
-            || segment.contains('\\')
-            || segment.contains("..")
-            // Windows drive-relative segments ("C:foo.hew") resolve OUTSIDE
-            // the joined directory — `Path::join` replaces rather than
-            // appends for any component with a drive prefix. A colon has no
-            // business in an item file name on any platform (adversarial
-            // review S7).
-            || segment.contains(':')
-            || segment.starts_with('.')
-        {
-            return false;
-        }
-    }
-    let last = segments[segments.len() - 1];
-    if !last.to_ascii_lowercase().ends_with(".hew") {
-        return false;
-    }
-    if segments.len() == 2 {
-        LIBRARY_CATEGORY_DIRS.contains(&segments[0])
-    } else {
-        true
-    }
-}
-
-/// Reject a thumbnail key that isn't lowercase hex. Keys are content-hash
-/// (or hash-prefix) strings, never arbitrary text, so this rules out path
-/// separators and `..` as a side effect of the character class alone.
-fn valid_thumb_key(key: &str) -> bool {
-    (8..=64).contains(&key.len())
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LibraryConfig {
     dir: String,
 }
 
-fn library_config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("library.json"))
-}
-
-/// The configured library folder, or `None` if never set (the caller falls
-/// back to the default `$HOME/Hew Library`). Does not create the folder.
-fn load_library_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(library_config_path(app)?).ok()?;
-    let config: LibraryConfig = serde_json::from_str(&text).ok()?;
-    if config.dir.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(config.dir))
-}
-
-/// Persist the configured library folder.
-fn save_library_dir(app: &tauri::AppHandle, dir: &Path) -> Result<(), String> {
-    let Some(config_dir) = app.path().app_config_dir().ok() else {
-        return Err("could not resolve app config dir".into());
+/// Persist the configured library folder to `library::config_path()` — the
+/// exact file `library::LibraryDir::resolve` reads back.
+fn save_library_dir(dir: &Path) -> Result<(), String> {
+    let Some(path) = library::config_path() else {
+        return Err("could not resolve the app config directory".into());
     };
-    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    let Some(path) = library_config_path(app) else {
-        return Err("could not resolve app config dir".into());
+    let Some(config_dir) = path.parent() else {
+        return Err("could not resolve the app config directory".into());
     };
+    std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
     let config = LibraryConfig {
         dir: dir.to_string_lossy().into_owned(),
     };
@@ -2283,21 +2220,18 @@ fn save_library_dir(app: &tauri::AppHandle, dir: &Path) -> Result<(), String> {
     std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
-/// The effective library folder: the configured one, else `$HOME/Hew
-/// Library`. Never creates it — `library_list` treats a missing folder as
-/// empty, and `library_write`/`library_thumb_write` create it on first use.
-fn resolved_library_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Some(dir) = load_library_dir(app) {
-        return Ok(dir);
-    }
-    let home = app.path().home_dir().map_err(|e| e.to_string())?;
-    Ok(home.join("Hew Library"))
+/// The effective library folder: `HEW_LIBRARY_DIR` (documented override,
+/// shared with `hew-cli`), else the configured one, else `$HOME/Hew
+/// Library` — `library::LibraryDir::resolve`'s own fallback chain. Never
+/// creates it.
+fn resolved_library_dir() -> PathBuf {
+    library::LibraryDir::resolve(None).root().to_path_buf()
 }
 
 /// The configured (or default) library folder as a display path.
 #[tauri::command]
-fn library_get_dir(app: tauri::AppHandle) -> Result<String, String> {
-    resolved_library_dir(&app).map(|p| p.to_string_lossy().into_owned())
+fn library_get_dir() -> String {
+    resolved_library_dir().to_string_lossy().into_owned()
 }
 
 /// Show a native folder picker; on a pick, persist it as the library folder
@@ -2307,11 +2241,12 @@ fn library_get_dir(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn library_choose_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let current = resolved_library_dir(&app).ok();
-    let mut dialog = app.dialog().file().set_title("Choose Library Folder");
-    if let Some(dir) = &current {
-        dialog = dialog.set_directory(dir);
-    }
+    let current = resolved_library_dir();
+    let dialog = app
+        .dialog()
+        .file()
+        .set_title("Choose Library Folder")
+        .set_directory(&current);
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
         .await
         .map_err(|e| e.to_string())?;
@@ -2319,7 +2254,7 @@ async fn library_choose_dir(app: tauri::AppHandle) -> Result<Option<String>, Str
         return Ok(None);
     };
     let path = picked.into_path().map_err(|e| e.to_string())?;
-    save_library_dir(&app, &path)?;
+    save_library_dir(&path)?;
     let _ = app.emit(
         "settings-changed",
         serde_json::json!({ "key": "libraryFolder" }),
@@ -2327,7 +2262,9 @@ async fn library_choose_dir(app: tauri::AppHandle) -> Result<Option<String>, Str
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
-/// One `.hew` file in the library folder, as `library_list` reports it.
+/// One `.hew` file in the library folder, as `library_list` reports it —
+/// `tauriLibraryStore.ts`'s `LibraryListEntry` shape, unchanged by the
+/// switch to `crates/library` underneath.
 #[derive(serde::Serialize)]
 struct LibraryEntry {
     name: String,
@@ -2335,94 +2272,44 @@ struct LibraryEntry {
     mtime_ms: u64,
 }
 
-/// List one directory's direct-child `.hew` files (regular files only) into
-/// `result`, naming each entry `name` (root scan) or `"<prefix>/name"`
-/// (category scan) — always joined with a literal `/`, never
-/// `PathBuf`/`Path::join`, so the reported name is forward-slash on every
-/// platform including Windows, matching what `valid_library_item_name` (and
-/// every other `library_*` command) expects to receive back. A missing
-/// directory — nothing saved there yet — contributes nothing, not an error.
-fn list_library_files_into(dir: &Path, prefix: Option<&str>, result: &mut Vec<LibraryEntry>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let name = match prefix {
-            Some(prefix) => format!("{prefix}/{file_name}"),
-            None => file_name,
-        };
-        if !valid_library_item_name(&name) {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let mtime_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        result.push(LibraryEntry {
-            name,
-            size: metadata.len(),
-            mtime_ms,
-        });
-    }
-}
-
 /// List every `.hew` item in the library folder: legacy flat files directly
 /// in the folder (kept working) plus each of the three category subfolders
 /// (`Components/`, `Materials/`, `Models/`), reported as `"Category/
 /// name.hew"`. A missing folder — nothing saved to the library yet — lists
-/// as empty, not an error.
+/// as empty, not an error. A file that fails to parse (`library::list`'s
+/// `error` entries) is still reported by name/size/mtime — the web app's
+/// own `libraryModel.ts` is what turns that into an error tile, so this
+/// stays a bare listing exactly as it was before the switch.
 #[tauri::command]
-fn library_list(app: tauri::AppHandle) -> Result<Vec<LibraryEntry>, String> {
-    let dir = resolved_library_dir(&app)?;
-    let mut result = Vec::new();
-    list_library_files_into(&dir, None, &mut result);
-    for category in LIBRARY_CATEGORY_DIRS {
-        list_library_files_into(&dir.join(category), Some(category), &mut result);
-    }
-    Ok(result)
+fn library_list() -> Vec<LibraryEntry> {
+    let dir = library::LibraryDir::resolve(None);
+    library::list(&dir)
+        .into_iter()
+        .map(|item| LibraryEntry {
+            name: item.rel_path,
+            size: item.size,
+            mtime_ms: item.mtime_ms,
+        })
+        .collect()
 }
 
 /// Read a library item's raw bytes. Same `tauri::ipc::Response` shape as
 /// `read_file` — no JSON round-trip for multi-megabyte models.
 #[tauri::command]
-fn library_read(app: tauri::AppHandle, name: String) -> Result<tauri::ipc::Response, String> {
-    if !valid_library_item_name(&name) {
-        return Err(format!("library_read: invalid item name {name:?}"));
-    }
-    let dir = resolved_library_dir(&app)?;
-    let bytes = std::fs::read(dir.join(&name))
-        .map_err(|e| format!("library_read failed for {name:?}: {e}"))?;
+fn library_read(name: String) -> Result<tauri::ipc::Response, String> {
+    let dir = library::LibraryDir::resolve(None);
+    let bytes =
+        library::read(&dir, &name).map_err(|e| format!("library_read failed for {name:?}: {e}"))?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Write a library item, creating the library folder — and, for a
-/// two-segment name, its category subfolder — on first use. `Path::join` of
-/// a validated relative name places the file at most one level under `dir`
-/// (`valid_library_item_name` already pinned that first segment to one of
-/// `LIBRARY_CATEGORY_DIRS`), so creating `path`'s immediate parent is always
-/// safe and never reaches outside the library folder. Atomic: temp file in
-/// the same directory + rename, mirroring `recovery_write`.
+/// two-segment name, its category subfolder — on first use.
 #[tauri::command]
 fn library_write(app: tauri::AppHandle, name: String, contents: Vec<u8>) -> Result<(), String> {
-    if !valid_library_item_name(&name) {
-        return Err(format!("library_write: invalid item name {name:?}"));
-    }
-    let dir = resolved_library_dir(&app)?;
-    let path = dir.join(&name);
-    let parent = path.parent().unwrap_or(&dir);
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    write_atomic(&path, &contents).map_err(|e| e.to_string())?;
+    let dir = library::LibraryDir::resolve(None);
+    library::write(&dir, &name, &contents)
+        .map_err(|e| format!("library_write failed for {name:?}: {e}"))?;
     // Content changed: every window's listing (an open Library window, the
     // command palette's index in other document windows) refreshes off this.
     let _ = app.emit("library-changed", ());
@@ -2433,28 +2320,20 @@ fn library_write(app: tauri::AppHandle, name: String, contents: Vec<u8>) -> Resu
 /// the caller's goal ("this name is gone") is already satisfied.
 #[tauri::command]
 fn library_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    if !valid_library_item_name(&name) {
-        return Err(format!("library_delete: invalid item name {name:?}"));
-    }
-    let dir = resolved_library_dir(&app)?;
-    match std::fs::remove_file(dir.join(&name)) {
-        Ok(()) => {
-            let _ = app.emit("library-changed", ());
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
+    let dir = library::LibraryDir::resolve(None);
+    library::remove(&dir, &name).map_err(|e| format!("library_delete failed for {name:?}: {e}"))?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
 }
 
 /// Reveal a library item in the OS file manager (Finder/Explorer/etc).
 #[tauri::command]
-fn library_reveal(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    if !valid_library_item_name(&name) {
+fn library_reveal(name: String) -> Result<(), String> {
+    if !library::valid_item_name(&name) {
         return Err(format!("library_reveal: invalid item name {name:?}"));
     }
-    let dir = resolved_library_dir(&app)?;
-    tauri_plugin_opener::reveal_item_in_dir(dir.join(&name)).map_err(|e| e.to_string())
+    let dir = library::LibraryDir::resolve(None);
+    tauri_plugin_opener::reveal_item_in_dir(dir.root().join(&name)).map_err(|e| e.to_string())
 }
 
 /// Resolve a library item's absolute filesystem path — the Library ▸ Open
@@ -2466,11 +2345,11 @@ fn library_reveal(app: tauri::AppHandle, name: String) -> Result<(), String> {
 /// eventual read) reports that failure.
 #[tauri::command]
 fn library_item_path(app: tauri::AppHandle, name: String) -> Result<String, String> {
-    if !valid_library_item_name(&name) {
+    if !library::valid_item_name(&name) {
         return Err(format!("library_item_path: invalid item name {name:?}"));
     }
-    let dir = resolved_library_dir(&app)?;
-    let path = dir.join(&name);
+    let dir = library::LibraryDir::resolve(None);
+    let path = dir.root().join(&name);
     // The caller's next step is handing this path to the ORDINARY open
     // machinery (`open_in_new_window` → the new window's `read_file`),
     // which enforces the approved-paths registry the `library_*` commands
@@ -2489,34 +2368,21 @@ fn library_item_path(app: tauri::AppHandle, name: String) -> Result<String, Stri
 /// missing convention that a genuinely empty (0-byte) cached PNG could
 /// collide with.
 #[tauri::command]
-fn library_thumb_read(app: tauri::AppHandle, key: String) -> Result<tauri::ipc::Response, String> {
-    if !valid_thumb_key(&key) {
-        return Err(format!("library_thumb_read: invalid key {key:?}"));
-    }
-    let dir = resolved_library_dir(&app)?;
-    let path = dir.join(".thumbnails").join(format!("{key}.png"));
-    match std::fs::read(&path) {
-        Ok(bytes) => Ok(tauri::ipc::Response::new(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("not_found".to_string()),
+fn library_thumb_read(key: String) -> Result<tauri::ipc::Response, String> {
+    let dir = library::LibraryDir::resolve(None);
+    match library::read_thumbnail(&dir, &key) {
+        Ok(Some(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Ok(None) => Err("not_found".to_string()),
         Err(e) => Err(format!("library_thumb_read failed for {key:?}: {e}")),
     }
 }
 
 /// Write a cached thumbnail PNG, creating `.thumbnails/` on first use.
-/// Atomic, same as `library_write`.
 #[tauri::command]
-fn library_thumb_write(
-    app: tauri::AppHandle,
-    key: String,
-    contents: Vec<u8>,
-) -> Result<(), String> {
-    if !valid_thumb_key(&key) {
-        return Err(format!("library_thumb_write: invalid key {key:?}"));
-    }
-    let dir = resolved_library_dir(&app)?;
-    let thumbs_dir = dir.join(".thumbnails");
-    std::fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
-    write_atomic(&thumbs_dir.join(format!("{key}.png")), &contents).map_err(|e| e.to_string())
+fn library_thumb_write(key: String, contents: Vec<u8>) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library::write_thumbnail(&dir, &key, &contents)
+        .map_err(|e| format!("library_thumb_write failed for {key:?}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -4090,46 +3956,161 @@ mod tests {
         assert_eq!(via_override, via_os);
     }
 
+    /// `std::env` is process-global; every test below that sets
+    /// `HEW_LIBRARY_DIR` holds this lock for its whole scenario (`cargo
+    /// test` runs a crate's tests concurrently by default).
+    static LIBRARY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn library_scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hew-tauri-library-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `library_list`/`library_read`/`library_write` (`main.rs`, above)
+    /// are thin wrappers over `library::list`/`library::read`/
+    /// `library::write` — this exercises the SAME crate-level calls those
+    /// commands make, with `HEW_LIBRARY_DIR` pointed at a real scratch
+    /// folder, so a regression in the delegation (a wrong argument order,
+    /// a swapped path) would show up here without needing a live Tauri
+    /// `AppHandle` (which a plain `#[test]` cannot construct).
+    #[test]
+    fn library_list_and_read_delegate_to_the_shared_crate_over_a_real_scratch_folder() {
+        let _env = LIBRARY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = library_scratch_dir("list-read");
+        unsafe {
+            std::env::set_var("HEW_LIBRARY_DIR", &dir);
+        }
+
+        // Nothing saved yet: an empty listing, not an error — the same
+        // "missing folder lists as empty" contract `library_list` (above)
+        // promises.
+        assert!(library_list().is_empty());
+
+        let lib_dir = library::LibraryDir::resolve(None);
+        assert_eq!(lib_dir.root(), dir.as_path());
+        // `library_list`'s `name` field is the raw relative path
+        // regardless of whether the file parses as a valid `.hew`
+        // container (`ListedItem::rel_path` is set the same way on both
+        // the `Ok` and `Err` arms of `crates/library::ops::list_into`),
+        // so arbitrary bytes exercise the delegation this test targets
+        // without this crate needing a `kernel` dependency of its own.
+        let item_bytes = b"not a real .hew container, and that's fine here".to_vec();
+        library::write(&lib_dir, "Models/scratch-item.hew", &item_bytes).unwrap();
+
+        let listed = library_list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Models/scratch-item.hew");
+        assert_eq!(listed[0].size, item_bytes.len() as u64);
+
+        let read_back = library_read("Models/scratch-item.hew".to_string())
+            .expect("library_read should find what library_list just listed");
+        // `tauri::ipc::Response` doesn't expose its bytes for direct
+        // comparison outside the IPC layer, but a successful `Ok` here IS
+        // the delegation this test targets — `library_read`'s body is
+        // exactly `library::read(&dir, &name)`, already covered byte-for-
+        // byte by `crates/library`'s own `write_read_remove_round_trip`.
+        let _ = read_back;
+
+        unsafe {
+            std::env::remove_var("HEW_LIBRARY_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `library_thumb_read`/`library_thumb_write` (above) delegate to
+    /// `library::read_thumbnail`/`library::write_thumbnail` — the
+    /// "not_found" sentinel `tauriLibraryStore.ts` specifically pattern-
+    /// matches on is the one behavior worth pinning at the Tauri-command
+    /// boundary (the crate's own `Option<Vec<u8>>` return doesn't carry
+    /// that string at all; `library_thumb_read` is what invents it).
+    #[test]
+    fn library_thumb_read_and_write_delegate_and_preserve_the_not_found_sentinel() {
+        let _env = LIBRARY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = library_scratch_dir("thumb");
+        unsafe {
+            std::env::set_var("HEW_LIBRARY_DIR", &dir);
+        }
+
+        let key = "deadbeefcafef00d";
+        let missing = library_thumb_read(key.to_string());
+        // `tauri::ipc::Response` doesn't implement `Debug`, so
+        // `unwrap_err()` (which needs `T: Debug` for its own panic
+        // message) doesn't typecheck here — `.err().unwrap()` sidesteps
+        // that without losing the assertion.
+        assert_eq!(missing.err().unwrap(), "not_found");
+
+        library_thumb_write(key.to_string(), vec![1, 2, 3, 4]).unwrap();
+        assert!(library_thumb_read(key.to_string()).is_ok());
+
+        // An invalid key is rejected before it ever reaches
+        // `library::read_thumbnail`/`write_thumbnail` — `valid_thumb_key`
+        // in `crates/library` is what draws this line; this just confirms
+        // the Tauri command actually surfaces that refusal rather than
+        // silently reading/writing something.
+        assert!(library_thumb_write("not-hex!!".to_string(), vec![]).is_err());
+
+        unsafe {
+            std::env::remove_var("HEW_LIBRARY_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `valid_library_item_name` itself moved to `crates/library`
+    // (`library::valid_item_name`) in the switch to a shared on-disk-layout
+    // crate (docs/design/v1.1-cycle.md's Lane B) — these regression cases
+    // stay here as a pin on the SHELL's expectations of that shared
+    // validator (full coverage of the validator's own behavior lives in
+    // `crates/library/src/naming.rs`'s own tests).
     #[test]
     fn valid_library_item_name_accepts_legacy_flat_names() {
-        assert!(valid_library_item_name("chair.hew"));
-        assert!(valid_library_item_name("theater-chair-3f2a.hew"));
-        assert!(valid_library_item_name("UPPER.HEW"));
+        assert!(library::valid_item_name("chair.hew"));
+        assert!(library::valid_item_name("theater-chair-3f2a.hew"));
+        assert!(library::valid_item_name("UPPER.HEW"));
     }
 
     #[test]
     fn valid_library_item_name_accepts_the_three_category_subfolders() {
-        assert!(valid_library_item_name("Components/theater-chair-3f2a.hew"));
-        assert!(valid_library_item_name("Materials/oak.hew"));
-        assert!(valid_library_item_name("Models/house.hew"));
+        assert!(library::valid_item_name(
+            "Components/theater-chair-3f2a.hew"
+        ));
+        assert!(library::valid_item_name("Materials/oak.hew"));
+        assert!(library::valid_item_name("Models/house.hew"));
     }
 
     #[test]
     fn valid_library_item_name_rejects_any_other_first_segment() {
-        assert!(!valid_library_item_name("components/chair.hew")); // wrong case
-        assert!(!valid_library_item_name("Textures/chair.hew"));
-        assert!(!valid_library_item_name(".thumbnails/x.hew"));
+        assert!(!library::valid_item_name("components/chair.hew")); // wrong case
+        assert!(!library::valid_item_name("Textures/chair.hew"));
+        assert!(!library::valid_item_name(".thumbnails/x.hew"));
     }
 
     #[test]
     fn valid_library_item_name_rejects_more_than_one_subfolder_segment() {
-        assert!(!valid_library_item_name("Components/sub/chair.hew"));
+        assert!(!library::valid_item_name("Components/sub/chair.hew"));
     }
 
     #[test]
     fn valid_library_item_name_rejects_traversal_and_escapes() {
-        assert!(!valid_library_item_name(""));
-        assert!(!valid_library_item_name("../chair.hew"));
-        assert!(!valid_library_item_name("Components/../chair.hew"));
-        assert!(!valid_library_item_name("Components/..hew"));
-        assert!(!valid_library_item_name("a\\b.hew"));
-        assert!(!valid_library_item_name("Components/a\\b.hew"));
-        assert!(!valid_library_item_name("C:foo.hew"));
-        assert!(!valid_library_item_name("Components/C:foo.hew"));
-        assert!(!valid_library_item_name(".hidden.hew"));
-        assert!(!valid_library_item_name("Components/.hidden.hew"));
-        assert!(!valid_library_item_name("Components/"));
-        assert!(!valid_library_item_name("chair.txt"));
-        assert!(!valid_library_item_name("Components//chair.hew"));
+        assert!(!library::valid_item_name(""));
+        assert!(!library::valid_item_name("../chair.hew"));
+        assert!(!library::valid_item_name("Components/../chair.hew"));
+        assert!(!library::valid_item_name("Components/..hew"));
+        assert!(!library::valid_item_name("a\\b.hew"));
+        assert!(!library::valid_item_name("Components/a\\b.hew"));
+        assert!(!library::valid_item_name("C:foo.hew"));
+        assert!(!library::valid_item_name("Components/C:foo.hew"));
+        assert!(!library::valid_item_name(".hidden.hew"));
+        assert!(!library::valid_item_name("Components/.hidden.hew"));
+        assert!(!library::valid_item_name("Components/"));
+        assert!(!library::valid_item_name("chair.txt"));
+        assert!(!library::valid_item_name("Components//chair.hew"));
     }
 }

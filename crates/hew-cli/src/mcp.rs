@@ -141,6 +141,17 @@ an explanation of what to do instead, and the document is untouched.
 Read the explanation and change the approach. Repeating the same call
 gets the same refusal.
 
+LIBRARY
+hew_query serves hew.library.list (browse, filtered by category/query/
+collection), hew.library.describe (one item's full metadata and
+manifest summary), hew.library.remove, and hew.library.update_meta —
+none of them touch the document, so they need no undo bracket.
+hew_transact serves hew.library.insert (place a saved item into the
+document — re-inserting the same item reuses its existing definition
+instead of duplicating it) and hew.library.save (save a selection, or
+the whole document with no selection, as a new item). Every command
+addresses an item by its id or its library-relative path.
+
 IF YOU ARE NOT SURE HOW TO MODEL SOMETHING
 Plan it the way you would in SketchUp, then translate. Hew deliberately
 follows SketchUp's interaction model — the same tools, in the same
@@ -362,16 +373,40 @@ impl McpServer {
     /// underlying command refuses; the refusal is the answer, forwarded
     /// verbatim in live mode (§13).
     fn dispatch_tool(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcErr> {
+        let live = matches!(self.backend, Backend::Live(_));
+
+        // `hew.library.list`/`describe`/`remove`/`update_meta` never touch
+        // the document (docs/design/v1.1-cycle.md's Lane B) — in `--live`
+        // mode they're answered entirely on THIS side (the remote app's
+        // own host has no filesystem to serve them with), no dispatch at
+        // all. Embedded mode needs none of this: its `CliHost` already
+        // serves them directly through the ordinary path below.
+        if live && crate::live_library::is_local_only(method, &params) {
+            let response = crate::live_library::dispatch_local(method, &params);
+            return Ok(serde_json::to_value(&response).expect("Response serializes"));
+        }
+
+        let client_params = params.clone();
         // A live host can serialize a document or encode a mesh but has no
         // disk to put the result on, so it refuses a `path` and hands the
         // bytes back instead. Strip the path here and write the file after
         // the reply, exactly as the script runner and one-shot dispatch do
         // — otherwise the canonical MCP shape for a solitary command (§6.4:
         // a one-command transaction) would be the ONE live entry point
-        // where asking to save somewhere just refuses.
-        let (params, write_path) = match &self.backend {
-            Backend::Live(_) => crate::run::take_client_write_path(method, params),
-            Backend::Embedded { .. } => (params, None),
+        // where asking to save somewhere just refuses. `hew.library.insert`
+        // and `hew.library.save` get the identical live-only pre/post
+        // resolution the other two live entry points do.
+        let (params, write_path) = if live {
+            let params = match crate::live_library::resolve_insert_item(method, params) {
+                Ok(p) => p,
+                Err(response) => {
+                    return Ok(serde_json::to_value(&response).expect("Response serializes"));
+                }
+            };
+            let params = crate::live_library::force_return_bytes(method, params);
+            crate::run::take_client_write_path(method, params)
+        } else {
+            (params, None)
         };
         let request = Request {
             jsonrpc: "2.0".to_string(),
@@ -393,6 +428,19 @@ impl McpServer {
             });
         };
         let value = serde_json::to_value(&response).expect("Response serializes");
+        if response.error.is_none()
+            && let Some(outcome) = crate::live_library::finish_save(method, &client_params, &value)
+        {
+            return match outcome {
+                Ok(rewritten) => Ok(serde_json::json!({
+                    "jsonrpc": "2.0", "id": "mcp", "result": rewritten
+                })),
+                Err(message) => Err(JsonRpcErr {
+                    code: -32603,
+                    message,
+                }),
+            };
+        }
         if let Some(path) = write_path
             && response.error.is_none()
         {
@@ -463,7 +511,7 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
         }),
         json!({
             "name": "hew_query",
-            "description": "Run one read-only command (hew.query.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting. Nothing here changes the document. Use hew_transact for anything that does.",
+            "description": "Run one read-only command (hew.query.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item. None of these change the attached DOCUMENT (remove/update_meta change on-disk library state, not the document itself). Use hew_transact for anything that does.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

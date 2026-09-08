@@ -1101,3 +1101,197 @@ fn run_script_print_pdf_and_line_drawing_lay_out_pages_and_draw_to_scale() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ==================================================== hew.library.* (headless)
+
+/// `hew.library.*` end to end, headless, through the REAL `CliHost` and a
+/// REAL scratch library folder on disk (`HEW_LIBRARY_DIR`) — not a fake
+/// `Host` (that's `crates/api/tests/commands_library.rs`'s job) and not a
+/// script's own process-internal document (that's the `run_script_draws_
+/// and_extrudes_and_out_saves_one_object` test above): draw + extrude a
+/// box, save it to the library as a component (the selection resolved
+/// in-transaction via `$ref`, §6.1's exact chaining shape), list the
+/// library folder and find it there, insert it into a FRESH document, and
+/// confirm the geometry actually arrived via `hew.query.scene`.
+///
+/// `HEW_LIBRARY_DIR` is process-global; this is the only test in this file
+/// that sets it, and each test file in this crate is its OWN process
+/// (`cargo test` gives every integration-test source file a separate
+/// binary), so there is nothing else in this process to race.
+#[test]
+fn library_save_list_insert_round_trips_geometry_through_a_real_library_folder() {
+    let dir = scratch_dir("library-e2e");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    // SAFETY: see the doc comment above — no other test in this file (and
+    // therefore this process) reads or writes this variable.
+    unsafe {
+        std::env::set_var("HEW_LIBRARY_DIR", &library_dir);
+    }
+
+    // 1. Draw + extrude a box, then save the JUST-CREATED object as a
+    // library component in the SAME transaction — `selection` resolved
+    // through `{"$ref": "box#/object_id"}`, proving `$ref` substitution
+    // reaches into an array parameter, not just a bare object one.
+    let script_path = dir.join("save.jsonl");
+    let build_and_save = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "hew.doc.transact",
+            "params": {
+                "label": "build and save",
+                "commands": [
+                    { "method": "hew.sketch.draw_rect", "as": "rect", "params": {
+                        "plane": { "ground": true }, "corner_a": [0.0, 0.0, 0.0], "corner_b": [1.0, 1.0, 0.0]
+                    } },
+                    { "method": "hew.solid.extrude", "as": "box", "params": {
+                        "region": { "$ref": "rect#/region_id" }, "distance": 1.0
+                    } },
+                    { "method": "hew.library.save", "params": {
+                        "selection": [{ "$ref": "box#/object_id" }],
+                        "name": "E2E Table Leg",
+                        "keywords": ["e2e", "leg"]
+                    } },
+                ],
+            },
+        },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&build_and_save).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, None, None);
+    assert_eq!(
+        outcome.exit_code,
+        0,
+        "build+save script should succeed: {:?}",
+        outcome.responses.last()
+    );
+    let save_result = &outcome.responses[2]["result"]["results"][2];
+    let item_id = save_result["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hew.library.save should return an id: {save_result}"))
+        .to_string();
+    let item_path = save_result["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hew.library.save should return a path: {save_result}"));
+    assert!(
+        item_path.starts_with("Components/"),
+        "a selection save wraps as a component item: {item_path}"
+    );
+    assert!(
+        library_dir.join(item_path).exists(),
+        "the item must actually land on disk at {item_path}"
+    );
+
+    // 2. `hew.library.list` (via a fresh headless document) finds it.
+    let list_script_path = dir.join("list.jsonl");
+    let list_script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.library.list", "params": {} },
+    ]);
+    std::fs::write(&list_script_path, serde_json::to_vec(&list_script).unwrap()).unwrap();
+    let list_outcome = hew_cli::run::run_script(&list_script_path, None, None);
+    assert_eq!(
+        list_outcome.exit_code,
+        0,
+        "{:?}",
+        list_outcome.responses.last()
+    );
+    let items = list_outcome.responses[2]["result"]["items"]
+        .as_array()
+        .expect("hew.library.list returns items");
+    assert!(
+        items.iter().any(|it| it["id"] == item_id),
+        "the saved item must appear in the listing: {items:?}"
+    );
+
+    // 3. Insert it into a FRESH document (a separate, empty `.hew` file —
+    // exercising the real `dispatch --file` open/mutate/save-back path,
+    // not an in-process document the save step happened to leave behind).
+    let fresh_doc_path = dir.join("fresh.hew");
+    std::fs::write(&fresh_doc_path, Document::new().save()).unwrap();
+    let insert_outcome = hew_cli::run::dispatch_file(
+        &fresh_doc_path,
+        "hew.library.insert",
+        serde_json::json!({ "item": item_id, "at": [3.0, 4.0, 0.0] }),
+    );
+    assert_eq!(
+        insert_outcome.exit_code, 0,
+        "insert should succeed: {:?}",
+        insert_outcome.response
+    );
+    let insert_result = &insert_outcome.response.unwrap()["result"]["results"][0];
+    assert_eq!(insert_result["objects_added"], 1);
+
+    // 4. `hew.query.scene` against the now-saved fresh document confirms
+    // the geometry actually arrived: a 1×1×1 watertight solid, its
+    // bounding box shifted by exactly a second, differently-placed
+    // insert's delta — proving `at` really moved it, without hardcoding
+    // `hew.library.save`'s wrap-as-component re-centering convention
+    // (extract_item re-expresses the definition in the drawing-axes
+    // frame, not necessarily at the object's original world coordinates)
+    // into this test's expectations.
+    let query_outcome =
+        hew_cli::run::dispatch_file(&fresh_doc_path, "hew.query.scene", serde_json::json!({}));
+    assert_eq!(query_outcome.exit_code, 0);
+    let tree = query_outcome.response.unwrap()["result"]["tree"]
+        .as_array()
+        .expect("hew.query.scene returns a tree")
+        .clone();
+    assert_eq!(tree.len(), 1, "exactly the inserted object: {tree:?}");
+    assert_eq!(tree[0]["watertight"], true);
+    let min = tree[0]["bbox"]["min"]
+        .as_array()
+        .expect("bbox min is an array")
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect::<Vec<_>>();
+    let max = tree[0]["bbox"]["max"]
+        .as_array()
+        .expect("bbox max is an array")
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect::<Vec<_>>();
+    for i in 0..3 {
+        assert!(
+            (max[i] - min[i] - 1.0).abs() < 1e-9,
+            "the inserted box must keep its original 1×1×1 size: min={min:?} max={max:?}"
+        );
+    }
+
+    // A second insert at a different `at`, into another fresh document,
+    // must land exactly `at`'s delta away from the first — the concrete
+    // proof that `at` translates the placement (rather than, say, both
+    // inserts coincidentally landing at the same spot).
+    let fresh_doc_path_2 = dir.join("fresh2.hew");
+    std::fs::write(&fresh_doc_path_2, Document::new().save()).unwrap();
+    let insert_outcome_2 = hew_cli::run::dispatch_file(
+        &fresh_doc_path_2,
+        "hew.library.insert",
+        serde_json::json!({ "item": item_id, "at": [3.0 + 10.0, 4.0 + 20.0, 0.0 + 30.0] }),
+    );
+    assert_eq!(insert_outcome_2.exit_code, 0);
+    let query_outcome_2 =
+        hew_cli::run::dispatch_file(&fresh_doc_path_2, "hew.query.scene", serde_json::json!({}));
+    let tree_2 = query_outcome_2.response.unwrap()["result"]["tree"][0].clone();
+    let min_2: Vec<f64> = tree_2["bbox"]["min"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    for (i, delta) in [10.0, 20.0, 30.0].into_iter().enumerate() {
+        assert!(
+            (min_2[i] - min[i] - delta).abs() < 1e-9,
+            "axis {i}: expected the second insert's bbox to shift by {delta} relative to the \
+             first (min={min:?}, min_2={min_2:?})"
+        );
+    }
+
+    unsafe {
+        std::env::remove_var("HEW_LIBRARY_DIR");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

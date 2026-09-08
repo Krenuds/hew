@@ -233,6 +233,91 @@ pub enum ViewCameraSpec {
     Standard(StandardView),
 }
 
+// ------------------------------------------------------------ hew.library
+
+/// One entry of `hew.library.list`'s listing (docs/agents/HEW_API.md §8.1;
+/// docs/design/v1.1-cycle.md's Lane B) — already fully resolved by the
+/// host: parsed `hew.library` metadata, the category (explicit or derived),
+/// and the manifest summary. `crates/api` never touches the filesystem or
+/// the `crates/library` crate that backs this (that crate does real I/O —
+/// see its module doc — which is exactly what this trait exists to keep
+/// out of this crate); a host that offers a library (`hew-cli`'s
+/// `CliHost`, the Tauri shell) builds these by wrapping `crates/library`'s
+/// own `list()`/`ListedItem`.
+#[derive(Debug, Clone)]
+pub struct LibraryItemEntry {
+    /// Relative to the library folder, forward-slash, including the
+    /// category subfolder when there is one.
+    pub path: String,
+    /// The item's stable library identity, if its metadata carries one.
+    pub id: Option<String>,
+    pub name: String,
+    /// `"component"` | `"material"` | `"model"`.
+    pub category: String,
+    pub keywords: Vec<String>,
+    pub collection: Option<String>,
+    /// ISO-8601 save timestamp, if the metadata carries one.
+    pub saved_at: Option<String>,
+    pub size: u64,
+    pub mtime_ms: u64,
+    /// The manifest-only summary, or `None` for a file that failed to
+    /// parse (see `error`) — never dropped from the listing either way.
+    pub summary: Option<kernel::ItemSummary>,
+    pub error: Option<String>,
+}
+
+/// [`Host::library_list`]'s whole answer: the resolved folder's display
+/// path (`hew.library.list`'s `folder` result field) alongside every item
+/// in it.
+#[derive(Debug, Clone)]
+pub struct LibraryListing {
+    pub folder: String,
+    pub items: Vec<LibraryItemEntry>,
+}
+
+/// What [`Host::library_read`] hands back: an item's bytes, the resolved
+/// path they were read from, and a content-fingerprint the host computed
+/// (`crates/library::sha256_hex`) — `crates/api` has no hashing dependency
+/// of its own (this crate stays std + kernel + serde; see its module doc),
+/// so a host with one supplies the hash rather than the caller deriving it.
+#[derive(Debug, Clone)]
+pub struct LibraryReadResult {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub content_hash: String,
+}
+
+/// What [`Host::library_write`] writes to: a brand-new item (the host
+/// mints the on-disk file name from `category`/`name`/`id`, mirroring
+/// `crates/library::item_file_name`), or an overwrite of an already-known
+/// path (`hew.library.update_meta`'s re-save — the file name a `save`
+/// minted does not change just because the item's display name later
+/// does).
+#[derive(Debug, Clone)]
+pub enum LibraryWriteTarget<'a> {
+    New {
+        category: &'a str,
+        name: &'a str,
+        id: &'a str,
+    },
+    Existing {
+        path: &'a str,
+    },
+}
+
+/// What [`Host::library_write`] hands back: the relative path it wrote
+/// (identical to the `Existing` target's path, or the freshly-minted one
+/// for `New`), and the content hash of the exact bytes it just wrote — a
+/// host with a hashing dependency (`crates/library::sha256_hex`) computes
+/// this once here rather than `crates/api` needing one of its own (see
+/// this module's doc); `hew.library.save` uses it to stamp
+/// `LibraryProvenance` on the saved selection's source nodes.
+#[derive(Debug, Clone)]
+pub struct LibraryWriteResult {
+    pub path: String,
+    pub content_hash: String,
+}
+
 /// What a host can do for the dispatcher. Every method has a refusing
 /// default, so a host implements exactly what it supports and the
 /// dispatcher's contract never depends on which host is behind it.
@@ -359,6 +444,21 @@ pub trait Host {
         Vec::new()
     }
 
+    /// The path the working document was last opened from or saved to, if
+    /// any — `hew.library.save`'s default for `source_doc` (docs/agents/HEW_API.md
+    /// §8.1) when the caller doesn't supply one, mirroring the UI's own
+    /// `documentName(docSessionRef.current)` at the Save-to-Library flow.
+    /// `hew-cli`'s `CliHost` answers this from the same `working_path` its
+    /// `hew.doc.save`/`open` already track; a host with no notion of a
+    /// "current file" (a live connection identifies its document some
+    /// other way, through its own window/session, not through this trait)
+    /// answers `None`, which `hew.library.save` treats as "omit
+    /// `sourceDoc`" rather than a refusal — a missing source-document name
+    /// is display-only bookkeeping, never a hard requirement.
+    fn working_document_path(&self) -> Option<&str> {
+        None
+    }
+
     /// Set the live viewport's camera (`hew.view.camera`, docs/agents/HEW_API.md
     /// §7): the same camera vocabulary `hew.view.snapshot` accepts,
     /// applied to the actual on-screen viewport instead of rendered to
@@ -414,6 +514,52 @@ pub trait Host {
     fn scene_applied(&mut self, sid: u64) -> Result<(), Refusal> {
         let _ = sid;
         Ok(())
+    }
+
+    /// Every library item, fully resolved (`hew.library.list`,
+    /// `hew.library.describe`, and the id/path resolution `insert`/
+    /// `remove`/`update_meta` need — `crates/api`'s command handlers find
+    /// the entry matching a client's `item` id-or-path in this listing
+    /// rather than asking the host to resolve it separately, so this is
+    /// the ONE library read every one of those commands starts from). A
+    /// host with no library folder configured, or a `--live` desktop
+    /// backend with no filesystem, refuses `host_capability_missing`.
+    fn library_list(&self) -> Result<LibraryListing, Refusal> {
+        Err(unsupported("list the library"))
+    }
+
+    /// An item's raw bytes plus a content hash, by its RESOLVED relative
+    /// path (`hew.library.describe`'s bytes, `hew.library.insert {item}`'s
+    /// source, `hew.library.update_meta`'s read-modify-write) — `path` is
+    /// always one [`Host::library_list`] already reported, never a
+    /// client-supplied string reaching the filesystem unvalidated.
+    fn library_read(&self, path: &str) -> Result<LibraryReadResult, Refusal> {
+        let _ = path;
+        Err(unsupported("read library items"))
+    }
+
+    /// Writes an item's bytes to `target` (`hew.library.save`'s fresh
+    /// item, `hew.library.update_meta`'s in-place re-save) — a
+    /// caller-minted [`LibraryWriteTarget::New`] name can collide in
+    /// principle (two saves in the same instant with the same slug+id,
+    /// astronomically unlikely with a fresh random id per save) but never
+    /// silently overwrites a DIFFERENT item: the path is derived from the
+    /// id this very save minted.
+    fn library_write(
+        &mut self,
+        target: LibraryWriteTarget,
+        bytes: &[u8],
+    ) -> Result<LibraryWriteResult, Refusal> {
+        let _ = (target, bytes);
+        Err(unsupported("write library items"))
+    }
+
+    /// Deletes an item at a resolved relative path (`hew.library.remove`).
+    /// Deleting an already-absent item is not an error — the caller's goal
+    /// ("this item is gone") is already satisfied.
+    fn library_remove(&mut self, path: &str) -> Result<(), Refusal> {
+        let _ = path;
+        Err(unsupported("remove library items"))
     }
 }
 

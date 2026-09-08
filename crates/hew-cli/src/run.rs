@@ -205,30 +205,73 @@ fn run_script_live(
             eprintln!("hew-cli run --live: frame {i}: malformed envelope: {e}");
             1
         })?;
+        let params = request
+            .params
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+
+        // `hew.library.list`/`describe`/`remove`/`update_meta`: answered
+        // entirely on this side, no dispatch to the remote at all — see
+        // `dispatch_live`'s identical short-circuit.
+        if crate::live_library::is_local_only(&request.method, &params) {
+            let response = crate::live_library::dispatch_local(&request.method, &params);
+            if record_reply(responses, &response) {
+                return Err(1);
+            }
+            continue;
+        }
+
+        let client_params = params.clone();
+        let params = match crate::live_library::resolve_insert_item(&request.method, params) {
+            Ok(p) => p,
+            Err(response) => {
+                record_reply(responses, &response);
+                return Err(1);
+            }
+        };
+        let params = crate::live_library::force_return_bytes(&request.method, params);
         // A save/export inside a script gets the same client-side write a
         // one-shot dispatch does — see `take_client_write_path`.
-        let (params, write_path) = take_client_write_path(
-            &request.method,
-            request
-                .params
-                .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
-        );
+        let (params, write_path) = take_client_write_path(&request.method, params);
         request.params = Some(params);
+        let method = request.method.clone();
         match session.dispatch(request) {
             Ok(DispatchOutcome::Dropped) => {}
             Ok(DispatchOutcome::Reply(response)) => {
+                let value = serde_json::to_value(&response).expect("Response serializes");
+                if response.error.is_some() {
+                    println!("{value}");
+                    responses.push(value);
+                    return Err(1);
+                }
+                if let Some(outcome) =
+                    crate::live_library::finish_save(&method, &client_params, &value)
+                {
+                    match outcome {
+                        Ok(rewritten) => {
+                            // The canonical JSON-RPC shape every other
+                            // recorded reply carries (see `dispatch_live`'s
+                            // identical wrap).
+                            let wrapped = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                                "result": rewritten,
+                            });
+                            println!("{wrapped}");
+                            responses.push(wrapped);
+                        }
+                        Err(msg) => {
+                            eprintln!("hew-cli run --live: frame {i}: {msg}");
+                            return Err(1);
+                        }
+                    }
+                    continue;
+                }
                 // A save/export we are about to write must NOT go through
                 // `record_reply`: that prints the reply and keeps it, and
                 // the reply is the whole document or mesh in base64. The
                 // caller wants the file, so report the file — the same
                 // thing a one-shot dispatch reports.
                 if let Some(path) = write_path {
-                    let value = serde_json::to_value(&response).expect("Response serializes");
-                    if response.error.is_some() {
-                        println!("{value}");
-                        responses.push(value);
-                        return Err(1);
-                    }
                     if let Err(msg) = write_live_bytes(&value, &path) {
                         eprintln!("hew-cli run --live: frame {i}: {msg}");
                         return Err(1);
@@ -418,6 +461,19 @@ pub fn dispatch_live(
     params: serde_json::Value,
     opts: &LiveOptions,
 ) -> DispatchResult {
+    // `hew.library.list`/`describe`/`remove`/`update_meta` never touch the
+    // live document (docs/design/v1.1-cycle.md's Lane B) — answered
+    // entirely on this side, with no live connection needed at all.
+    if crate::live_library::is_local_only(method, &params) {
+        let response = crate::live_library::dispatch_local(method, &params);
+        let value = serde_json::to_value(&response).expect("Response serializes");
+        println!("{value}");
+        return DispatchResult {
+            exit_code: if response.error.is_some() { 1 } else { 0 },
+            response: Some(value),
+        };
+    }
+
     let hello_request = live::build_hello_request("hew-cli:dispatch");
     let mut session = match live::connect_live(opts, hello_request) {
         Ok(s) => s,
@@ -436,6 +492,25 @@ pub fn dispatch_live(
             response: None,
         };
     }
+
+    // `hew.library.insert {item}`: the remote's own host has no
+    // filesystem to resolve `item` with, so this side (which does)
+    // resolves it to `bytes_base64` before it ever reaches the wire.
+    let client_params = params.clone();
+    let params = match crate::live_library::resolve_insert_item(method, params) {
+        Ok(p) => p,
+        Err(response) => {
+            let value = serde_json::to_value(&response).expect("Response serializes");
+            println!("{value}");
+            return DispatchResult {
+                exit_code: 1,
+                response: Some(value),
+            };
+        }
+    };
+    // `hew.library.save`: force the bytes back so this side can write
+    // them to its own library folder after a successful reply (below).
+    let params = crate::live_library::force_return_bytes(method, params);
 
     // `hew.doc.save`/`hew.doc.export` with a path: the live host can
     // produce the bytes (serializing the document, or writing STL/3MF/GLB
@@ -460,6 +535,36 @@ pub fn dispatch_live(
                 return DispatchResult {
                     exit_code: 1,
                     response: Some(value),
+                };
+            }
+            if let Some(outcome) = crate::live_library::finish_save(method, &client_params, &value)
+            {
+                return match outcome {
+                    Ok(rewritten) => {
+                        // The canonical JSON-RPC shape every other
+                        // `DispatchResult::response` carries — `id`
+                        // correlated to the reply that just arrived, not a
+                        // bare object, so a caller parsing `.response`
+                        // never has to special-case "this one command's
+                        // result isn't wrapped."
+                        let wrapped = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                            "result": rewritten,
+                        });
+                        println!("{wrapped}");
+                        DispatchResult {
+                            exit_code: 0,
+                            response: Some(wrapped),
+                        }
+                    }
+                    Err(msg) => {
+                        eprintln!("hew-cli dispatch --live: {msg}");
+                        DispatchResult {
+                            exit_code: 1,
+                            response: Some(value),
+                        }
+                    }
                 };
             }
             if let Some(path) = client_write_path {
@@ -563,7 +668,7 @@ fn strip_path(params: serde_json::Value) -> (serde_json::Value, Option<String>) 
 /// Decodes standard base64 (the encoding `crates/api` hand-rolls for
 /// `bytes_base64`). `None` on any character outside the alphabet, a bad
 /// length, or misplaced padding — a malformed payload is never guessed at.
-fn decode_base64(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(s: &str) -> Option<Vec<u8>> {
     const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let s = s.trim().as_bytes();
     if !s.len().is_multiple_of(4) {

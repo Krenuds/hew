@@ -33,9 +33,10 @@ pub mod transact;
 pub use dispatch::{Connection, DispatchOutcome};
 pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use host::{
-    Host, LineDrawingFormat, LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams,
-    PrintPdfResult, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult,
-    StandardView, ViewCameraSpec,
+    Host, LibraryItemEntry, LibraryListing, LibraryReadResult, LibraryWriteResult,
+    LibraryWriteTarget, LineDrawingFormat, LineDrawingParams, LineDrawingResult, NoHost,
+    PrintPdfParams, PrintPdfResult, SnapshotCamera, SnapshotParams, SnapshotProjection,
+    SnapshotResult, StandardView, ViewCameraSpec,
 };
 pub use ids::IdResolver;
 pub use refusal::Refusal;

@@ -76,6 +76,7 @@ pub use scenes::{DisplayState, ResolvedScene, Scene, SceneDrift, SceneProps, Sec
 pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, ItemSummary, LoadError, MANIFEST_FORMAT_VERSION,
     MaterialSummary, NO_MATERIAL, read_item_asset, read_item_summary,
+    read_item_summary_from_reader,
 };
 pub use sketch::{
     CurveAnalytic, CurveGeom, CurveRefaceted, EdgeRemoved, MAX_CIRCLE_SEGMENTS,

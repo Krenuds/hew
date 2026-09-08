@@ -6,8 +6,9 @@
 //! other side of it.
 
 use api::{
-    Host, LineDrawingParams, LineDrawingResult, PrintPdfParams, PrintPdfResult, Refusal,
-    SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
+    Host, LibraryItemEntry, LibraryListing, LibraryReadResult, LibraryWriteResult,
+    LibraryWriteTarget, LineDrawingParams, LineDrawingResult, PrintPdfParams, PrintPdfResult,
+    Refusal, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
 };
 use kernel::{Document, EntityRef, Point3};
 use std::collections::BTreeMap;
@@ -146,6 +147,91 @@ impl Host for CliHost {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".to_string());
         crate::print::print_pdf(doc, params, &name)
+    }
+
+    fn library_list(&self) -> Result<LibraryListing, Refusal> {
+        let dir = library::LibraryDir::resolve(None);
+        Ok(LibraryListing {
+            folder: dir.root().to_string_lossy().into_owned(),
+            items: library::list(&dir)
+                .into_iter()
+                .map(listed_to_entry)
+                .collect(),
+        })
+    }
+
+    fn library_read(&self, path: &str) -> Result<LibraryReadResult, Refusal> {
+        let dir = library::LibraryDir::resolve(None);
+        let bytes = library::read(&dir, path)
+            .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+        let content_hash = library::sha256_hex(&bytes);
+        Ok(LibraryReadResult {
+            path: path.to_string(),
+            bytes,
+            content_hash,
+        })
+    }
+
+    fn library_write(
+        &mut self,
+        target: LibraryWriteTarget,
+        bytes: &[u8],
+    ) -> Result<LibraryWriteResult, Refusal> {
+        let dir = library::LibraryDir::resolve(None);
+        let path = match target {
+            LibraryWriteTarget::New { category, name, id } => {
+                let category = library::Category::parse(category).ok_or_else(|| {
+                    Refusal::api(
+                        "bad_library_category",
+                        &format!("unknown library category {category:?}"),
+                    )
+                })?;
+                library::item_file_name(name, id, category)
+            }
+            LibraryWriteTarget::Existing { path } => path.to_string(),
+        };
+        library::write(&dir, &path, bytes)
+            .map_err(|e| Refusal::api("save_failed", &format!("{path}: {e}")))?;
+        Ok(LibraryWriteResult {
+            content_hash: library::sha256_hex(bytes),
+            path,
+        })
+    }
+
+    fn library_remove(&mut self, path: &str) -> Result<(), Refusal> {
+        let dir = library::LibraryDir::resolve(None);
+        library::remove(&dir, path)
+            .map_err(|e| Refusal::api("save_failed", &format!("{path}: {e}")))
+    }
+
+    fn working_document_path(&self) -> Option<&str> {
+        self.working_path.as_deref().and_then(Path::to_str)
+    }
+}
+
+/// Converts a `crates/library` listing row into the plain shape
+/// `crates/api`'s `Host` trait speaks — `crates/api` has no dependency on
+/// `crates/library` (that crate does real filesystem I/O; `crates/api`
+/// stays free of it), so this host is where the two meet. An item whose
+/// manifest failed to parse gets no derived category (there is nothing to
+/// derive it FROM) — `"model"` is the same harmless default the web app's
+/// `erroredItem` uses for the identical case.
+fn listed_to_entry(item: library::ListedItem) -> LibraryItemEntry {
+    LibraryItemEntry {
+        path: item.rel_path,
+        id: item.meta.id,
+        name: item.display_name,
+        category: item
+            .category
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_else(|| "model".to_string()),
+        keywords: item.meta.keywords,
+        collection: item.meta.collection,
+        saved_at: item.meta.saved_at,
+        size: item.size,
+        mtime_ms: item.mtime_ms,
+        summary: item.summary,
+        error: item.error,
     }
 }
 

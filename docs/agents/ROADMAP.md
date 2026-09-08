@@ -388,6 +388,14 @@ below.
   library folder, so the two are interchangeable — including a
   cloud-synced folder. A browser without origin-private storage still
   reports the library honestly unavailable
+- The on-disk layout (folder resolution, file naming, item metadata
+  parsing) is owned by one crate, `crates/library`, shared between the
+  Tauri shell's `library_*` commands and `hew-cli`/MCP's `hew.library.*`
+  namespace (docs/agents/HEW_API.md §8.1) — `list`, `describe`, `insert`,
+  `save`, `remove`, `update_meta`, with the same idempotent-re-insert and
+  provenance-stamping semantics as the UI's own Library browser. `--live`
+  pre-resolves every library command on the CLI's own side (HEW_API.md
+  §12.1), since the desktop app's live host has no filesystem of its own
 
 ### Annotations
 
@@ -613,8 +621,10 @@ below.
   sandboxed" in ARCHITECTURE.md §4), never linked in-process. Its
   foundation exists today: the Hew API (docs/agents/HEW_API.md) is implemented
   headless in `crates/api`, with `hew-cli` serving it to scripts and to
-  AI agents over MCP; the plugin system adds sandboxed transports and
-  scoped profiles on top of the same bus
+  AI agents over MCP — including the Library (`hew.library.*`, §8.1),
+  which round-trips a saved item's geometry through the same kernel
+  entry points the UI's own Library browser uses; the plugin system adds
+  sandboxed transports and scoped profiles on top of the same bus
 - **SketchUp (`.skp`) export** — import is supported today; writing `.skp`
   is not yet
 - **Signed Windows installers** — macOS builds are signed and notarized,

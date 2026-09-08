@@ -477,6 +477,143 @@ export interface HistoryUndoParams {
 export interface HistoryUndoResult {}
 
 /**
+ * `hew.library.describe` (v1) — One library item's full metadata, manifest summary, and document attributes.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing, unknown_library_item
+ */
+export interface LibraryDescribeParams {
+  /** the item's id or relative path */
+  item: string
+}
+
+export interface LibraryDescribeResult {
+  /** the item's full document attribute dictionaries, namespace -> key -> value */
+  attrs: UnspecifiedShape
+  category: "component" | "material" | "model"
+  collection?: string
+  /** present only when the file failed to parse */
+  error?: string
+  id?: string
+  keywords: string[]
+  mtime_ms: number
+  name: string
+  path: string
+  saved_at?: string
+  size: number
+  /** manifest counts (objects, materials, components, ...); absent when error is present */
+  summary?: UnspecifiedShape
+}
+
+/**
+ * `hew.library.insert` (v1) — Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, reflection, explode_session_scope
+ */
+export interface LibraryInsertParams {
+  /** a translation applied to the item's world roots; identity when omitted */
+  at?: [number, number, number] | UnspecifiedShape
+  /** the item's raw .hew bytes — exactly one of item/bytes_base64 */
+  bytes_base64?: string
+  /** sha256 hex of bytes_base64, for idempotent re-insert matching; ignored (and provenance is skipped) without it */
+  content_hash?: string
+  /** the item's id or relative path — exactly one of item/bytes_base64 */
+  item?: string
+  name?: string
+}
+
+export interface LibraryInsertResult {
+  annotations_skipped: number
+  definitions_added: number
+  definitions_reused: number
+  guides_added: number
+  materials_added: number
+  materials_reused: number
+  objects_added: number
+  roots: string[]
+  world_sketches_skipped: number
+}
+
+/**
+ * `hew.library.list` (v1) — List items in the Hew Library, optionally filtered by category, collection, or a text query.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing
+ */
+export interface LibraryListParams {
+  category?: "component" | "material" | "model"
+  /** matches this collection path and its subtree */
+  collection?: string
+  /** case-insensitive substring match against name and keywords */
+  query?: string
+}
+
+export interface LibraryListResult {
+  folder: string
+  items: ({ category: "component" | "material" | "model"; collection?: string; error?: string; id?: string; keywords: string[]; mtime_ms: number; name: string; path: string; saved_at?: string; size: number; summary?: UnspecifiedShape })[]
+}
+
+/**
+ * `hew.library.remove` (v1) — Delete a library item.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing, unknown_library_item
+ */
+export interface LibraryRemoveParams {
+  /** the item's id or relative path */
+  item: string
+}
+
+export interface LibraryRemoveResult {
+  removed: string
+}
+
+/**
+ * `hew.library.save` (v1) — Save a selection (or the whole document) to the library. Records no undo entry (§6.4).
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: host_capability_missing, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed
+ */
+export interface LibrarySaveParams {
+  /** defaults to component (a selection) or model (the whole document) */
+  category?: "component" | "material" | "model"
+  collection?: string
+  keywords?: string[]
+  name: string
+  /** also return the saved item's bytes base64 */
+  return_bytes?: boolean
+  /** node ids to save as a component item; omitted saves the whole document as a model item */
+  selection?: string[]
+  /** display-only "saved from" bookkeeping; defaults to the host's current document path when known (e.g. hew-cli --file), else omitted */
+  source_doc?: string
+}
+
+export interface LibrarySaveResult {
+  /** present only when return_bytes was true */
+  bytes_base64?: string
+  id: string
+  path: string
+}
+
+/**
+ * `hew.library.update_meta` (v1) — Edit a library item's name, keywords, or collection in place.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing, unknown_library_item, save_failed
+ */
+export interface LibraryUpdateMetaParams {
+  collection?: string
+  /** the item's id or relative path */
+  item: string
+  keywords?: string[]
+  name?: string
+}
+
+export interface LibraryUpdateMetaResult {
+  category: "component" | "material" | "model"
+  collection?: string
+  id?: string
+  keywords: string[]
+  name: string
+  saved_at?: string
+}
+
+/**
  * `hew.material.create` (v1) — Add a color or texture material to the palette. Registry-state: records no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: none.
@@ -1308,6 +1445,15 @@ export class HewApiClient {
     redo: (params: HistoryRedoParams): Promise<HistoryRedoResult> => this.call('hew.history.redo', params),
     status: (params: HistoryStatusParams): Promise<HistoryStatusResult> => this.call('hew.history.status', params),
     undo: (params: HistoryUndoParams): Promise<HistoryUndoResult> => this.call('hew.history.undo', params),
+  }
+
+  readonly library = {
+    describe: (params: LibraryDescribeParams): Promise<LibraryDescribeResult> => this.call('hew.library.describe', params),
+    insert: (params: LibraryInsertParams): Promise<LibraryInsertResult> => this.mutate('hew.library.insert', params),
+    list: (params: LibraryListParams): Promise<LibraryListResult> => this.call('hew.library.list', params),
+    remove: (params: LibraryRemoveParams): Promise<LibraryRemoveResult> => this.call('hew.library.remove', params),
+    save: (params: LibrarySaveParams): Promise<LibrarySaveResult> => this.call('hew.library.save', params),
+    updateMeta: (params: LibraryUpdateMetaParams): Promise<LibraryUpdateMetaResult> => this.call('hew.library.update_meta', params),
   }
 
   readonly material = {

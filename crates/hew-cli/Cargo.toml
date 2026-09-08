@@ -26,6 +26,10 @@ stl-import = { workspace = true }
 gltf-import = { workspace = true }
 dae-import = { workspace = true }
 skp-import = { workspace = true }
+# The Hew Library's on-disk layout (docs/agents/HEW_API.md §8.1;
+# docs/design/v1.1-cycle.md's Lane B): folder resolution, file naming, and
+# atomic list/read/write/remove, shared with the Tauri shell.
+library = { workspace = true }
 serde_json = { workspace = true }
 
 # Windows named-pipe transport for `--live` (docs/agents/HEW_API.md §11.2, §12):

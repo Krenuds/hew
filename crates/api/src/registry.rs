@@ -123,6 +123,48 @@ fn obj() -> serde_json::Value {
     serde_json::json!({ "type": "object" })
 }
 
+/// The `hew.library` metadata fields every `hew.library.*` result carries
+/// (docs/agents/HEW_API.md §8.1) — shared by `hew.library.update_meta`'s
+/// result and, embedded, by [`library_item_schema`]'s `summary`-adjacent
+/// meta fields, so the two never drift into two different shapes for the
+/// same dictionary.
+fn library_item_meta_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "category": { "type": "string", "enum": ["component", "material", "model"] },
+            "keywords": { "type": "array", "items": { "type": "string" } },
+            "collection": { "type": "string" },
+            "saved_at": { "type": "string" }
+        },
+        "required": ["name", "category", "keywords"]
+    })
+}
+
+/// One `hew.library.list`/`describe` item row: the resolved metadata
+/// fields plus the file's own stats and manifest summary.
+fn library_item_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" },
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "category": { "type": "string", "enum": ["component", "material", "model"] },
+            "keywords": { "type": "array", "items": { "type": "string" } },
+            "collection": { "type": "string" },
+            "saved_at": { "type": "string" },
+            "size": { "type": "integer" },
+            "mtime_ms": { "type": "integer" },
+            "summary": { "type": "object", "description": "manifest counts (objects, materials, components, ...); absent when error is present" },
+            "error": { "type": "string", "description": "present only when the file failed to parse" }
+        },
+        "required": ["path", "name", "category", "keywords", "size", "mtime_ms"]
+    })
+}
+
 impl Registry {
     /// Builds the protocol-1 inventory (docs/agents/HEW_API.md §7).
     pub fn protocol_1() -> Registry {
@@ -666,6 +708,54 @@ impl Registry {
             Host,
             Std,
             "Print the document to a PDF: standard (one page) or to an exact drawing scale across tiled pages, vector line art or shaded.",
+        );
+        // hew.library — the Hew Library (docs/agents/HEW_API.md §8.1;
+        // docs/design/v1.1-cycle.md's Lane B): a folder of `.hew` items a
+        // host with a filesystem offers, addressed by id or relative path.
+        // `list`/`describe`/`remove`/`update_meta` never touch the
+        // document (pure host-side file operations); `insert` mutates it
+        // through the same `Document::insert_document` the UI's own
+        // library-insert flow uses; `save` extracts a selection (or the
+        // whole document) read-only and writes it out, stamping
+        // provenance on the ORIGINAL document's source nodes — a real
+        // document mutation, but not an undoable one (see its
+        // `mutates_document` correction below), so it stays `ReadOnly`
+        // class like `hew.scenes.*` above.
+        add(
+            "hew.library.list",
+            R,
+            Host,
+            Std,
+            "List items in the Hew Library, optionally filtered by category, collection, or a text query.",
+        );
+        add(
+            "hew.library.describe",
+            R,
+            Host,
+            Std,
+            "One library item's full metadata, manifest summary, and document attributes.",
+        );
+        add(
+            "hew.library.insert",
+            M,
+            Kernel,
+            Std,
+            "Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.",
+        );
+        add(
+            "hew.library.save",
+            R,
+            Kernel,
+            Std,
+            "Save a selection (or the whole document) to the library. Records no undo entry (§6.4).",
+        );
+        add("hew.library.remove", R, Host, Std, "Delete a library item.");
+        add(
+            "hew.library.update_meta",
+            R,
+            Host,
+            Std,
+            "Edit a library item's name, keywords, or collection in place.",
         );
 
         // The connection-lifecycle commands the dispatcher already
@@ -1270,6 +1360,184 @@ impl Registry {
                 "too_complex",
                 "save_failed",
                 "unknown_scene",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.list")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "List items in the Hew Library, optionally filtered by category, collection, or a text query.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "category": { "type": "string", "enum": ["component", "material", "model"] },
+                    "query": { "type": "string", "description": "case-insensitive substring match against name and keywords" },
+                    "collection": { "type": "string", "description": "matches this collection path and its subtree" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "folder": { "type": "string" },
+                    "items": { "type": "array", "items": library_item_schema() }
+                },
+                "required": ["folder", "items"]
+            });
+            cmd.refusals = vec!["host_capability_missing"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.describe")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary =
+                "One library item's full metadata, manifest summary, and document attributes.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "item": { "type": "string", "description": "the item's id or relative path" }
+                },
+                "required": ["item"],
+                "additionalProperties": false
+            });
+            let mut result = library_item_schema();
+            if let Some(props) = result.get_mut("properties") {
+                props["attrs"] = serde_json::json!({ "type": "object", "description": "the item's full document attribute dictionaries, namespace -> key -> value" });
+            }
+            if let Some(req) = result.get_mut("required").and_then(|r| r.as_array_mut()) {
+                req.push(serde_json::json!("attrs"));
+            }
+            cmd.result_schema = result;
+            cmd.refusals = vec!["host_capability_missing", "unknown_library_item"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.insert")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "item": { "type": "string", "description": "the item's id or relative path — exactly one of item/bytes_base64" },
+                    "bytes_base64": { "type": "string", "description": "the item's raw .hew bytes — exactly one of item/bytes_base64" },
+                    "content_hash": { "type": "string", "description": "sha256 hex of bytes_base64, for idempotent re-insert matching; ignored (and provenance is skipped) without it" },
+                    "at": { "description": "a translation applied to the item's world roots; identity when omitted", "oneOf": [ { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }, { "type": "object" } ] },
+                    "name": { "type": "string" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "roots": { "type": "array", "items": { "type": "string" } },
+                    "definitions_added": { "type": "integer" },
+                    "definitions_reused": { "type": "integer" },
+                    "materials_added": { "type": "integer" },
+                    "materials_reused": { "type": "integer" },
+                    "objects_added": { "type": "integer" },
+                    "guides_added": { "type": "integer" },
+                    "world_sketches_skipped": { "type": "integer" },
+                    "annotations_skipped": { "type": "integer" }
+                },
+                "required": ["roots", "definitions_added", "definitions_reused", "materials_added", "materials_reused", "objects_added", "guides_added", "world_sketches_skipped", "annotations_skipped"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "unknown_library_item",
+                "load_failed",
+                "component_expansion_exceeded",
+                "singular",
+                "degenerate_axis",
+                "reflection",
+                "explode_session_scope",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.save")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Save a selection (or the whole document) to the library. Records no undo entry (§6.4).";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selection": { "type": "array", "items": { "type": "string" }, "description": "node ids to save as a component item; omitted saves the whole document as a model item" },
+                    "name": { "type": "string" },
+                    "category": { "type": "string", "enum": ["component", "material", "model"], "description": "defaults to component (a selection) or model (the whole document)" },
+                    "keywords": { "type": "array", "items": { "type": "string" } },
+                    "collection": { "type": "string" },
+                    "return_bytes": { "type": "boolean", "description": "also return the saved item's bytes base64" },
+                    "source_doc": { "type": "string", "description": "display-only \"saved from\" bookkeeping; defaults to the host's current document path when known (e.g. hew-cli --file), else omitted" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "id": { "type": "string" },
+                    "bytes_base64": { "type": "string", "description": "present only when return_bytes was true" }
+                },
+                "required": ["path", "id"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "empty_component",
+                "duplicate_member",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "explode_session_scope",
+                "save_failed",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.remove")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Delete a library item.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "item": { "type": "string", "description": "the item's id or relative path" }
+                },
+                "required": ["item"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "removed": { "type": "string" } },
+                "required": ["removed"]
+            });
+            cmd.refusals = vec!["host_capability_missing", "unknown_library_item"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.update_meta")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Edit a library item's name, keywords, or collection in place.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "item": { "type": "string", "description": "the item's id or relative path" },
+                    "name": { "type": "string" },
+                    "keywords": { "type": "array", "items": { "type": "string" } },
+                    "collection": { "type": "string" }
+                },
+                "required": ["item"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = library_item_meta_schema();
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "unknown_library_item",
+                "save_failed",
             ];
         }
         {
@@ -2914,6 +3182,13 @@ impl Registry {
             "hew.history.redo",
             "hew.doc.new",
             "hew.doc.open",
+            // ReadOnly class (no undo bracket, no `$ref`-blocking transact
+            // requirement) but a real mutation: it stamps `hew.library`
+            // source provenance on the saved selection's nodes
+            // (`Document::stamp_library_source`), which — like the tag
+            // registry and `hew.scenes.*` above — is bookkeeping the
+            // kernel never records as an undo step.
+            "hew.library.save",
         ] {
             commands
                 .get_mut(name)

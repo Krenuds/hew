@@ -1572,6 +1572,563 @@ Undo the top history entry (optionally guarded by expected_label).
 - `inverse_failed` — This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
 - `inverse_diverged` — Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
 
+## hew.library
+
+### `hew.library.describe`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+
+One library item's full metadata, manifest summary, and document attributes.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "item": {
+      "description": "the item's id or relative path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "item"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "attrs": {
+      "description": "the item's full document attribute dictionaries, namespace -> key -> value",
+      "type": "object"
+    },
+    "category": {
+      "enum": [
+        "component",
+        "material",
+        "model"
+      ],
+      "type": "string"
+    },
+    "collection": {
+      "type": "string"
+    },
+    "error": {
+      "description": "present only when the file failed to parse",
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "keywords": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "mtime_ms": {
+      "type": "integer"
+    },
+    "name": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "saved_at": {
+      "type": "string"
+    },
+    "size": {
+      "type": "integer"
+    },
+    "summary": {
+      "description": "manifest counts (objects, materials, components, ...); absent when error is present",
+      "type": "object"
+    }
+  },
+  "required": [
+    "path",
+    "name",
+    "category",
+    "keywords",
+    "size",
+    "mtime_ms",
+    "attrs"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_library_item`
+
+### `hew.library.insert`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "at": {
+      "description": "a translation applied to the item's world roots; identity when omitted",
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+    "bytes_base64": {
+      "description": "the item's raw .hew bytes — exactly one of item/bytes_base64",
+      "type": "string"
+    },
+    "content_hash": {
+      "description": "sha256 hex of bytes_base64, for idempotent re-insert matching; ignored (and provenance is skipped) without it",
+      "type": "string"
+    },
+    "item": {
+      "description": "the item's id or relative path — exactly one of item/bytes_base64",
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "annotations_skipped": {
+      "type": "integer"
+    },
+    "definitions_added": {
+      "type": "integer"
+    },
+    "definitions_reused": {
+      "type": "integer"
+    },
+    "guides_added": {
+      "type": "integer"
+    },
+    "materials_added": {
+      "type": "integer"
+    },
+    "materials_reused": {
+      "type": "integer"
+    },
+    "objects_added": {
+      "type": "integer"
+    },
+    "roots": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "world_sketches_skipped": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "roots",
+    "definitions_added",
+    "definitions_reused",
+    "materials_added",
+    "materials_reused",
+    "objects_added",
+    "guides_added",
+    "world_sketches_skipped",
+    "annotations_skipped"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_library_item`
+- `load_failed`
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `singular` — That transform would scale the object down to nothing, so it was refused.
+- `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
+- `reflection` — This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+
+### `hew.library.list`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+
+List items in the Hew Library, optionally filtered by category, collection, or a text query.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "category": {
+      "enum": [
+        "component",
+        "material",
+        "model"
+      ],
+      "type": "string"
+    },
+    "collection": {
+      "description": "matches this collection path and its subtree",
+      "type": "string"
+    },
+    "query": {
+      "description": "case-insensitive substring match against name and keywords",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "folder": {
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "category": {
+            "enum": [
+              "component",
+              "material",
+              "model"
+            ],
+            "type": "string"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "error": {
+            "description": "present only when the file failed to parse",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "keywords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mtime_ms": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "saved_at": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "summary": {
+            "description": "manifest counts (objects, materials, components, ...); absent when error is present",
+            "type": "object"
+          }
+        },
+        "required": [
+          "path",
+          "name",
+          "category",
+          "keywords",
+          "size",
+          "mtime_ms"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "folder",
+    "items"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.library.remove`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+
+Delete a library item.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "item": {
+      "description": "the item's id or relative path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "item"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "removed": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "removed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_library_item`
+
+### `hew.library.save`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+
+Save a selection (or the whole document) to the library. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "category": {
+      "description": "defaults to component (a selection) or model (the whole document)",
+      "enum": [
+        "component",
+        "material",
+        "model"
+      ],
+      "type": "string"
+    },
+    "collection": {
+      "type": "string"
+    },
+    "keywords": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "name": {
+      "type": "string"
+    },
+    "return_bytes": {
+      "description": "also return the saved item's bytes base64",
+      "type": "boolean"
+    },
+    "selection": {
+      "description": "node ids to save as a component item; omitted saves the whole document as a model item",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "source_doc": {
+      "description": "display-only \"saved from\" bookkeeping; defaults to the host's current document path when known (e.g. hew-cli --file), else omitted",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "bytes_base64": {
+      "description": "present only when return_bytes was true",
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "path",
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `empty_component` — Select at least one object to turn into a component.
+- `duplicate_member` — The same object is in the selection twice. Reselect and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `save_failed`
+
+### `hew.library.update_meta`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+
+Edit a library item's name, keywords, or collection in place.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "collection": {
+      "type": "string"
+    },
+    "item": {
+      "description": "the item's id or relative path",
+      "type": "string"
+    },
+    "keywords": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "item"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "category": {
+      "enum": [
+        "component",
+        "material",
+        "model"
+      ],
+      "type": "string"
+    },
+    "collection": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "keywords": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "name": {
+      "type": "string"
+    },
+    "saved_at": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "category",
+    "keywords"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_library_item`
+- `save_failed`
+
 ## hew.material
 
 ### `hew.material.create`
