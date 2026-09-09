@@ -85,6 +85,20 @@ Point any drawing tool at a solid's face and it works there instead of on the gr
 
 ![A box with a circular boss pulled out and a circular recess pushed in, both drawn directly on its front face](/docs/drawing-on-face.webp)
 
+## Drawing on other planes
+
+Nothing ties the drawing tools to the ground. Every shape lies on *some* plane, and the ground is simply the one the tools fall back to when nothing else is under the cursor. There are three planes to think in — the ground and anything parallel to it is a **blue** plane (it faces the blue Z axis), a wall running north–south faces the **red** X axis and is a red plane, and a wall running east–west faces the green Y axis and is a **green** plane — and three ways to draw on one that isn't the ground.
+
+<docs-video theme="dark" slug="drawing-planes" label="drawing on other planes demonstration"></docs-video>
+
+**Use a face.** If the plane you want already exists as a face — the side of a box, the top of a slab — point the tool at it and draw. That's the "Drawing on a face" case above: the shape cuts the face, and the piece it encloses is ready to push or pull. This is the everyday way to draw a window in a wall or a hole through a plate.
+
+**Lock the plane with an arrow key.** Rectangle, Circle, Polygon, and Arc all take a plane lock before the first click: press `→` and the status bar reads "Locked to the red plane"; `←` is the green plane, `↑` the blue one. The first click is free — snap to a corner, a midpoint, or a bare spot on the ground — and the shape is drawn on the locked plane *through that point*, standing in empty space with no face beneath it. The preview and its dashed helper take the plane's colour so you can see which way it faces before you commit. Press the same arrow again, `↓`, or `Esc` to release the lock. The arrow works after the first click too, hinging a shape you've already started up through its anchor (see "Standing a shape up" under Circle). What you get is an ordinary sketch region, so Push/Pull extrudes it sideways exactly as it would extrude one on the ground — a vertical rectangle pulled along the ground is a wall.
+
+**Point the Line tool into space.** Line needs no plane up front, because it works one segment at a time. Draw a segment along the ground, press `↑`, and the next one runs straight up from its end; `→` and `←` run segments along red and green. The moment a segment leaves the plane you were on, a fresh sketch begins on the plane that holds your last segment and the new direction, and everything you draw from there stays on it: up, across, and back down closes into a vertical face standing on that first ground line. The face's own corner is the point where the chain left the ground, so close on that one — the segment you drew before it belongs to the ground sketch and stays there.
+
+Getting Started walks through all of this on a real part — [drawing a cutter on the side of a bin](/learn/getting-started/#7-work-on-a-different-plane).
+
 ## Offset (`F`)
 
 Offset copies an existing boundary a set distance inward or outward — the quickest way to draw a border, a rim, or a wall of even thickness without measuring anything.

@@ -69,11 +69,20 @@ import docsVideoManifest from '../data/videos.json';
         var base = this.getAttribute('base');
         var entry = slug && (window.__hewDocsVideos || {})[slug];
         var t = this.theme();
-        if ((slug && !entry) || (!slug && !base)) {
-          console.error('[docs-video] ' + (slug
-            ? 'slug "' + slug + '" is not in the videos.json manifest'
-            : 'needs a slug or base attribute'));
+        var local = false;
+        if (!slug && !base) {
+          console.error('[docs-video] needs a slug or base attribute');
           this.style.display = 'none'; this.replaceChildren(); return;
+        }
+        if (slug && !entry) {
+          // Not published yet: the production build refuses this (the
+          // docs-video-check integration), so this only happens under
+          // `astro dev`, where the freshly assembled clip in
+          // site/public/videos/ is served straight from the site — the
+          // same escape hatch as an explicit base attribute. If the
+          // local files are missing too, the element hides itself.
+          console.warn('[docs-video] slug "' + slug + '" is not in the videos.json manifest; trying the local clip');
+          base = '/videos/docs-' + slug; local = true;
         }
         var media = entry || {
           webm: base + '-' + t + '.webm',
@@ -86,9 +95,16 @@ import docsVideoManifest from '../data/videos.json';
         v.poster = media.poster;
         v.setAttribute('aria-label', this.getAttribute('label') || 'demonstration video');
         [['webm', 'video/webm; codecs="av01.0.08M.08"'],
-         ['mp4', 'video/mp4; codecs="avc1.640028"']].forEach(function (f) {
+         ['mp4', 'video/mp4; codecs="avc1.640028"']].forEach(function (f, i, all) {
           var s = document.createElement('source');
           s.src = media[f[0]]; s.type = f[1];
+          if (local && i === all.length - 1) {
+            // The last <source> failing means no local clip either.
+            s.addEventListener('error', function () {
+              console.error('[docs-video] no local clip at ' + base + '-' + t + '.*');
+              self.style.display = 'none'; self.replaceChildren();
+            });
+          }
           v.appendChild(s);
         });
         var bar = document.createElement('div'); bar.className = 'dv-bar';

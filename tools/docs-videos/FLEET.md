@@ -34,8 +34,10 @@ two reference scenes before writing anything.
 
 ## Hard rules
 
-- Scene file: `tools/docs-videos/docs-<slug>.mjs`, one per chapter. Touch ONLY
-  your own scene file and your own output dirs.
+- Scene file: `tools/docs-videos/docs-<slug>.mjs`, one per chapter. A chapter
+  may carry one extra section-level clip under its own slug (e.g.
+  `drawing-planes` inside Drawing) when a section is a lesson of its own.
+  Touch ONLY your own scene file and your own output dirs.
 - Theme: run every capture with `CAPTURE_THEME=dark` (docs media is dark
   by convention). The app must be served: `curl -sf http://localhost:5199/`
   first; if it's down, STOP and report — don't start servers.
