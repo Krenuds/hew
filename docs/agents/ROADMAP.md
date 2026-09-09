@@ -37,6 +37,16 @@ below.
   measurement follows a hovered sketch's plane, an idle arrow-key plane
   lock, or (Tape Measure's parallel guides) the plane a picked face or
   edge actually lies in
+- Drawing right up to a face's edges: a profile drawn on a face whose
+  sides run along part of the face boundary (a rectangle from one edge's
+  midpoint to another's, or flush against an edge) imprints as one or more
+  boundary-to-boundary chords — one undo entry — and the drawn region is
+  a real face to push, pull, or paint; only a loop that merely touches the
+  boundary at a point is still refused
+- Push/pull past a co-facing wall: an inward push whose swept column would
+  cross the plane of a face pointing the same way (the bowl of a P-shaped
+  slab pushed past the stem's end) routes to the subtract path and carves
+  the material, where the flat translate-and-build path could only refuse
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent

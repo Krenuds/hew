@@ -47,7 +47,10 @@ use crate::ids::{
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::{FaceMaterial, Material, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
-use crate::ops::{BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError};
+use crate::ops::{
+    BooleanError, BooleanOp, ExtrudeError, FollowMeError, LoopImprintPlan, Operand, SliceError,
+    StickyError,
+};
 use crate::serialize::{
     DocSaveData, LoadError, NodeRefDto, RawAnchor, RawAnnotation, decode_document_raw,
     encode_document,
@@ -2506,6 +2509,26 @@ pub struct InsertOptions {
 /// What [`Document::insert_document`] did — the caller's selection set plus
 /// the user-facing accounting ("4 solids · 2 materials · 1 definition
 /// reused").
+/// Which way [`Document::imprint_loop_on_face`] realized a drawn loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopImprintRoute {
+    /// A sub-face inside a new hole.
+    Inner,
+    /// This many boundary-to-boundary chords.
+    Chords(usize),
+}
+
+/// What [`Document::imprint_loop_on_face`] produced: the face carrying the
+/// drawn region (what a push/pull or paint acts on next) and the face on
+/// the other side of the cut (the parent for a sub-face; the other half
+/// for a chord).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopImprintReport {
+    pub region: FaceId,
+    pub other: FaceId,
+    pub route: LoopImprintRoute,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InsertReport {
     /// The created top-level nodes, in the item's own root order.
@@ -8787,6 +8810,147 @@ impl Document {
     ///
     /// On `Err` the Object is untouched (the op's strong guarantee) and nothing
     /// is recorded.
+    /// Imprints a closed loop drawn on `face` of `object` — the one entry
+    /// point every face-mode draw (rectangle, circle, polygon, arc, offset,
+    /// and the API's face-plane drawing) goes through. The loop is
+    /// classified by [`Object::plan_loop_imprint`]: clear of the boundary it
+    /// becomes a sub-face ([`KernelOp::SplitFaceInner`]); running along part
+    /// of the boundary it becomes one or more boundary-to-boundary chords
+    /// ([`KernelOp::SplitFace`]), applied in order and bundled as ONE undo
+    /// entry when there are several. Either way the caller gets back the
+    /// face that now carries the drawn region — the one a push/pull or a
+    /// paint acts on — plus the face on the other side of the cut.
+    ///
+    /// `scope`: `None` for a world object, `Some(component)` for a
+    /// definition member (the def-scoped [`Document::apply_def_op`] path,
+    /// so every instance sees the edit).
+    ///
+    /// # Errors
+    /// Everything the underlying ops refuse, typed and with the object
+    /// untouched: a loop that only touches the boundary at a corner is
+    /// still `LoopNotStrictlyInside`; a chord whose interior corner leaves
+    /// the face is `PointNotOnFace`; a loop that IS the boundary has nothing
+    /// to cut and is refused `LoopNotStrictlyInside` as well.
+    pub fn imprint_loop_on_face(
+        &mut self,
+        scope: Option<ComponentId>,
+        object: ObjectId,
+        face: FaceId,
+        loop_path: Vec<Point3>,
+        curve: Option<crate::sketch::CurveGeom>,
+    ) -> Result<(LoopImprintReport, DocChange), DocumentError> {
+        let plan = self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden)
+            .ok_or(DocumentError::UnknownObject)?
+            .object
+            .plan_loop_imprint(face, &loop_path)
+            .map_err(|e| DocumentError::Op(KernelOpError::Sticky(e)))?;
+        let apply = |doc: &mut Document, op: KernelOp| match scope {
+            Some(component) => doc.apply_def_op(component, object, op),
+            None => doc.apply_object_op(object, op),
+        };
+        match plan {
+            LoopImprintPlan::Nothing => Err(DocumentError::Op(KernelOpError::Sticky(
+                StickyError::LoopNotStrictlyInside { index: 0 },
+            ))),
+            LoopImprintPlan::Inner(loop_path) => {
+                let (report, change) = apply(
+                    self,
+                    KernelOp::SplitFaceInner {
+                        face,
+                        loop_path,
+                        restore: None,
+                        curve,
+                    },
+                )?;
+                let KernelOpReport::FaceSplitInner(r) = report else {
+                    unreachable!("SplitFaceInner reports FaceSplitInner");
+                };
+                Ok((
+                    LoopImprintReport {
+                        region: r.sub_face,
+                        other: r.parent,
+                        route: LoopImprintRoute::Inner,
+                    },
+                    change,
+                ))
+            }
+            LoopImprintPlan::Chords(chords) => {
+                // A point strictly inside the drawn loop — an ear centroid,
+                // not a vertex average, so a concave loop (a C hugging one
+                // edge, whose vertex average sits in its own notch) still
+                // names its region. Every chord bounds that region, so the
+                // half holding this point is the half the next chord cuts
+                // and, after the last chord, the region itself. A loop with
+                // no interior is not a simple loop.
+                let centroid = self.objects[object]
+                    .object
+                    .loop_interior_point_on_face(face, &loop_path)
+                    .ok_or(DocumentError::Op(KernelOpError::Sticky(
+                        StickyError::LoopSelfIntersects,
+                    )))?;
+                let bundle = chords.len() > 1;
+                let txn = bundle.then(|| self.begin_transaction());
+                let mut merged = DocChange::default();
+                let mut current_face = face;
+                let mut region = face;
+                let mut other = face;
+                for chord in &chords {
+                    let (report, change) = match apply(
+                        self,
+                        KernelOp::SplitFace {
+                            face: current_face,
+                            path: chord.clone(),
+                            restore: None,
+                        },
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            if let Some(txn) = txn {
+                                self.abort_transaction(txn);
+                            }
+                            return Err(e);
+                        }
+                    };
+                    merge_doc_change(&mut merged, change);
+                    let KernelOpReport::FaceSplit(r) = report else {
+                        unreachable!("SplitFace reports FaceSplit");
+                    };
+                    let obj = &self.objects[object].object;
+                    let [a, b] = r.new_faces;
+                    let (inside, outside) = if obj.face_contains_point(a, centroid) {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
+                    region = inside;
+                    other = outside;
+                    // The next chord cuts whichever half still holds it.
+                    current_face = inside;
+                }
+                if let Some(txn) = txn {
+                    self.commit_transaction(
+                        txn,
+                        CompoundMeta {
+                            label: "Draw on face".to_string(),
+                            origin: HistoryOrigin::User,
+                        },
+                    )?;
+                }
+                Ok((
+                    LoopImprintReport {
+                        region,
+                        other,
+                        route: LoopImprintRoute::Chords(chords.len()),
+                    },
+                    merged,
+                ))
+            }
+        }
+    }
+
     pub fn apply_object_op(
         &mut self,
         object: ObjectId,

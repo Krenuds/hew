@@ -284,20 +284,15 @@ fn draw_loop_on_face(
     loop_path: Vec<Point3>,
     curve: Option<CurveGeom>,
 ) -> Result<Value, CmdError> {
-    let op = KernelOp::SplitFaceInner {
-        face: face.face,
-        loop_path,
-        restore: None,
-        curve,
-    };
-    let report = apply_face_op(ctx, face.object, op)?;
-    let KernelOpReport::FaceSplitInner(r) = report else {
-        return Err(CmdError::Internal(
-            "apply_object_op(SplitFaceInner) returned an unexpected report kind".into(),
-        ));
-    };
-    ctx.mint_face_token("face", face.object, r.sub_face);
-    ctx.mint_face_token("parent", face.object, r.parent);
+    // `Document::imprint_loop_on_face` routes a loop clear of the boundary
+    // to a sub-face and one running along part of it to chord splits, and
+    // reports the face carrying the drawn region either way.
+    let scope = ctx.doc.object_owner_component(face.object);
+    let (report, _change) =
+        ctx.doc
+            .imprint_loop_on_face(scope, face.object, face.face, loop_path, curve)?;
+    ctx.mint_face_token("face", face.object, report.region);
+    ctx.mint_face_token("parent", face.object, report.other);
     Ok(face_imprint_result(ctx, face.object))
 }
 

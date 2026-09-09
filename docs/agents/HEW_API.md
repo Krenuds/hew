@@ -680,7 +680,15 @@ Semantics notes, normative:
   solid's face — the face-imprint path), or `{"sketch": id}` (extend an
   existing sketch). Points are 3D world coordinates and must lie on the
   plane within kernel tolerance; off-plane input is refused typed, never
-  projected silently. Any point parameter accepts a derived-point locator
+  projected silently. In face mode a closed profile clear of the face
+  boundary imprints as a sub-face; one whose sides run along part of the
+  boundary imprints as one or more boundary-to-boundary chord splits (one
+  undo entry), and the result's `face` token names the face that carries
+  the drawn region either way. Only a profile that merely touches the
+  boundary at a point is refused `loop_not_strictly_inside` — except
+  `draw_arc`'s `"pie"`/`"segment"` closes, which keep the stricter
+  every-vertex-inside check described under `hew.sketch.draw_arc` below
+  and refuse any boundary contact. Any point parameter accepts a derived-point locator
   (§5.3) in place of coordinates.
 - `hew.sketch.draw_arc` takes a `close`: `"open"` (default, a bare arc),
   `"pie"` (closed wedge — two radii to the center), or `"segment"`

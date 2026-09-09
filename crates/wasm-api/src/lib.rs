@@ -5382,33 +5382,27 @@ impl Scene {
                 })
             })
             .transpose()?;
-        let op = KernelOp::SplitFaceInner {
-            face: FaceId::from(KeyData::from_ffi(face)),
-            loop_path: local_points,
-            restore: None,
-            curve: mapped_curve,
-        };
+        // Same routing as the world path (`split_face_inner_impl`), through
+        // the def-scoped apply so every instance sees the edit.
         let (report, change) = self
             .doc
-            .apply_def_op(component, object_id(object), op)
+            .imprint_loop_on_face(
+                Some(component),
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                local_points,
+                mapped_curve,
+            )
             .map_err(doc_err)?;
         self.reconcile(&change);
-        match report {
-            KernelOpReport::FaceSplitInner(r) => {
-                recording::record(recording::RecordedCall::SplitFaceInnerInInstance {
-                    instance,
-                    object,
-                    face,
-                    loop_pts: loop_pts.to_vec(),
-                    curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
-                });
-                Ok(r.sub_face.data().as_ffi())
-            }
-            other => Err(api_err(
-                &other,
-                &"unexpected report kind for split_face_inner_in_instance",
-            )),
-        }
+        recording::record(recording::RecordedCall::SplitFaceInnerInInstance {
+            instance,
+            object,
+            face,
+            loop_pts: loop_pts.to_vec(),
+            curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+        });
+        Ok(report.region.data().as_ffi())
     }
 
     /// Removes one member Object from a component definition (component-edit-
@@ -6024,27 +6018,29 @@ impl Scene {
             .chunks_exact(3)
             .map(|c| Point3::new(c[0], c[1], c[2]))
             .collect();
-        let op = KernelOp::SplitFaceInner {
-            face: FaceId::from(KeyData::from_ffi(face)),
-            loop_path: points,
-            restore: None,
-            curve,
-        };
-        match self.apply_op(object, op)? {
-            KernelOpReport::FaceSplitInner(r) => {
-                recording::record(recording::RecordedCall::SplitFaceInner {
-                    object,
-                    face,
-                    loop_pts: loop_pts.to_vec(),
-                    curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
-                });
-                Ok(r.sub_face.data().as_ffi())
-            }
-            other => Err(api_err(
-                &other,
-                &"unexpected report kind for split_face_inner",
-            )),
-        }
+        // `Document::imprint_loop_on_face` decides the route: a loop clear of
+        // the boundary is a sub-face; one running along part of the boundary
+        // (a rectangle drawn to an edge's midpoint) is a chord split. Either
+        // way the face carrying the drawn region comes back — the one the
+        // next push/pull or paint acts on.
+        let (report, change) = self
+            .doc
+            .imprint_loop_on_face(
+                None,
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                points,
+                curve,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SplitFaceInner {
+            object,
+            face,
+            loop_pts: loop_pts.to_vec(),
+            curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+        });
+        Ok(report.region.data().as_ffi())
     }
 
     /// The Offset tool's solid-face commit: offsets `face`'s outer boundary

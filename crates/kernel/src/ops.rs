@@ -93,6 +93,20 @@ pub struct PushPullReport {
 }
 
 /// What `split_face` changed.
+/// How a closed loop drawn on a face imprints — see
+/// [`Object::plan_loop_imprint`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoopImprintPlan {
+    /// Clear of the boundary: a sub-face inside a new hole
+    /// ([`Object::split_face_inner`]).
+    Inner(Vec<Point3>),
+    /// Runs along part of the boundary: each path is a boundary-to-boundary
+    /// chord for [`Object::split_face`], applied in order.
+    Chords(Vec<Vec<Point3>>),
+    /// The loop coincides with the boundary itself; nothing to cut.
+    Nothing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaceSplitReport {
     /// The two faces replacing the input face, in no guaranteed order. The
@@ -3198,6 +3212,118 @@ impl Object {
     ///
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
+    /// Whether `p` lies on `face`'s plane and inside its outer boundary but
+    /// outside its holes — the containment test
+    /// [`crate::Document::imprint_loop_on_face`] uses to follow a drawn
+    /// region across successive chord splits. `false` for a stale face.
+    pub fn face_contains_point(&self, face: FaceId, p: Point3) -> bool {
+        let Some(f) = self.faces.get(face) else {
+            return false;
+        };
+        if f.plane.signed_distance(p).abs() > tol::PLANE_DIST {
+            return false;
+        }
+        let normal = f.plane.normal();
+        let outer: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+        if !point_inside_polygon(p, &outer, normal) {
+            return false;
+        }
+        !f.inner_loops.iter().any(|&il| {
+            let hole: Vec<Point3> = self.loop_positions(il).collect();
+            point_inside_polygon(p, &hole, normal)
+        })
+    }
+
+    /// A point strictly inside `loop_path`, a simple polygon lying on
+    /// `face`'s plane (`geom2d::interior_point_of_loops`' scanline, so it
+    /// holds for concave loops too). `None` when the face is unknown or the
+    /// loop has no interior.
+    pub(crate) fn loop_interior_point_on_face(
+        &self,
+        face: FaceId,
+        loop_path: &[Point3],
+    ) -> Option<Point3> {
+        let f = self.faces.get(face)?;
+        interior_point_of_loops(loop_path, &[], f.plane.normal())
+    }
+
+    /// Decides how a closed loop drawn on `face` imprints: a loop clear of
+    /// the face boundary becomes a new sub-face ([`Object::split_face_inner`]);
+    /// a loop that RUNS ALONG part of the outer boundary (a rectangle drawn
+    /// from one edge's midpoint to another's, or flush against an edge)
+    /// contributes only its off-boundary sides, each maximal run of which is
+    /// a boundary-to-boundary chord for [`Object::split_face`]. The drawn
+    /// region then exists as one of the split's faces rather than as a
+    /// hole-bounded sub-face — which is what SketchUp users expect when they
+    /// draw right up to an edge.
+    ///
+    /// Pure classification: no mutation, no tolerance beyond
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE). A loop that only
+    /// touches the boundary at isolated points (no shared segment) stays
+    /// [`LoopImprintPlan::Inner`] and is refused by that path's own gate.
+    ///
+    /// # Errors
+    /// - [`StickyError::UnknownFace`] — stale `face`.
+    /// - [`StickyError::PathTooShort`] — fewer than three points.
+    pub fn plan_loop_imprint(
+        &self,
+        face: FaceId,
+        loop_path: &[Point3],
+    ) -> Result<LoopImprintPlan, StickyError> {
+        let f = self.faces.get(face).ok_or(StickyError::UnknownFace)?;
+        if loop_path.len() < 3 {
+            return Err(StickyError::PathTooShort);
+        }
+        let outer: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+        let on_boundary = |p: Point3| -> bool {
+            (0..outer.len()).any(|i| {
+                point_on_segment(p, outer[i], outer[(i + 1) % outer.len()], tol::POINT_MERGE)
+            })
+        };
+        let n = loop_path.len();
+        // A segment lies on the boundary when both its endpoints AND its
+        // midpoint do — the midpoint test rejects a chord that merely joins
+        // two boundary points across the interior.
+        let seg_on_boundary: Vec<bool> = (0..n)
+            .map(|i| {
+                let a = loop_path[i];
+                let b = loop_path[(i + 1) % n];
+                let mid = Point3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0);
+                on_boundary(a) && on_boundary(b) && on_boundary(mid)
+            })
+            .collect();
+        if !seg_on_boundary.iter().any(|&b| b) {
+            return Ok(LoopImprintPlan::Inner(loop_path.to_vec()));
+        }
+        if seg_on_boundary.iter().all(|&b| b) {
+            // The loop IS the boundary: nothing to cut.
+            return Ok(LoopImprintPlan::Nothing);
+        }
+        // Rotate so index 0 starts an on-boundary run, then collect every
+        // maximal run of OFF-boundary segments as one chord path.
+        let start = (0..n)
+            .find(|&i| seg_on_boundary[i] && !seg_on_boundary[(i + 1) % n])
+            .expect("a mixed loop has a boundary→interior transition");
+        let mut chords: Vec<Vec<Point3>> = Vec::new();
+        let mut current: Vec<Point3> = Vec::new();
+        for k in 1..=n {
+            let i = (start + k) % n;
+            if seg_on_boundary[i] {
+                // The chord already ends at this segment's start (pushed as
+                // the previous off-boundary segment's end).
+                if !current.is_empty() {
+                    chords.push(std::mem::take(&mut current));
+                }
+            } else {
+                if current.is_empty() {
+                    current.push(loop_path[i]);
+                }
+                current.push(loop_path[(i + 1) % n]);
+            }
+        }
+        Ok(LoopImprintPlan::Chords(chords))
+    }
+
     pub fn split_face_inner(
         &mut self,
         face: FaceId,
@@ -4997,10 +5123,84 @@ impl Object {
         if self.faces.get(face).is_some_and(|f| f.surface.is_some()) {
             return false;
         }
-        match self.opposing_wall_depth(face) {
-            Some(depth) if distance < 0.0 => (-distance) >= depth - tol::POINT_MERGE,
-            _ => false,
+        if distance >= 0.0 {
+            return false;
         }
+        let opposing = self.opposing_wall_depth(face);
+        let blocking = self.blocking_wall_depth(face);
+        let depth = match (opposing, blocking) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => return false,
+        };
+        (-distance) >= depth - tol::POINT_MERGE
+    }
+
+    /// The inward distance from `face`'s plane to the nearest CO-FACING wall
+    /// the sweep would run into — a face whose outward normal points the
+    /// same way as `face`'s, whose plane lies inside the swept column's
+    /// depth, and whose footprint (projected along the push) touches or
+    /// overlaps `face`'s. Past that plane the translated walls would cut
+    /// through the material that wall bounds (a P-shaped slab: pushing the
+    /// bowl's east face past the stem's east face), which the flat
+    /// translate-and-build path can only refuse as non-manifold; realized as
+    /// a subtract instead, the same push carves the material exactly as a
+    /// user expects. `None` when no such wall exists — the common case, where
+    /// the flat path stays in charge. See [`Object::push_pull_overshoots`].
+    fn blocking_wall_depth(&self, face: FaceId) -> Option<f64> {
+        if self.watertight != WatertightState::Watertight {
+            return None;
+        }
+        let f = self.faces.get(face)?;
+        let mplane = f.plane;
+        let mnormal = mplane.normal();
+        let mouter: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+        let mut nearest = f64::INFINITY;
+        for (fid, other) in &self.faces {
+            if fid == face {
+                continue;
+            }
+            // Co-facing only: opposing walls are the through case
+            // (`opposing_wall_depth`); perpendicular faces are the pushed
+            // face's own walls and their neighbors.
+            if mnormal.dot(other.plane.normal()) <= tol::NORMAL_DIRECTION.mul_add(-1.0, 1.0) {
+                continue;
+            }
+            // Strictly inward of the pushed plane.
+            let oouter: Vec<Point3> = self.loop_positions(other.outer_loop).collect();
+            let Some(&sample) = oouter.first() else {
+                continue;
+            };
+            let inward = -mplane.signed_distance(sample);
+            if inward <= tol::POINT_MERGE {
+                continue;
+            }
+            // Footprints projected along the push: overlap OR mere contact —
+            // a shared boundary line is exactly where the extended walls
+            // would slice into the neighbor's material.
+            let projected: Vec<Point3> = oouter
+                .iter()
+                .map(|&p| {
+                    let d = mplane.signed_distance(p);
+                    Point3::new(
+                        p.x - mnormal.x * d,
+                        p.y - mnormal.y * d,
+                        p.z - mnormal.z * d,
+                    )
+                })
+                .collect();
+            let touches = mouter
+                .iter()
+                .any(|&p| point_inside_polygon(p, &projected, mnormal))
+                || projected
+                    .iter()
+                    .any(|&p| point_inside_polygon(p, &mouter, mnormal))
+                || boundaries_contact(&mouter, &projected);
+            if touches {
+                nearest = nearest.min(inward);
+            }
+        }
+        nearest.is_finite().then_some(nearest)
     }
 
     /// The inward distance from `face`'s plane to the nearest opposing wall

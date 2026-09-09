@@ -49,6 +49,7 @@ Draw directly on a solid's face to split it into regions (see [Drawing](/learn/d
 - **Pull outward** → a boss or pad growing from the face.
 - **Push inward** → a recess or pocket.
 - **Push all the way through** → a hole. When the cut passes fully through the solid, Hew removes the swept material entirely. If the cut severs the object into disconnected pieces, each piece becomes its own independent, solid Object.
+- **Push past a neighboring face** → a notch. On an L- or P-shaped solid, pushing one face inward past the plane of a face that points the same way (the wider part's end past the narrower part's end) carves the material behind it, the same way a through-cut does, instead of stopping at the plane.
 
 ![A box with a circular hole punched clean through it, the opening visible at the back face](/docs/pushpull-throughcut.webp)
 

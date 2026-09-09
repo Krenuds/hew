@@ -45,8 +45,8 @@ pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
-    FollowMePath, HistoryOrigin, InsertOptions, InsertReport, LibraryProvenance,
-    MAX_COMPONENT_DEPTH, MaterialScope, NodeId, PendingActionKind,
+    FollowMePath, HistoryOrigin, InsertOptions, InsertReport, LibraryProvenance, LoopImprintReport,
+    LoopImprintRoute, MAX_COMPONENT_DEPTH, MaterialScope, NodeId, PendingActionKind,
 };
 pub use error::TopologyError;
 pub use guide::Guide;
@@ -70,7 +70,7 @@ pub use offset::{
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
-    Operand, PushPullError, PushPullReport, SliceError, StickyError,
+    LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError,
 };
 pub use scenes::{DisplayState, ResolvedScene, Scene, SceneDrift, SceneProps, SectionPlaneState};
 pub use serialize::{
