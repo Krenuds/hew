@@ -2,7 +2,8 @@
 //! notes; the kernel-surface recipes are api-kernel-map.md §1.3/§1.4).
 //!
 //! `push_pull` reproduces the wasm boundary's three-way branch exactly
-//! (api-kernel-map.md §1.3, `Scene::push_pull`): a through-cut routes to
+//! (api-kernel-map.md §1.3, `Scene::push_pull`): a through push or pull
+//! (past an opposing or co-facing wall) routes to
 //! [`kernel::Document::push_pull_through`], a flat imprinted sub-face
 //! routes to `KernelOp::ExtrudeSubFace`, everything else to
 //! `KernelOp::PushPull` — both of the latter through

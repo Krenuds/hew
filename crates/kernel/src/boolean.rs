@@ -778,7 +778,8 @@ fn point_segment_distance(p: Point3, a: Point3, b: Point3) -> f64 {
 
 /// Welds the kept faces into a watertight Object, then splits a disconnected
 /// result into one shell per connected component.
-fn assemble(faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, BooleanError> {
+fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, BooleanError> {
+    split_edges_at_vertices(&mut faces);
     let mut positions: Vec<Point3> = Vec::new();
     let has_holes = faces.iter().any(|f| !f.holes.is_empty());
 
@@ -833,6 +834,82 @@ fn assemble(faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, Bool
     obj.validate()
         .map_err(|_| BooleanError::DegenerateContact)?;
     Ok(obj)
+}
+
+/// Splits every kept-face edge at any kept-face vertex lying in its interior,
+/// so the weld sees matching half-edges on both sides of every seam.
+///
+/// Seams are imprinted identically on both faces they cut, and where a seam
+/// meets a face boundary the intersection curve normally continues onto the
+/// neighbouring face through the same point, so the neighbour is split there
+/// too. That continuation can degenerate to a single point: a prism whose
+/// bottom rests exactly on a step's top face and reaches past the step's far
+/// edge cuts that top face along the prism's side, but the prism's side meets
+/// the step's far WALL only at the edge's endpoint, so no seam reaches the
+/// wall and its top edge stays whole while the top face's copy of that edge
+/// is split — a T-junction the weld cannot pair. Inserting the vertex into
+/// every edge it lies on restores the by-construction consistency; the added
+/// vertices are collinear with the edge they split, so no face leaves its
+/// plane, and a genuine non-manifold contact still fails the watertight check
+/// below because the extra vertices never invent a missing twin face.
+fn split_edges_at_vertices(faces: &mut [OrientedFace]) {
+    let mut vertices: Vec<Point3> = Vec::new();
+    for f in faces.iter() {
+        for &p in f.outer.iter().chain(f.holes.iter().flatten()) {
+            intern(p, &mut vertices);
+        }
+    }
+    let split = |ring: &mut Vec<Point3>| {
+        let n = ring.len();
+        let mut out: Vec<Point3> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (p, q) = (ring[i], ring[(i + 1) % n]);
+            out.push(p);
+            let len2 = (q - p).length_squared();
+            if len2 < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
+                continue;
+            }
+            // Cheap box reject first: the scan visits every kept vertex per
+            // edge (the same shape as the interning below), and almost none
+            // are anywhere near a given edge.
+            let (lo, hi) = (
+                Point3::new(
+                    p.x.min(q.x) - tol::POINT_MERGE,
+                    p.y.min(q.y) - tol::POINT_MERGE,
+                    p.z.min(q.z) - tol::POINT_MERGE,
+                ),
+                Point3::new(
+                    p.x.max(q.x) + tol::POINT_MERGE,
+                    p.y.max(q.y) + tol::POINT_MERGE,
+                    p.z.max(q.z) + tol::POINT_MERGE,
+                ),
+            );
+            let mut inside: Vec<(f64, Point3)> = vertices
+                .iter()
+                .filter(|&&r| {
+                    r.x >= lo.x
+                        && r.x <= hi.x
+                        && r.y >= lo.y
+                        && r.y <= hi.y
+                        && r.z >= lo.z
+                        && r.z <= hi.z
+                        && !r.approx_eq(p, tol::POINT_MERGE)
+                        && !r.approx_eq(q, tol::POINT_MERGE)
+                        && point_segment_distance(r, p, q) <= tol::POINT_MERGE
+                })
+                .map(|&r| ((r - p).dot(q - p) / len2, r))
+                .collect();
+            inside.sort_by(|a, b| a.0.total_cmp(&b.0));
+            out.extend(inside.into_iter().map(|(_, r)| r));
+        }
+        *ring = out;
+    };
+    for f in faces.iter_mut() {
+        split(&mut f.outer);
+        for h in f.holes.iter_mut() {
+            split(h);
+        }
+    }
 }
 
 /// Replaces the object's shells with one per connected component of the

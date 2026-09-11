@@ -46,7 +46,20 @@ below.
 - Push/pull past a co-facing wall: an inward push whose swept column would
   cross the plane of a face pointing the same way (the bowl of a P-shaped
   slab pushed past the stem's end) routes to the subtract path and carves
-  the material, where the flat translate-and-build path could only refuse
+  the material, and an outward pull whose prism would grow past such a
+  wall ahead of it (the stem pulled past the bowl's end, or a notched bowl
+  pulled back out) or into a wall facing it across a gap (one arm of a U
+  pulled into the other) routes to the union path, where the flat
+  translate-and-build path could only refuse; a pull exactly flush with
+  the wall merges the two faces into one. A face whose boundary vertex is
+  shared with a face it has no edge in common with (the exposed end of a
+  thick part where a thinner part joins it — its corner is also the thin
+  part's wall corner) takes the boolean route at any distance, since a
+  rigid translate would bend that wall off its plane. The boolean's
+  assembly splits every edge at any result vertex lying on it, so a seam
+  whose continuation onto a neighbouring face degenerates to a point (a
+  prism resting on a step's top and reaching past the step's far edge)
+  still welds watertight
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent

@@ -5102,38 +5102,98 @@ impl Object {
         Ok((positive, negative))
     }
 
-    /// Whether an inward push/pull of `face` by `distance` drives it into or
-    /// past opposing material — the through case that must become a subtract
-    /// rather than a translate.
+    /// Whether a push/pull of `face` by `distance` drives it into or past
+    /// other material of the same solid — the through case that must become
+    /// a boolean ([`Object::push_through`]) rather than a translate.
     ///
-    /// Returns `false` for outward pulls (which never remove material),
-    /// non-solids, or stale faces. Otherwise it finds the nearest opposing
-    /// wall: a face that front-faces `face` (its outward normal points back
-    /// toward `face`) and whose projected footprint overlaps `face`'s, and
-    /// reports the push as through once `|distance|` reaches that wall. This is
-    /// the wall the swept face would punch through; it is detected by the wall
-    /// *face* (not its vertices), so a small imprint over a large opposite wall
-    /// — the hole-punch case — is caught even though no wall vertex lies in the
-    /// imprint's column.
+    /// Inward: the nearest opposing wall (a face that front-faces `face` and
+    /// whose projected footprint overlaps `face`'s — the wall the swept face
+    /// would punch through, detected by the wall *face* rather than its
+    /// vertices so a small imprint over a large opposite wall is caught) or
+    /// the nearest co-facing wall the sweep's side walls would slice into
+    /// ([`Object::blocking_wall_depth`]); the push is through once
+    /// `|distance|` reaches it. Outward: the nearest wall AHEAD of the face
+    /// that the pulled prism would grow into or past — a co-facing one
+    /// ([`Object::engulfing_wall_depth`]: the stem of a P-shaped slab pulled
+    /// out past the bowl's end, or a notched bowl pulled back out past the
+    /// stem) or a facing one across a gap ([`Object::facing_wall_depth`]:
+    /// one arm of a U pulled across the slot into the other); the pull is
+    /// through once `distance` reaches it. Either way, a face whose boundary
+    /// vertex is pinned by a face it shares no edge with
+    /// ([`Object::moved_ring_is_pinned`]) is through at ANY distance, since
+    /// no translation of its ring can leave that other face planar.
+    /// Returns `false` for non-solids, stale faces, and attributed cylinder
+    /// walls (which never overshoot: push/pull on them is a radial offset of
+    /// the whole logical wall, the true-curves design §4.6, and deep pushes
+    /// refuse there with a typed error).
     pub fn push_pull_overshoots(&self, face: FaceId, distance: f64) -> bool {
-        // Attributed cylinder walls never overshoot into a through-cut:
-        // push/pull on them is a radial offset of the whole logical wall
-        // (the true-curves design §4.6), and deep pushes refuse there
-        // with a typed error instead of punching through.
         if self.faces.get(face).is_some_and(|f| f.surface.is_some()) {
             return false;
         }
-        if distance >= 0.0 {
-            return false;
+        if self.moved_ring_is_pinned(face) {
+            return true;
         }
-        let opposing = self.opposing_wall_depth(face);
-        let blocking = self.blocking_wall_depth(face);
+        let (opposing, blocking, reach) = if distance >= 0.0 {
+            (
+                self.facing_wall_depth(face),
+                self.engulfing_wall_depth(face),
+                distance,
+            )
+        } else {
+            (
+                self.opposing_wall_depth(face),
+                self.blocking_wall_depth(face),
+                -distance,
+            )
+        };
         let depth = match (opposing, blocking) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) | (None, Some(a)) => a,
             (None, None) => return false,
         };
-        (-distance) >= depth - tol::POINT_MERGE
+        reach >= depth - tol::POINT_MERGE
+    }
+
+    /// Whether translating `face`'s boundary ring in place would drag a
+    /// vertex that some OTHER face is built on — a face sharing only that
+    /// vertex with `face` (no edge), whose plane the sweep leaves. A P-shaped
+    /// slab whose bowl is thinner than its stem has one at the bowl's inner
+    /// corner: the stem's exposed north face, the bowl's top, the stem's
+    /// east wall, and the bowl's south wall all meet there, and the south
+    /// wall shares no edge with the north face yet would be bent off its
+    /// plane by any translation of it. The flat path can only refuse such a
+    /// sweep (its validator sees the bent face); realized as a boolean of
+    /// the swept prism instead, the bowl's corner stays where it is and the
+    /// moved block simply grows past or recedes from it. Faces whose plane
+    /// CONTAINS the sweep direction (the side walls around `face`) reshape
+    /// in-plane under a translation and do not count.
+    fn moved_ring_is_pinned(&self, face: FaceId) -> bool {
+        if self.watertight != WatertightState::Watertight {
+            return false;
+        }
+        let Some(f) = self.faces.get(face) else {
+            return false;
+        };
+        let normal = f.plane.normal();
+        let mut moved: std::collections::BTreeSet<VertexId> = std::collections::BTreeSet::new();
+        let mut neighbors: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
+        for loop_id in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {
+            for h in self.loop_half_edges(loop_id) {
+                moved.insert(self.half_edges[h].origin);
+                if let Some(twin) = self.half_edges[h].twin {
+                    neighbors.insert(self.loops[self.half_edges[twin].loop_id].face);
+                }
+            }
+        }
+        self.half_edges.values().any(|he| {
+            if !moved.contains(&he.origin) {
+                return false;
+            }
+            let other = self.loops[he.loop_id].face;
+            other != face
+                && !neighbors.contains(&other)
+                && self.faces[other].plane.normal().dot(normal).abs() > tol::NORMAL_DIRECTION
+        })
     }
 
     /// The inward distance from `face`'s plane to the nearest CO-FACING wall
@@ -5148,6 +5208,29 @@ impl Object {
     /// user expects. `None` when no such wall exists — the common case, where
     /// the flat path stays in charge. See [`Object::push_pull_overshoots`].
     fn blocking_wall_depth(&self, face: FaceId) -> Option<f64> {
+        self.co_facing_wall_depth(face, -1.0)
+    }
+
+    /// The outward distance from `face`'s plane to the nearest CO-FACING wall
+    /// AHEAD of it — the mirror image of [`Object::blocking_wall_depth`]: a
+    /// face whose outward normal points the same way as `face`'s, whose
+    /// plane lies outward of `face`'s, and whose footprint (projected along
+    /// the pull) touches or overlaps `face`'s. Pulling `face` that far
+    /// translates its side walls through the material that wall bounds (a
+    /// P-shaped slab: pulling the stem's east face past the bowl's east
+    /// face, or pulling a notched bowl back out past the stem), which the
+    /// flat translate path can only refuse as non-manifold; realized as a
+    /// union of the pulled prism instead, the pull grows the material exactly
+    /// as a user expects. `None` when no such wall exists.
+    fn engulfing_wall_depth(&self, face: FaceId) -> Option<f64> {
+        self.co_facing_wall_depth(face, 1.0)
+    }
+
+    /// Shared body of [`Object::blocking_wall_depth`] (`along = -1`, walls
+    /// inward of the face) and [`Object::engulfing_wall_depth`] (`along =
+    /// +1`, walls outward of it): the distance along `along × normal` to the
+    /// nearest co-facing wall whose footprint touches or overlaps `face`'s.
+    fn co_facing_wall_depth(&self, face: FaceId, along: f64) -> Option<f64> {
         if self.watertight != WatertightState::Watertight {
             return None;
         }
@@ -5166,12 +5249,12 @@ impl Object {
             if mnormal.dot(other.plane.normal()) <= tol::NORMAL_DIRECTION.mul_add(-1.0, 1.0) {
                 continue;
             }
-            // Strictly inward of the pushed plane.
+            // Strictly on the swept side of the moved plane.
             let oouter: Vec<Point3> = self.loop_positions(other.outer_loop).collect();
             let Some(&sample) = oouter.first() else {
                 continue;
             };
-            let inward = -mplane.signed_distance(sample);
+            let inward = along * mplane.signed_distance(sample);
             if inward <= tol::POINT_MERGE {
                 continue;
             }
@@ -5208,6 +5291,27 @@ impl Object {
     /// through. `None` if `face` is stale, the object is not solid, or nothing
     /// faces it across the swept column. See [`Object::push_pull_overshoots`].
     fn opposing_wall_depth(&self, face: FaceId) -> Option<f64> {
+        self.front_facing_wall_depth(face, -1.0)
+    }
+
+    /// The outward distance from `face`'s plane to the nearest wall that
+    /// faces it across a gap — the mirror image of
+    /// [`Object::opposing_wall_depth`]: a face whose outward normal points
+    /// back toward `face`, whose plane lies outward of `face`'s, and whose
+    /// projected footprint overlaps `face`'s (one arm of a U-shaped part
+    /// seen from the other arm across the slot). Pulling `face` that far
+    /// drives it into the material that wall bounds, which the flat path
+    /// refuses; realized as a union instead, the pull bridges the gap.
+    /// `None` when nothing faces `face` across its swept column.
+    fn facing_wall_depth(&self, face: FaceId) -> Option<f64> {
+        self.front_facing_wall_depth(face, 1.0)
+    }
+
+    /// Shared body of [`Object::opposing_wall_depth`] (`along = -1`, walls
+    /// inward of the face) and [`Object::facing_wall_depth`] (`along = +1`,
+    /// walls outward of it): the distance along `along × normal` to the
+    /// nearest part of a front-facing wall whose footprint overlaps `face`'s.
+    fn front_facing_wall_depth(&self, face: FaceId, along: f64) -> Option<f64> {
         if self.watertight != WatertightState::Watertight {
             return None;
         }
@@ -5239,11 +5343,11 @@ impl Object {
             if !overlaps {
                 continue;
             }
-            // Nearest part of this opposing wall along the inward normal.
+            // Nearest part of this wall along the swept direction.
             for &p in &oouter {
-                let inward = -mplane.signed_distance(p);
-                if inward > tol::POINT_MERGE {
-                    nearest = nearest.min(inward);
+                let ahead = along * mplane.signed_distance(p);
+                if ahead > tol::POINT_MERGE {
+                    nearest = nearest.min(ahead);
                 }
             }
         }
@@ -5279,13 +5383,18 @@ impl Object {
         Some(profile)
     }
 
-    /// Push `face` inward by `distance` (negative) past opposing material,
-    /// realized as a subtract: the face's profile swept inward by
-    /// `distance` is removed from the solid — a recess that breaks the far wall
-    /// becomes a through-hole, and a cut that fully severs the solid leaves a
-    /// multi-shell result (the caller splits it with
-    /// [`Object::split_connected_components`]). Per-face materials and UV frames
-    /// propagate through the boolean. The source is borrowed, not mutated.
+    /// Push or pull `face` by `distance` past other material of the same
+    /// solid, realized as a boolean of the face's profile swept by
+    /// `distance`. Inward (negative): a subtract — the swept material is
+    /// removed, a recess that breaks the far wall becomes a through-hole, and
+    /// a cut that fully severs the solid leaves a multi-shell result (the
+    /// caller splits it with [`Object::split_connected_components`]).
+    /// Outward (positive): a union — the swept prism is added, growing past
+    /// the co-facing wall ahead of the face (the stem of a P-shaped slab
+    /// pulled out past the bowl's end) or across a gap into the wall facing
+    /// it (one arm of a U pulled into the other) as one solid. Per-face materials and
+    /// UV frames propagate through the boolean. The source is borrowed, not
+    /// mutated.
     ///
     /// # Errors
     /// - [`PushPullError::ObjectNotSolid`] — not watertight.
@@ -5293,7 +5402,7 @@ impl Object {
     /// - [`PushPullError::DistanceTooSmall`] — `|distance|` below tolerance.
     /// - [`PushPullError::WouldVanish`] — the subtract removes all material.
     /// - [`PushPullError::NonManifoldResult`] — the swept tool is degenerate or
-    ///   the cut is tangent (refused, not repaired).
+    ///   the contact is tangent (refused, not repaired).
     pub fn push_through(&self, face: FaceId, distance: f64) -> Result<Object, PushPullError> {
         if self.watertight != WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
@@ -5309,10 +5418,16 @@ impl Object {
             .ok_or(PushPullError::NonManifoldResult)?;
         let tool = Object::from_extrusion(&profile, distance)
             .map_err(|_| PushPullError::NonManifoldResult)?;
-        match Object::boolean(BooleanOp::Subtract, self, &tool, &Transform::IDENTITY) {
+        let op = if distance < 0.0 {
+            BooleanOp::Subtract
+        } else {
+            BooleanOp::Union
+        };
+        match Object::boolean(op, self, &tool, &Transform::IDENTITY) {
             Ok(mut result) => {
-                // Dissolve coplanar seams the cut introduced (a cut wall
-                // flush with an existing wall must read as ONE face), but
+                // Dissolve coplanar seams the boolean introduced (a cut or
+                // grown wall flush with an existing wall must read as ONE
+                // face), but
                 // preserve this object's pre-existing coplanar edges — face
                 // imprints awaiting their own push/pull. The tool is a fresh
                 // extrusion with no imprints, so it contributes none.

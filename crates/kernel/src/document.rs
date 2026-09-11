@@ -10425,16 +10425,19 @@ impl Document {
         Ok(((a, b), change))
     }
 
-    /// Push `face` of a visible world solid inward by `distance` *past* opposing
-    /// material, as a subtract: material the swept face passes through is
-    /// removed — a recess that breaks the far wall becomes a through-hole, and a
-    /// cut that fully severs the solid yields two (or more) independent Objects.
-    /// The source is hidden (tombstone); the result pieces become top-level
-    /// world objects. Undoable; handles stable. Routed to by the push/pull entry
-    /// when [`Object::push_pull_overshoots`] reports the through case.
+    /// Push or pull `face` of a visible world solid by `distance` *past* other
+    /// material of the same solid, as a boolean ([`Object::push_through`]).
+    /// Inward: a subtract — material the swept face passes through is removed,
+    /// a recess that breaks the far wall becomes a through-hole, and a cut
+    /// that fully severs the solid yields two (or more) independent Objects.
+    /// Outward: a union — the pulled prism grows past the co-facing wall ahead
+    /// of the face into one solid. The source is hidden (tombstone); the
+    /// result pieces become top-level world objects. Undoable; handles
+    /// stable. Routed to by the push/pull entry when
+    /// [`Object::push_pull_overshoots`] reports the through case.
     ///
     /// Returns `(result_ids, DocChange)`. `Err` (document untouched) if the
-    /// object is unknown/hidden or the subtract is degenerate / removes all
+    /// object is unknown/hidden or the boolean is degenerate / removes all
     /// material — see [`PushPullError`](crate::ops::PushPullError).
     pub fn push_pull_through(
         &mut self,

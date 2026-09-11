@@ -6076,11 +6076,16 @@ impl Scene {
     /// sub-face (drawn inside an Object) auto-routes to wall-generating
     /// extrude (boss/recess); any other face uses the translate-mode push/pull.
     ///
-    /// An inward push that reaches **past the opposite wall** auto-routes to a
+    /// An inward push that reaches **past the opposite wall** (or past a
+    /// co-facing wall its side walls would slice into) auto-routes to a
     /// through-cut subtract: material is removed (a recess that breaks the
     /// far wall becomes a through-hole) and a cut that severs the solid yields
-    /// two objects. The returned report then has [`PushPullJs::is_through`] set
-    /// and carries the new object handles in [`PushPullJs::result_objects`].
+    /// two objects. An outward pull that reaches **past a wall ahead of the
+    /// face** — one pointing the same way (the stem of a P-shaped slab pulled
+    /// past the bowl's end) or one facing it across a gap — auto-routes to a
+    /// union that grows the material straight through as one object. Either
+    /// way the returned report has [`PushPullJs::is_through`] set and carries
+    /// the new object handles in [`PushPullJs::result_objects`].
     pub fn push_pull(
         &mut self,
         object: u64,
@@ -6090,8 +6095,9 @@ impl Scene {
         let face_id = FaceId::from(KeyData::from_ffi(face));
         let oid = object_id(object);
 
-        // Through-cut detection: an inward push past the opposite wall
-        // becomes a subtract, not a translate.
+        // Through detection: an inward push past the opposite wall becomes
+        // a subtract, an outward pull past a co-facing wall a union — not a
+        // translate.
         if self
             .doc
             .object(oid)
