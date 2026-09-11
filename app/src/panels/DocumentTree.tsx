@@ -661,7 +661,7 @@ export function DocumentTree({
             zIndex: 1000,
             padding: '3px 8px',
             borderRadius: '4px',
-            background: 'var(--panel-bg, #2a2a2e)',
+            background: 'var(--surface-overlay, #2a2a2e)',
             border: '1px solid var(--accent-base)',
             color: 'var(--text-primary, #eee)',
             fontSize: '12px',

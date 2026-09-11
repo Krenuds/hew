@@ -69,3 +69,40 @@ test('a drop that cannot land says why in a toast instead of doing nothing', asy
   const members = await page.evaluate((g) => window.__hew_test!.getGroupMembers(g), ids.g)
   expect(members.map((m) => m.id)).not.toContain(ids.a)
 })
+
+/** Relative luminance of a `rgb(r, g, b)` / `rgba(...)` computed color. */
+function luminance(css: string): number {
+  const m = css.match(/[\d.]+/g)!.map(Number)
+  return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255
+}
+
+for (const theme of ['light', 'dark'] as const) {
+  test(`the drag ghost reads in the ${theme} theme`, async ({ page }) => {
+    const ids = await scene(page)
+    await page.evaluate((theme) => document.documentElement.setAttribute('data-theme', theme), theme)
+    const src = page.locator(`[data-drop-target="object:${ids.a}"]`)
+    const dst = page.locator(`[data-drop-target="group:${ids.g}"]`)
+    const sb = (await src.boundingBox())!
+    const db = (await dst.boundingBox())!
+    await page.mouse.move(sb.x + 40, sb.y + sb.height / 2)
+    await page.mouse.down()
+    for (let i = 1; i <= 10; i++) {
+      await page.mouse.move(sb.x + 40 + i, sb.y + sb.height / 2 + ((db.y - sb.y) * i) / 10)
+    }
+    const ghost = page.getByTestId('outliner-drag-ghost')
+    await expect(ghost).toBeVisible()
+    // The label must contrast with its own backdrop: light text on a dark
+    // chip in the dark theme, dark text on a light chip in the light theme
+    // (playtest: the light theme showed black on black).
+    const { bg, fg } = await ghost.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return { bg: s.backgroundColor, fg: s.color }
+    })
+    await page.screenshot({ path: `test-results/outliner-ghost-${theme}.png` })
+    const contrast = Math.abs(luminance(bg) - luminance(fg))
+    expect(contrast, `${theme}: bg ${bg} fg ${fg}`).toBeGreaterThan(0.5)
+    if (theme === 'light') expect(luminance(bg)).toBeGreaterThan(luminance(fg))
+    else expect(luminance(bg)).toBeLessThan(luminance(fg))
+    await page.mouse.up()
+  })
+}
