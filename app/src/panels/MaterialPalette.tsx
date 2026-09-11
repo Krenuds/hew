@@ -67,6 +67,9 @@ interface Props {
   onDeleteMaterial?: (id: bigint) => void
 }
 
+/** Two clicks on one swatch this close together rename it (see `clickSwatch`). */
+const RENAME_DOUBLE_CLICK_MS = 500
+
 const PANEL_STYLE: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
@@ -267,6 +270,26 @@ export function MaterialPalette({
   const [editingText, setEditingText] = useState('')
   const [editingError, setEditingError] = useState<string | null>(null)
 
+  // A double-click on a swatch renames it — detected by hand from the two
+  // clicks rather than the browser's `dblclick`: selecting a material on the
+  // first click moves the opacity slider under the newly selected row, so
+  // the rows above shift and the second click lands on the row container
+  // instead of the name, and the browser never fires `dblclick` (its two
+  // clicks hit different nodes). Two clicks on the same material within
+  // `RENAME_DOUBLE_CLICK_MS` open the editor, wherever in the row they land.
+  const lastSwatchClickRef = useRef<{ id: bigint; at: number } | null>(null)
+  function clickSwatch(id: bigint, name: string) {
+    if (editingMaterialId === id) return // clicks inside the open editor are its own
+    const now = Date.now()
+    const last = lastSwatchClickRef.current
+    lastSwatchClickRef.current = { id, at: now }
+    if (last !== null && last.id === id && now - last.at <= RENAME_DOUBLE_CLICK_MS) {
+      lastSwatchClickRef.current = null
+      startRename(id, name)
+      return
+    }
+    onSelectMaterial(id)
+  }
   function startRename(id: bigint, currentName: string) {
     if (onRenameMaterial === undefined) return
     setEditingMaterialId(id)
@@ -513,13 +536,12 @@ export function MaterialPalette({
         const name = info.name()
 
         return (
-          <div key={id.toString()}>
+          <div key={id.toString()} onClick={() => clickSwatch(id, name)}>
             <div
               ref={selected ? selectedRowRef : undefined}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
               <div
-                onClick={() => onSelectMaterial(id)}
                 title={name}
                 style={{
                   ...SWATCH_STYLE,
@@ -568,7 +590,6 @@ export function MaterialPalette({
                     color: selected ? 'var(--accent-base)' : 'var(--text-secondary, #ccc)',
                     cursor: 'pointer',
                   }}
-                  onClick={() => onSelectMaterial(id)}
                   onDoubleClick={() => startRename(id, name)}
                 >
                   {name}
@@ -577,7 +598,10 @@ export function MaterialPalette({
               {!isEditing && onRenameMaterial !== undefined && (
                 <button
                   type="button"
-                  onClick={() => startRename(id, name)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    startRename(id, name)
+                  }}
                   aria-label={`Rename material ${name}`}
                   style={{
                     background: 'none',
@@ -596,7 +620,10 @@ export function MaterialPalette({
               {!isEditing && onDeleteMaterial !== undefined && (
                 <button
                   type="button"
-                  onClick={() => onDeleteMaterial(id)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onDeleteMaterial(id)
+                  }}
                   aria-label={`Delete material ${name}`}
                   style={{
                     background: 'none',

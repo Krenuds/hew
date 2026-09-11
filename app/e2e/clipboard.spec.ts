@@ -110,6 +110,9 @@ test('Copy then Paste places a second box at the click point', async ({ page }) 
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
 
   await page.keyboard.press('Control+v')
+  // The paste arms asynchronously (the clipboard is read first); wait for
+  // the placement hint before clicking, as a hand would wait for the ghost.
+  await expect(page.getByText('Click to place', { exact: false })).toBeVisible()
   // The ghost is armed — a click on open ground commits the paste there.
   await clickWorld(page, ctx, 2, -2, 0)
 
@@ -166,6 +169,7 @@ test('Cut removes the original and leaves the clipboard pasteable', async ({ pag
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 
   await page.keyboard.press('Control+v')
+  await expect(page.getByText('Click to place', { exact: false })).toBeVisible()
   await clickWorld(page, ctx, 2, -2, 0)
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })

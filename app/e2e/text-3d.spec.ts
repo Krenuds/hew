@@ -95,7 +95,7 @@ test('Draw ▸ 3D Text…: dialog → placement on the ground → single-step un
   // solid(s), the fold into a component, AND the glyph-injection sketch
   // gesture that preceded it — as a single step (docs/design/3d-text.md).
   await page.getByTestId('menu-bar').getByRole('button', { name: 'Edit' }).click()
-  await page.getByText('Undo', { exact: true }).click()
+  await page.getByText(/^Undo\b/).click()
 
   await page.waitForFunction(() => window.__hew_test!.canUndo() === false, null, {
     timeout: 5000,
@@ -110,7 +110,7 @@ test('Draw ▸ 3D Text…: dialog → placement on the ground → single-step un
 
   // ONE Redo restores the whole placement again, as one step.
   await page.getByTestId('menu-bar').getByRole('button', { name: 'Edit' }).click()
-  await page.getByText('Redo', { exact: true }).click()
+  await page.getByText(/^Redo\b/).click()
 
   await page.waitForFunction(() => window.__hew_test!.canRedo() === false, null, {
     timeout: 5000,
