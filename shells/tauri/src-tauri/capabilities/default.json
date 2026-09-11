@@ -22,6 +22,7 @@
     "core:window:allow-start-resize-dragging",
     "core:window:allow-set-decorations",
     "dialog:default",
+    "clipboard-manager:allow-read-text",
     "opener:allow-open-url",
     "opener:allow-default-urls"
   ]

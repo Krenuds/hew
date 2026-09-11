@@ -18,6 +18,7 @@ import { MenuBar } from './panels/MenuBar'
 import { CAMERA_HANDOFF_TOOL_NAMES } from './panels/cameraHandoffTools'
 import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
+import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
 import { TagsPanel } from './panels/TagsPanel'
 import { ComponentsPanel, PurgeUnusedButton } from './panels/ComponentsPanel'
@@ -3898,19 +3899,6 @@ export default function App() {
   }
 
   const menuActionRef = useRef<(payload: string) => void>(() => {})
-  /** Whether keyboard focus is in a text field (an input, a textarea, or a
-   *  contenteditable) — the same typing guard the keydown effects use. */
-  const textFieldFocused = (): boolean => {
-    const el = document.activeElement as HTMLElement | null
-    return el !== null && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
-  }
-  /** Run a text editing command on the focused text field and report
-   *  whether one had focus (so the scene action must not run). */
-  const forwardToTextField = (command: 'copy' | 'cut' | 'selectAll'): boolean => {
-    if (!textFieldFocused()) return false
-    document.execCommand(command)
-    return true
-  }
   menuActionRef.current = (payload: string) => {
     // Palette "jump" entries (dynamic Model group) carry their target in the
     // id. Nodes: select + reveal in the Outliner/Object Info (the tree
@@ -4041,9 +4029,22 @@ export default function App() {
         if (forwardToTextField('cut')) break
         handleCut()
         break
-      case 'edit-paste': handlePaste(false); break
+      case 'edit-paste':
+        // Desktop only: the native Edit item fires here even while a text
+        // field has focus (see main.rs's Edit menu comment) — paste OS text
+        // into the field through the clipboard plugin instead of the scene.
+        // On the web the browser pastes into fields itself and this
+        // dispatch only ever comes from the in-app menu.
+        if (isTauri && isTextFieldFocused()) {
+          void import('@tauri-apps/plugin-clipboard-manager').then(({ readText }) =>
+            pasteTextIntoFocusedField(readText),
+          )
+          break
+        }
+        handlePaste(false)
+        break
       case 'edit-paste-in-place':
-        if (textFieldFocused()) break
+        if (isTextFieldFocused()) break
         handlePaste(true)
         break
       case 'close':

@@ -15,8 +15,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{
     menu::{
-        CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, MenuBuilder, MenuItem, MenuItemBuilder,
-        MenuItemKind, PredefinedMenuItem, SubmenuBuilder,
+        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
+        PredefinedMenuItem, SubmenuBuilder,
     },
     Emitter, Manager,
 };
@@ -2520,6 +2520,7 @@ fn main() {
         }))
         // Register the dialog plugin (open/save native dialogs).
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Opener: lets the webview hand a URL (the getting-started guide link on
         // the welcome screen) to the OS default browser instead of trying to
         // navigate the app's own webview.
@@ -2769,21 +2770,18 @@ fn main() {
             // makes Cmd+C/X/A work in a rename field at all: a WebKit text
             // field has no editing key equivalents of its own on macOS and
             // relies on the Edit menu for them. A gated (disabled) item has
-            // no key equivalent, hence ungated on macOS. Paste is the native
-            // menu action there (`PredefinedMenuItem::paste`, shown as ⌘V):
-            // the page cannot read the OS clipboard to paste into a field
-            // itself, and the viewport's Cmd+V still reaches the JS handler
-            // first. On Windows and Linux the menu library's accelerator
+            // no key equivalent, hence ungated on macOS. Paste is the same
+            // kind of item: a fire that lands in a text field reads the OS
+            // clipboard through the clipboard-manager plugin and inserts the
+            // text, so every Edit item is an ordinary one (no native paste
+            // action with its own icon). On Windows and Linux the menu
+            // library's accelerator
             // table runs BEFORE the webview, so these items stay
             // accelerator-free and gated there (the JS handler owns the
             // keyboard path), exactly as before.
             let edit_cut = edit_item(handle, &mut gated, "edit-cut", "Cut", "CmdOrCtrl+X")?;
             let edit_copy = edit_item(handle, &mut gated, "edit-copy", "Copy", "CmdOrCtrl+C")?;
-            let edit_paste: MenuItemKind<tauri::Wry> = if cfg!(target_os = "macos") {
-                PredefinedMenuItem::paste(handle, Some("Paste"))?.kind()
-            } else {
-                gated_item(handle, &mut gated, "edit-paste", "Paste", None, None)?.kind()
-            };
+            let edit_paste = edit_item(handle, &mut gated, "edit-paste", "Paste", "CmdOrCtrl+V")?;
             let edit_paste_in_place = edit_item(
                 handle,
                 &mut gated,
@@ -3752,6 +3750,18 @@ fn main() {
                     match id {
                         "file-close" => {
                             let _ = focused.close();
+                            return;
+                        }
+                        // The text-editing items belong to whichever text
+                        // field is focused — an auxiliary window's own
+                        // (Settings' server address, Library's search). A
+                        // WebKit field on macOS gets Cmd+C/X/V/A only
+                        // through these items, so they go to the FOCUSED
+                        // window, which applies them to its field (see
+                        // useTextFieldMenuActions.ts); the document window
+                        // never sees them.
+                        "edit-cut" | "edit-copy" | "edit-paste" | "edit-select-all" => {
+                            let _ = app.emit_to(focused.label(), "menu-action", id);
                             return;
                         }
                         // Window management and new-window creation behave

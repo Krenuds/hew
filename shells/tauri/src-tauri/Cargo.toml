@@ -25,6 +25,7 @@ tauri-build = { version = "2.6.2", features = [] }
 library = { path = "../../../crates/library" }
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-clipboard-manager = "2"
 # Second launches (Windows/Linux file-association double-clicks) must join the
 # running instance: per-window-label autosave/recovery namespacing and
 # window-state.json assume one process owns the config dir.

@@ -20,6 +20,7 @@ import { ThemePane } from './ThemePane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
+import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
 type Category = 'units' | 'theme' | 'folders' | 'advanced' | 'debug'
 
@@ -120,6 +121,7 @@ const activeTabStyle: CSSProperties = {
 
 export function SettingsWindow() {
   const [active, setActive] = useState<Category>('units')
+  useTextFieldMenuActions()
 
   return (
     <div

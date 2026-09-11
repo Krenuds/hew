@@ -24,6 +24,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { readItemSummary } from '../library/itemFiles'
 import type { LibraryItem } from '../library/types'
 import { LibraryDialog } from './LibraryDialog'
+import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
 /** The payload document windows push (and this window consumes). */
 interface PlacementsPush {
@@ -73,6 +74,7 @@ function dispatch(action: LibraryActionPayload['action'], item: LibraryItem, foc
 }
 
 export function LibraryWindow() {
+  useTextFieldMenuActions()
   const [placements, setPlacements] = useState<Record<string, number>>({})
   const paletteHashesRef = useRef<Set<string>>(new Set())
   const requested = useRef(false)
