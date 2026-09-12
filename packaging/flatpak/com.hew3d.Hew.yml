@@ -1,14 +1,15 @@
 # Flatpak manifest for Hew — repackages the released Linux .deb.
 #
-# This is the binary route: it runs today and is what a self-hosted Flatpak
-# repo (or a Flathub submission with the "no source build possible yet"
-# justification) would carry. Flathub prefers open-source apps to build
-# from source; that route needs a generated cargo-sources.json
-# (flatpak-cargo-generator over Cargo.lock), node sources for the pnpm
-# workspace, and vendored wasm-bindgen/wasm-opt so wasm-pack never touches
-# the network — a separate effort (see packaging/README.md).
+# Built by .github/workflows/packaging.yml into a self-hosted, GPG-signed
+# repo under hew3d/hew-packages — not submitted to Flathub, which prefers
+# open-source apps to build from source (that route needs a generated
+# cargo-sources.json, node sources for the pnpm workspace, and vendored
+# wasm-bindgen/wasm-opt so wasm-pack never touches the network — a
+# separate effort, not needed for a self-hosted repo with no reviewer).
+# See packaging/README.md.
 #
-# Rendered by packaging/render.sh — edit that script, not the hashes here.
+# Rendered by packaging/scripts/render-templates.sh — edit that script, not
+# the hashes here.
 id: com.hew3d.Hew
 runtime: org.gnome.Platform
 runtime-version: '47'

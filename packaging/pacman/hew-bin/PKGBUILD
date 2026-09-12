@@ -1,5 +1,8 @@
 # Maintainer: Kurt Granroth <kurt@granroth.com>
-# Rendered by packaging/render.sh — edit that script, not the hashes here.
+# Rendered by packaging/scripts/render-templates.sh — edit that script, not
+# the hashes here. Built by .github/workflows/packaging.yml into a signed,
+# self-hosted pacman repo (see packaging/README.md) — never published as an
+# AUR recipe, so this never runs makepkg on a user's own machine.
 pkgname=hew-bin
 pkgver=1.0.0
 pkgrel=1

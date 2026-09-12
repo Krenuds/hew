@@ -1,0 +1,206 @@
+# Third-party Linux packaging — Arch (a self-hosted signed pacman repo,
+# not AUR: AUR has stopped accepting new maintainer registrations), a
+# Gentoo overlay, and a self-hosted signed Flatpak repo, all repackaging
+# the release's .deb rather than building from source (see
+# packaging/README.md for why). Everything here is produced and published
+# by this workflow — nobody runs any of it by hand.
+#
+# Triggers on `release: published` (releases stay drafts until a human
+# publishes one, so this only ever fires on a deliberate act) and on
+# workflow_dispatch for testing against an already-published tag without
+# cutting a new release.
+#
+# Two target repos get pushed to, each with its own credential:
+#   hew3d/hew-packages   — GitHub Pages host for the pacman repo and the
+#                          Flatpak repo (HEW_PACKAGES_TOKEN)
+#   hew3d/gentoo-overlay — the Gentoo overlay git repo (also
+#                          HEW_PACKAGES_TOKEN — one fine-grained PAT scoped
+#                          to both repos)
+# Both repos are rebuilt and republished wholesale on every run rather than
+# incrementally appended to: no persistent ostree object store or pacman
+# package history to grow unbounded, at the cost of not supporting
+# downgrades or Flatpak delta updates. Fine at Hew's current scale.
+
+name: Packaging
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to package (e.g. v1.1.0)'
+        required: true
+
+permissions:
+  contents: write # gh release upload (the Flatpak bundle) needs this on hew3d/hew
+
+# Two overlapping runs would both wipe-and-push hew3d/hew-packages or
+# hew3d/gentoo-overlay; the plain (non-force) push means the loser just
+# fails rather than corrupting anything, but serializing avoids that
+# entirely rather than relying on a race to fail safely.
+concurrency:
+  group: packaging
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: packaging/scripts/render-templates.sh "$TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+
+  pacman:
+    needs: render
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-latest
+          - arch: aarch64
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+      - name: Build package
+        env:
+          PACKAGING_GPG_PRIVATE_KEY: ${{ secrets.PACKAGING_GPG_PRIVATE_KEY }}
+        run: |
+          chmod +x packaging/scripts/*.sh
+          packaging/scripts/build-pacman-package.sh pacman-out
+      - name: Sign repo database
+        env:
+          PACKAGING_GPG_PRIVATE_KEY: ${{ secrets.PACKAGING_GPG_PRIVATE_KEY }}
+        run: |
+          gpg --batch --import <<<"$PACKAGING_GPG_PRIVATE_KEY"
+          keyid="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="sec"{print $5; exit}')"
+          cd pacman-out
+          repo-add -s -k "$keyid" hew.db.tar.gz ./*.pkg.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacman-${{ matrix.arch }}
+          path: pacman-out/
+
+  flatpak:
+    needs: render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub org.gnome.Platform//47 org.gnome.Sdk//47
+      - name: Build repo + bundle
+        env:
+          PACKAGING_GPG_PRIVATE_KEY: ${{ secrets.PACKAGING_GPG_PRIVATE_KEY }}
+        run: |
+          chmod +x packaging/scripts/*.sh
+          packaging/scripts/build-flatpak-repo.sh \
+            flatpak-out/repo flatpak-out/hew.flatpak \
+            https://hew3d.github.io/hew-packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-repo
+          path: flatpak-out/
+
+  gentoo-validate:
+    needs: render
+    runs-on: ubuntu-latest
+    container: gentoo/stage3:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+      - run: |
+          chmod +x packaging/scripts/*.sh
+          packaging/scripts/validate-gentoo-ebuild.sh
+
+  publish-pages:
+    needs: [pacman, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacman-x86_64
+          path: layout/pacman/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacman-aarch64
+          path: layout/pacman/aarch64
+      - uses: actions/download-artifact@v4
+        with:
+          name: flatpak-repo
+          path: layout/flatpak-staged
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: packaging/pages
+          path: source
+      - name: Assemble layout
+        env:
+          PACKAGING_GPG_PRIVATE_KEY: ${{ secrets.PACKAGING_GPG_PRIVATE_KEY }}
+        run: |
+          mv layout/flatpak-staged layout/flatpak
+          cp source/packaging/pages/index.html layout/index.html
+          gpg --batch --import <<<"$PACKAGING_GPG_PRIVATE_KEY"
+          keyid="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="sec"{print $5; exit}')"
+          gpg --batch --export --armor "$keyid" > layout/pacman/hew-packaging.gpg
+          touch layout/.nojekyll
+      - name: Publish to hew3d/hew-packages
+        env:
+          HEW_PACKAGES_TOKEN: ${{ secrets.HEW_PACKAGES_TOKEN }}
+        run: |
+          git clone --depth=1 "https://x-access-token:${HEW_PACKAGES_TOKEN}@github.com/hew3d/hew-packages.git" pages-repo
+          find pages-repo -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
+          cp -r layout/. pages-repo/
+          cd pages-repo
+          git config user.name "hew-packaging"
+          git config user.email "packaging@hew3d.com"
+          git add -A
+          git diff --cached --quiet && { echo "nothing changed"; exit 0; }
+          git commit -m "packaging: publish ${TAG}"
+          git push
+      - name: Attach Flatpak bundle to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" layout/flatpak/hew.flatpak --repo hew3d/hew --clobber
+
+  gentoo-publish:
+    needs: [render, gentoo-validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+      - env:
+          HEW_PACKAGES_TOKEN: ${{ secrets.HEW_PACKAGES_TOKEN }}
+        run: |
+          git clone --depth=1 "https://x-access-token:${HEW_PACKAGES_TOKEN}@github.com/hew3d/gentoo-overlay.git" overlay-repo
+          find overlay-repo -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
+          cp -r packaging/gentoo/. overlay-repo/
+          cd overlay-repo
+          git config user.name "hew-packaging"
+          git config user.email "packaging@hew3d.com"
+          git add -A
+          git diff --cached --quiet && { echo "nothing changed"; exit 0; }
+          git commit -m "media-gfx/hew-bin: publish ${TAG}"
+          git push
