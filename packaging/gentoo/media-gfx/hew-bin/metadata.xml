@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>kurt@granroth.com</email>
+		<name>Kurt Granroth</name>
+	</maintainer>
+	<longdescription>
+		Hew is a cross-platform 3D modeler: SketchUp's draw-on-faces and
+		push/pull interaction model on a solids-first kernel where every
+		closed extrusion is a watertight object. This package installs the
+		official binary release (the desktop app and the hew-cli sidecar).
+	</longdescription>
+	<upstream>
+		<remote-id type="github">hew3d/hew</remote-id>
+		<bugs-to>https://github.com/hew3d/hew/issues</bugs-to>
+	</upstream>
+</pkgmetadata>

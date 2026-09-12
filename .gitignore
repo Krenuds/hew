@@ -28,6 +28,13 @@ crates/skp-import/target/
 # Internal design documents — never published
 docs/design/
 
+# Packaging signing key material — never committed, held only as a CI secret
+# and the maintainer's own offline backup
+hew-packaging-*.asc
+
+# Scratch space render-templates.sh leaves the downloaded .deb files in
+packaging/render-cache/
+
 # wrangler local dev state / secrets (workers/share-relay)
 .wrangler/
 .dev.vars

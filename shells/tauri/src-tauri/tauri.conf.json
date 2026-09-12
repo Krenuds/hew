@@ -48,8 +48,17 @@
         "ext": ["hew"],
         "name": "Hew Model",
         "description": "Hew 3D model file",
-        "role": "Editor"
+        "role": "Editor",
+        "mimeType": "application/x-hew"
       }
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "both"
+      }
+    },
+    "category": "GraphicsAndDesign",
+    "shortDescription": "3D modeler with SketchUp's interaction model on a solids-first kernel",
+    "longDescription": "Hew is a cross-platform 3D modeler: draw on faces, push and pull them, and let inference snapping do the aiming. Every closed extrusion is a discrete, watertight object, and combining objects is always an explicit choice."
   }
 }

@@ -1,0 +1,29 @@
+# Maintainer: Kurt Granroth <kurt@granroth.com>
+# Rendered by packaging/scripts/render-templates.sh — edit that script, not
+# the hashes here. Built by .github/workflows/packaging.yml into a signed,
+# self-hosted pacman repo (see packaging/README.md) — never published as an
+# AUR recipe, so this never runs makepkg on a user's own machine.
+pkgname=hew-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="3D modeler with SketchUp's interaction model on a solids-first kernel (binary release)"
+# x86_64 only: mainline Arch Linux has no aarch64 port (Docker Hub's
+# official `archlinux` image is amd64-only for the same reason). ARM users
+# are on Arch Linux ARM, a separate project with its own repos and signing
+# infrastructure — out of scope here.
+arch=('x86_64')
+url="https://hew3d.com"
+license=('AGPL-3.0-only')
+depends=('webkit2gtk-4.1' 'gtk3')
+provides=('hew' 'hew-cli')
+conflicts=('hew')
+options=('!strip')
+source=("https://github.com/hew3d/hew/releases/download/v${pkgver}/Hew_${pkgver}_amd64.deb")
+sha256sums=('cfaeb57ccf93be1e27981d45adbecd187985de96b1a336576ef4364f5c874547')
+
+package() {
+  # The .deb's data tarball already has the FHS layout (/usr/bin/hew,
+  # /usr/bin/hew-cli, the desktop entry and hicolor icons).
+  bsdtar -xf data.tar.gz -C "${pkgdir}"
+  chmod 755 "${pkgdir}/usr/bin/hew" "${pkgdir}/usr/bin/hew-cli"
+}

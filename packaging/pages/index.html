@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hew — Linux packages</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2.5rem; }
+  pre { background: #f4f4f4; padding: 0.75rem 1rem; overflow-x: auto; border-radius: 6px; }
+  code { font-family: ui-monospace, monospace; }
+  a { color: #0b5fff; }
+</style>
+</head>
+<body>
+<h1>Hew — Linux packages</h1>
+<p>These are auto-built from every <a href="https://github.com/hew3d/hew/releases">Hew release</a>. See <a href="https://hew3d.com">hew3d.com</a> for the app itself.</p>
+
+<h2>Arch Linux (x86_64 only)</h2>
+<p>A signed pacman repository, added once:</p>
+<pre><code>curl -O https://hew3d.github.io/hew-packages/pacman/hew-packaging.gpg
+sudo pacman-key --add hew-packaging.gpg
+sudo pacman-key --lsign-key "$(gpg --with-colons --show-keys hew-packaging.gpg | awk -F: '/^fpr/{print $10; exit}')"
+
+sudo tee -a /etc/pacman.conf &lt;&lt;'EOF'
+[hew]
+SigLevel = Required
+Server = https://hew3d.github.io/hew-packages/pacman/$arch
+EOF
+
+sudo pacman -Sy hew-bin</code></pre>
+
+<h2>Gentoo</h2>
+<p>An overlay, added once:</p>
+<pre><code>eselect repository add hew3d git https://github.com/hew3d/gentoo-overlay.git
+emerge --sync hew3d
+echo 'media-gfx/hew-bin ~amd64 ~arm64' | sudo tee /etc/portage/package.accept_keywords/hew-bin
+sudo emerge media-gfx/hew-bin</code></pre>
+
+<h2>Flatpak</h2>
+<p>A self-hosted remote, added once:</p>
+<pre><code>flatpak remote-add --if-not-exists hew https://hew3d.github.io/hew-packages/flatpak/com.hew3d.Hew.flatpakrepo
+flatpak install hew com.hew3d.Hew</code></pre>
+<p>Or download the <a href="flatpak/hew.flatpak">single-file bundle</a> from the latest release and install it directly — it sets up the same remote automatically, so <code>flatpak update</code> keeps it current afterward.</p>
+</body>
+</html>
