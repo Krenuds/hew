@@ -100,7 +100,13 @@ jobs:
       - name: Install Flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          # elfutils provides eu-strip, which flatpak-builder's default
+          # debuginfo-extraction step shells out to — not preinstalled on
+          # a plain runner. (The `no-debuginfo` manifest property some
+          # flatpak-builder versions support to skip that step entirely
+          # isn't recognized by the version apt installs here, so this
+          # installs the real dependency instead of relying on it.)
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
           flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive flathub org.gnome.Platform//47 org.gnome.Sdk//47
       - name: Build repo + bundle

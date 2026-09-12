@@ -27,11 +27,6 @@ finish-args:
 modules:
   - name: hew
     buildsystem: simple
-    # The binary is already built and optimized upstream (this module only
-    # repackages a released .deb) — flatpak-builder's default debuginfo
-    # extraction step needs `eu-strip` (elfutils), isn't preinstalled on a
-    # plain runner, and has nothing useful to extract here anyway.
-    no-debuginfo: true
     build-commands:
       - ar x hew.deb data.tar.gz
       - tar -xf data.tar.gz -C /app --strip-components=1 usr
