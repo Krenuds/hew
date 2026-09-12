@@ -813,7 +813,9 @@ jobs:
           - Windows installers are not code-signed yet, so SmartScreen may
             warn on first run — choose **More info**, then **Run anyway**.
           - On Linux, mark the AppImage executable (\`chmod +x\`) before
-            first run, or install the .deb/.rpm.
+            first run, or install the .deb/.rpm. Arch, Gentoo, and Flatpak
+            users have native packages too, at
+            [hew3d.github.io/hew-packages](https://hew3d.github.io/hew-packages/).
           - Desktop builds update themselves; \`latest.json\` and the
             \`.sig\` assets serve that built-in updater and are not meant
             for manual download.

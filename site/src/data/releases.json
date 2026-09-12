@@ -73,7 +73,13 @@
           ]
         }
       ],
-      "note": "Mark the AppImage executable (chmod +x) before first run, or install the .deb/.rpm."
+      "note": "Mark the AppImage executable (chmod +x) before first run, or install the .deb/.rpm.",
+      "links": [
+        {
+          "label": "Arch, Gentoo, and Flatpak packages",
+          "href": "https://hew3d.github.io/hew-packages/"
+        }
+      ]
     }
   ]
 }
