@@ -35,6 +35,10 @@ hew-packaging-*.asc
 # Scratch space render-templates.sh leaves the downloaded .deb files in
 packaging/render-cache/
 
+# flatpak-builder's local build-state cache (packaging/scripts/build-flatpak-repo.sh
+# and any local flatpak-builder test run against packaging/flatpak/)
+packaging/flatpak/.flatpak-builder/
+
 # wrangler local dev state / secrets (workers/share-relay)
 .wrangler/
 .dev.vars

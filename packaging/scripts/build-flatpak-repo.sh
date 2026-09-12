@@ -29,7 +29,8 @@ keyid="$(gpg --batch --homedir "$gpg_home" --with-colons --list-secret-keys | aw
 build_dir="$(mktemp -d)"
 rm -rf "$repo_dir"
 mkdir -p "$repo_dir"
-flatpak-builder --force-clean --repo="$repo_dir" "$build_dir" "$here/flatpak/com.hew3d.Hew.yml"
+flatpak-builder --force-clean --gpg-sign="$keyid" --gpg-homedir="$gpg_home" \
+  --repo="$repo_dir" "$build_dir" "$here/flatpak/com.hew3d.Hew.yml"
 flatpak build-update-repo --gpg-sign="$keyid" --gpg-homedir="$gpg_home" "$repo_dir"
 
 flatpak_repo_url="${base_url%/}/flatpak/com.hew3d.Hew.flatpakrepo"

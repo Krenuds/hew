@@ -12,7 +12,11 @@
 # the hashes here.
 id: com.hew3d.Hew
 runtime: org.gnome.Platform
-runtime-version: '47'
+# GNOME runtimes go EOL roughly a year after release (Flathub warns on
+# install once they do) — bump this when that happens rather than
+# leaving it to rot; check `flatpak remote-ls flathub | grep
+# org.gnome.Platform` for what's current.
+runtime-version: '50'
 sdk: org.gnome.Sdk
 command: hew
 finish-args:
