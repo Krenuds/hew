@@ -35,6 +35,8 @@ The Debug pane's **Enable Debug Mode** checkbox turns on deeper diagnostics for 
 
 ## Reporting a bug
 
-**Help ▸ Report Bug…** assembles everything a developer needs into a single file: app version and system info, your current model, the recent diagnostic log, and the recorded input events. On desktop it's saved to the app's log directory (the confirmation toast shows the exact path); on the web, it downloads. Attach that file to your bug report.
+**Help ▸ Report Bug…** assembles everything a developer needs into a single file: app version and system info, your current model, the recent diagnostic log, and the session's recorded steps. Raw input events are included too, but only if Debug Mode was on. On desktop it's saved to the app's log directory (the confirmation toast shows the exact path); on the web, it downloads. Attach that file to your bug report.
+
+If Hew stops on its error screen, click **Save reproducer** there. It saves a file with the steps that led to the crash, ready to attach to your report. On the web it downloads; on desktop the file's path is shown.
 
 Hew's kernel is deterministic, so a captured session usually reproduces a bug exactly. Reports with a bundle attached tend to get fixed fast.

@@ -205,6 +205,61 @@ fn single_step_transaction_carries_meta() {
     assert_eq!(doc.undo_depth(), depth - 1);
 }
 
+/// A child that refuses to undo rolls the envelope back AND leaves it on the
+/// undo stack, so the step applies once the document matches its record
+/// again. Redo keeps the same contract on the redo stack.
+#[test]
+fn a_refused_child_keeps_the_compound_on_its_stack() {
+    let mut doc = Document::default();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let corner = Point3::new(2.0, 2.0, 0.0);
+    let dragged = Point3::new(2.5, 1.7, 0.0);
+    let elsewhere = Point3::new(2.2, 2.3, 0.0);
+    let v = doc
+        .sketch(s)
+        .expect("sketch is live")
+        .vertices()
+        .iter()
+        .find(|(_, vx)| vx.position.approx_eq(corner, 1e-9))
+        .map(|(id, _)| id)
+        .expect("the corner vertex");
+
+    let txn = doc.begin_transaction();
+    doc.move_sketch_vertex(s, v, dragged)
+        .expect("drag the corner");
+    doc.commit_transaction(txn, api_meta("drag"))
+        .expect("commit");
+    let depth = doc.undo_depth();
+
+    // Diverge the sketch outside the undo history.
+    let sk = doc.sketch_mut(s).expect("sketch is live");
+    sk.move_vertex(v, elsewhere).expect("out-of-history move");
+    let bytes = doc.save();
+    assert_eq!(doc.undo(), Err(DocumentError::InverseDiverged));
+    assert_eq!(doc.save(), bytes, "the refusal left the document untouched");
+    assert_eq!(doc.undo_depth(), depth, "the compound stays undoable");
+    assert_eq!(doc.peek_undo_meta().expect("still stamped").label, "drag");
+
+    let sk = doc.sketch_mut(s).expect("sketch is live");
+    sk.move_vertex(v, dragged)
+        .expect("realign with the history");
+    doc.undo().expect("undo once the document matches again");
+    assert_eq!(doc.undo_depth(), depth - 1);
+
+    let sk = doc.sketch_mut(s).expect("sketch is live");
+    sk.move_vertex(v, elsewhere).expect("diverge again");
+    assert_eq!(doc.redo(), Err(DocumentError::InverseDiverged));
+    let sk = doc.sketch_mut(s).expect("sketch is live");
+    sk.move_vertex(v, corner).expect("realign with the history");
+    doc.redo().expect("redo once the document matches again");
+    assert_eq!(
+        doc.undo_depth(),
+        depth,
+        "the redone compound is back on undo"
+    );
+}
+
 /// UI-authored entries carry no meta: `peek_undo_meta` is `None` for a
 /// plain edit — the reader's cue to report origin `user`.
 #[test]

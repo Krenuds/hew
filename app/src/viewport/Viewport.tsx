@@ -2010,6 +2010,24 @@ export function runBooleanCore(
   }
 }
 
+/**
+ * Map a `scene_undo`/`scene_redo` catch-site error to toast copy, or null
+ * when it shouldn't be toasted at all. A refused undo/redo (RestoreConflicts,
+ * InverseDiverged, InverseFailed — kernelErrors.ts) used to only
+ * `console.warn`, so the copy written for exactly this never reached the
+ * user. A code-less error stays null: that's the "recursive use of an
+ * object" trap of a poisoned instance, which the crash screen takes over
+ * from, not something a toast should try to explain. Pure and exported so
+ * `runUndo`/`runRedo` (closures inside Viewport's mount effect, not
+ * independently callable) can be tested without mounting the component.
+ */
+export function mapUndoRedoError(err: unknown): { code: string; message: string } | null {
+  const code = parseKernelErrorCode(err)
+  if (code === null) return null
+  const rawMsg = err instanceof Error ? err.message : String(err)
+  return { code, message: kernelErrorMessage(code, rawMsg) }
+}
+
 export default function Viewport({
   wasmScene,
   background = 'editor-default',
@@ -4966,6 +4984,11 @@ export default function Viewport({
     // Cmd+Z / Cmd+Shift+Z keydown all land here, so post-history
     // reconciliation (onHistoryChanged) fires for EVERY entry point instead
     // of being duplicated per caller.
+    function reportUndoRedoFailure(err: unknown): void {
+      const mapped = mapUndoRedoError(err)
+      if (mapped !== null) handleToast(mapped.message, mapped.code)
+    }
+
     function runUndo(): void {
       if (wasmSceneRef.current.can_scene_undo()) {
         // As explicit as menu delete: the undo executes AND ends the armed
@@ -4977,6 +5000,7 @@ export default function Viewport({
           onHistoryChangedRef.current?.()
         } catch (err) {
           console.warn('[Viewport] scene_undo failed:', err)
+          reportUndoRedoFailure(err)
         }
       }
     }
@@ -4990,6 +5014,7 @@ export default function Viewport({
           onHistoryChangedRef.current?.()
         } catch (err) {
           console.warn('[Viewport] scene_redo failed:', err)
+          reportUndoRedoFailure(err)
         }
       }
     }

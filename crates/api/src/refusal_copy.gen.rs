@@ -312,10 +312,10 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "NothingToUndo" => "Nothing to undo.",
         "NothingToRedo" => "Nothing to redo.",
         "InverseFailed" => {
-            "This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
+            "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
         }
         "InverseDiverged" => {
-            "Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
+            "Undo or redo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
         }
         "UnexpectedGestureState" => {
             "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session."

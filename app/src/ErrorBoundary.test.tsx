@@ -5,16 +5,28 @@
  * ErrorBoundary is the ideal subject — it's the one component whose whole job is
  * an observable render branch (children vs. fallback) with no wasm/three.js seam.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBoundary, LAST_ERROR_KEY } from './ErrorBoundary'
+import { KERNEL_PANIC_EVENT } from './log/panicCapture'
+
+// The real saveCrashReproducer talks to the reproducer store — mock it so
+// the Save reproducer button's feedback states can be driven deterministically.
+vi.mock('./log/reproducerDump', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./log/reproducerDump')>()
+  return { ...actual, saveCrashReproducer: vi.fn() }
+})
+import { saveCrashReproducer } from './log/reproducerDump'
+const mockSaveCrashReproducer = vi.mocked(saveCrashReproducer)
 
 describe('ErrorBoundary', () => {
   beforeEach(() => {
     localStorage.clear()
+    mockSaveCrashReproducer.mockReset().mockResolvedValue({ ok: true, path: null })
   })
   afterEach(() => {
     vi.restoreAllMocks()
+    delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
   })
 
   it('renders children when nothing throws', () => {
@@ -67,6 +79,72 @@ describe('ErrorBoundary', () => {
     expect(dialog.style.userSelect).toBe('text')
   })
 
+  // A kernel panic usually lands in a handler that catches the trap, so no
+  // render ever throws — the wasm hook's event has to stop the app instead.
+  it('shows the crash screen on the kernel panic event with no render error', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(
+      <ErrorBoundary>
+        <p>still running</p>
+      </ErrorBoundary>,
+    )
+    ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = {
+      at: '2026-01-01T00:00:00.000Z',
+      message: 'panicked at crates/kernel/src/document.rs:42: UnknownVertex',
+      recording: null,
+    }
+    act(() => {
+      window.dispatchEvent(new Event(KERNEL_PANIC_EVENT))
+    })
+
+    expect(screen.getByRole('heading', { name: /hew hit an error/i })).toBeInTheDocument()
+    expect(screen.queryByText('still running')).not.toBeInTheDocument()
+    expect(screen.getByText(/UnknownVertex/)).toBeInTheDocument()
+    expect(screen.queryByText(/render error/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /save reproducer/i })).toBeInTheDocument()
+    expect(localStorage.getItem(LAST_ERROR_KEY)).toContain('UnknownVertex')
+  })
+
+  it('stops listening for the kernel panic event once unmounted', () => {
+    const { unmount } = render(
+      <ErrorBoundary>
+        <p>ok</p>
+      </ErrorBoundary>,
+    )
+    const remove = vi.spyOn(window, 'removeEventListener')
+    unmount()
+    expect(remove).toHaveBeenCalledWith(KERNEL_PANIC_EVENT, expect.any(Function))
+  })
+
+  // The hook console.errors the panic too, and the console capture copies
+  // that into LogStore — the list must still name the panic only once.
+  it('lists a kernel panic once, not again as its console copy', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const LogStore = await import('./log/LogStore')
+    LogStore.clear()
+    const message = 'panicked at crates/kernel/src/document.rs:42: UnknownVertex'
+    LogStore.append('error', 'console', message)
+    LogStore.append('error', 'console', 'recursive use of an object')
+    render(
+      <ErrorBoundary>
+        <p>ok</p>
+      </ErrorBoundary>,
+    )
+    ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = {
+      at: '2026-01-01T00:00:00.000Z',
+      message,
+      recording: null,
+    }
+    act(() => {
+      window.dispatchEvent(new Event(KERNEL_PANIC_EVENT))
+    })
+
+    const list = screen.getByText(/UnknownVertex/).textContent ?? ''
+    expect(list.split('UnknownVertex')).toHaveLength(2)
+    expect(list).toContain('recursive use of an object')
+    LogStore.clear()
+  })
+
   it('copies the full crash report — matching the persisted record — via the Copy details button', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const writeText = vi.fn().mockResolvedValue(undefined)
@@ -101,5 +179,117 @@ describe('ErrorBoundary', () => {
     const stripTimestamp = (s: string) => s.replace(/^.*\n/, '')
     expect(stripTimestamp(copied)).toBe(stripTimestamp(localStorage.getItem(LAST_ERROR_KEY) ?? ''))
     expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
+  })
+
+  // componentDidCatch prefers the in-memory panic capture (this page session)
+  // over the localStorage record when both exist, since only the capture
+  // carries a recording a saved reproducer can use.
+  it('prefers the in-memory panic capture over localStorage when both are present', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    localStorage.setItem('hew:lastPanic', 'panicked at crates/kernel/src/ops.rs:123')
+    ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = {
+      at: '2026-01-01T00:00:00.000Z',
+      message: 'panicked at crates/kernel/src/document.rs:42: UnknownVertex',
+      recording: '{"version":2,"calls":[],"golden_hash":0}',
+    }
+
+    function Boom(): never {
+      throw new Error('kaboom')
+    }
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    )
+
+    expect(
+      screen.getByText(/kernel panic — 2026-01-01T00:00:00\.000Z\s+panicked at crates\/kernel\/src\/document\.rs:42: UnknownVertex/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/ops\.rs:123/)).not.toBeInTheDocument()
+  })
+
+  it('falls back to the localStorage panic record when there is no in-memory capture', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    localStorage.setItem('hew:lastPanic', 'panicked at crates/kernel/src/ops.rs:123')
+
+    function Boom(): never {
+      throw new Error('kaboom')
+    }
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    )
+
+    expect(screen.getByText(/kernel panic — panicked at crates\/kernel\/src\/ops\.rs:123/)).toBeInTheDocument()
+  })
+
+  describe('Save reproducer button', () => {
+    function renderBoom() {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      function Boom(): never {
+        throw new Error('kaboom')
+      }
+      render(
+        <ErrorBoundary>
+          <Boom />
+        </ErrorBoundary>,
+      )
+    }
+
+    it('shows the hint line', () => {
+      renderBoom()
+      expect(screen.getByText(/save reproducer writes a file with the steps that led here/i)).toBeInTheDocument()
+    })
+
+    it('shows Saving… immediately, then Saved with the path on a Tauri-style result', async () => {
+      let resolveSave!: (v: { ok: boolean; path: string | null }) => void
+      mockSaveCrashReproducer.mockReturnValue(
+        new Promise((resolve) => {
+          resolveSave = resolve
+        }),
+      )
+      renderBoom()
+
+      fireEvent.click(screen.getByRole('button', { name: /save reproducer/i }))
+      expect(mockSaveCrashReproducer).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('button', { name: /saving/i })).toBeInTheDocument()
+
+      resolveSave({ ok: true, path: '/home/user/.local/share/hew/reproducers/reproducer-1.json' })
+      expect(await screen.findByRole('button', { name: /^saved$/i })).toBeInTheDocument()
+      expect(screen.getByText(/\/home\/user\/\.local\/share\/hew\/reproducers\/reproducer-1\.json/)).toBeInTheDocument()
+    })
+
+    it('shows Saved with no path text on a web-style result (download, no path)', async () => {
+      mockSaveCrashReproducer.mockResolvedValue({ ok: true, path: null })
+      renderBoom()
+
+      fireEvent.click(screen.getByRole('button', { name: /save reproducer/i }))
+      expect(await screen.findByRole('button', { name: /^saved$/i })).toBeInTheDocument()
+      expect(screen.queryByText(/^saved to /i)).not.toBeInTheDocument()
+    })
+
+    it("shows Couldn't save on failure", async () => {
+      mockSaveCrashReproducer.mockResolvedValue({ ok: false, path: null })
+      renderBoom()
+
+      fireEvent.click(screen.getByRole('button', { name: /save reproducer/i }))
+      expect(await screen.findByRole('button', { name: /couldn't save/i })).toBeInTheDocument()
+    })
+
+    it('ignores a click while a save is already in flight', () => {
+      let resolveCount = 0
+      mockSaveCrashReproducer.mockImplementation(() => {
+        resolveCount++
+        return new Promise(() => {}) // never resolves within this test
+      })
+      renderBoom()
+
+      const button = screen.getByRole('button', { name: /save reproducer/i })
+      fireEvent.click(button)
+      fireEvent.click(screen.getByRole('button', { name: /saving/i }))
+
+      expect(resolveCount).toBe(1)
+    })
   })
 })

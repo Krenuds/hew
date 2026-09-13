@@ -338,10 +338,26 @@ Debug Mode in Settings → Debug — this turns on input recording alongside the
 debug log file.
 
 The easiest way to obtain a recording for a bug you can trigger is to let
-Hew capture it automatically: see. To capture one manually while
+Hew capture it automatically: see §4 below. To capture one manually while
 scripting or driving the app programmatically, the underlying calls are
-`start_recording()`, `stop_recording()`, `is_recording()`, and
-`take_recording()` (returns the recording JSON above and clears the buffer).
+`start_recording()`, `stop_recording()`, `is_recording()`,
+`take_recording()` (returns the recording JSON above and clears the buffer),
+and `peek_recording()` (the same JSON, but leaves the buffer in place — for
+a caller that must not disturb a recording something else still needs, such
+as the Report Bug bundle's peek alongside a later crash reproducer's take).
+
+A kernel panic poisons the wasm instance, so every `Scene` method throws
+afterwards — `take_recording()`/`peek_recording()` included. The panic hook
+(`crates/wasm-api/src/lib.rs`) works around this by handing the recorder's
+buffered calls to the page directly, from inside the panicking frame, as
+`globalThis.__hewLastPanic = { at, message, recording }` (`recording` is
+Recording JSON, or null if nothing had been recorded yet). Its `golden_hash`
+is always `0` — a panicking frame can't hash the document — so treat it as a
+reproducer, never a regression oracle. It's in-memory only (unlike the
+sibling `localStorage['hew:lastPanic']` record, message-only, that survives
+a reload): it exists purely so the current page session can still recover a
+recording after the instance is poisoned, which is also why it doesn't
+survive a reload itself.
 
 ### Replaying a recording
 
@@ -394,13 +410,32 @@ file. On desktop this is written to the app's log directory (in a
 is normally the single best attachment for a bug report, since it already
 contains everything needed to reproduce the failure.
 
+The crash screen (`ErrorBoundary.tsx`) has a **Save reproducer** button for
+the case the automatic dump can't cover: a kernel panic. The crash screen
+appears either on an uncaught render error or, for a panic, as soon as the
+panic hook fires `hew:kernel-panic` — the handler that hit the panic usually
+catches the trap, so no render error follows, and the screen shows only the
+underlying panic. Once a panic has been captured the automatic dump stands
+down (every later uncaught error is the poisoned instance's symptom), and
+the button is the way to save the bundle. It sources `recording` from the
+panic capture (§2 above), since by then `take_recording()` on the registered
+scene would just throw; with no capture (a render crash that isn't a kernel
+panic) it tries `take_recording()` directly. If an automatic dump is still
+writing when the button is pressed, it waits for that write to finish.
+
+**Help ▸ Report Bug…**'s bundle (`reportBug.ts`) is separate from both: it's
+user-triggered rather than failure-triggered, so it additionally carries
+OS/GPU/app-version and the input recorder's buffer, and it **peeks** the
+session recording (`peek_recording()`) rather than taking it — a menu action
+has no reason to steal the calls a later crash reproducer might still need.
+
 If a bug doesn't trigger an unhandled error (a wrong result rather than a
 crash), attach these three things by hand instead:
 
 1. The **debug log** — enable Debug Mode first if it wasn't already on, so
    the file exists; download it via Settings → Debug on web, or locate
    `diagnostic.log` in the app log directory on desktop.
-2. The **session recording** — obtained via `take_recording()` (see), or
+2. The **session recording** — obtained via `take_recording()` (§2 above), or
    from an existing reproducer bundle's `recording` field.
 3. The **`.hew` file** you were working in when the problem occurred.
 

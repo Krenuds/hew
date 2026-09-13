@@ -76,23 +76,43 @@ fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Poin
 // that bypasses the app's `console.error` capture, so a kernel panic was
 // invisible to the in-app error surface — we route it to `localStorage` (and
 // `console.error`, in a try/catch so a failure here can't re-panic) instead.
-#[wasm_bindgen(inline_js = "export function __hew_record_panic(msg) { \
-  try { localStorage.setItem('hew:lastPanic', new Date().toISOString() + '\\n' + msg); } catch (e) {} \
+//
+// The recorded command stream rides along in memory only
+// (`globalThis.__hewLastPanic`, an empty string meaning none was captured):
+// once the instance is poisoned every `Scene` call throws, `take_recording`
+// included, so the hook is the last point the calls can be read. It stays
+// out of `localStorage`, whose per-origin quota a long session's recording
+// could exhaust for everything else stored there.
+//
+// Last, the hook fires `hew:kernel-panic` on the page so the crash screen
+// takes over at once. The `Scene` call that panicked usually sits inside a
+// tool or undo handler that catches the trap, so without the event the app
+// keeps running on the poisoned instance until some later render happens to
+// call into it — or never shows the crash screen at all.
+#[wasm_bindgen(inline_js = "export function __hew_record_panic(msg, recording) { \
+  const at = new Date().toISOString(); \
+  try { localStorage.setItem('hew:lastPanic', at + '\\n' + msg); } catch (e) {} \
+  try { globalThis.__hewLastPanic = { at: at, message: msg, recording: recording || null }; } catch (e) {} \
   try { console.error(msg); } catch (e) {} \
+  try { globalThis.dispatchEvent(new Event('hew:kernel-panic')); } catch (e) {} \
 }")]
 extern "C" {
-    fn __hew_record_panic(msg: &str);
+    fn __hew_record_panic(msg: &str, recording: &str);
 }
 
 /// Module-init hook: install a panic hook that records the real message +
-/// source location to `localStorage['hew:lastPanic']` (and `console.error`).
-/// Without it, a kernel panic surfaces only as the opaque wasm "unreachable"
-/// trap on the *next* call. (The panic still poisons the instance — reload to
-/// recover — but the cause is now diagnosable from the UI.)
+/// source location to `localStorage['hew:lastPanic']` (and `console.error`),
+/// and hands the recorder's captured calls to the page
+/// ([`recording::panic_snapshot_json`]) so a crash reproducer can still be
+/// saved. Without it, a kernel panic surfaces only as the opaque wasm
+/// "unreachable" trap on the *next* call. (The panic still poisons the
+/// instance — reload to recover — but the cause is now diagnosable from the
+/// UI.)
 #[wasm_bindgen(start)]
 pub fn start() {
     std::panic::set_hook(Box::new(|info| {
-        __hew_record_panic(&info.to_string());
+        let recording = recording::panic_snapshot_json().unwrap_or_default();
+        __hew_record_panic(&info.to_string(), &recording);
     }));
 }
 
@@ -8649,6 +8669,21 @@ impl Scene {
         serde_json::to_string(&rec).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Copies the recording so far as a JSON [`Recording`] artifact without
+    /// clearing the recorder's buffer — [`Scene::take_recording`] minus the
+    /// clear, golden included. For a user-filed bug report, which must not
+    /// take the calls a later crash reproducer needs.
+    ///
+    /// [`Recording`]: recording::Recording
+    pub fn peek_recording(&self) -> String {
+        let rec = recording::Recording {
+            version: recording::RECORDING_FORMAT_VERSION,
+            calls: recording::peek_calls(),
+            golden_hash: self.doc.state_hash(),
+        };
+        serde_json::to_string(&rec).unwrap_or_else(|_| "{}".to_string())
+    }
+
     /// Replays a [`Recording`] JSON (`docs/dev/DIAGNOSTICS.md`) by re-issuing
     /// each captured call verbatim into **this** scene, then returns the final
     /// `state_hash`. Run on a fresh `Scene` and compare the result to the
@@ -10673,6 +10708,43 @@ mod tests {
         assert!(scene.object_watertight(42).is_err());
         assert!(!scene.can_scene_undo());
         assert!(!scene.can_scene_redo());
+    }
+
+    /// `peek_recording` is `take_recording` minus the clear: the same artifact
+    /// (calls and golden), replayable into a fresh Scene, with the buffer left
+    /// in place for the take that follows.
+    #[test]
+    fn peek_recording_matches_take_without_clearing() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+
+        let peeked = scene.peek_recording();
+        assert_eq!(
+            scene.peek_recording(),
+            peeked,
+            "peeking twice sees the same calls"
+        );
+        let rec: serde_json::Value = serde_json::from_str(&peeked).unwrap();
+        assert_eq!(rec["golden_hash"].as_u64().unwrap(), scene.state_hash());
+        assert!(!rec["calls"].as_array().unwrap().is_empty());
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&peeked).unwrap(), scene.state_hash());
+
+        assert_eq!(
+            scene.take_recording(),
+            peeked,
+            "take still sees every peeked call"
+        );
+        let after: serde_json::Value = serde_json::from_str(&scene.peek_recording()).unwrap();
+        assert!(
+            after["calls"].as_array().unwrap().is_empty(),
+            "take cleared the buffer"
+        );
+        recording::reset();
     }
 
     /// End-to-end: record a real multi-op Scene session, then replay the

@@ -8,6 +8,7 @@ function fakeScene(overrides: Partial<ReportableScene> = {}): ReportableScene {
   return {
     save: () => new Uint8Array([1, 2, 3]),
     state_hash: () => 123n,
+    peek_recording: () => '{"version":2,"calls":[],"golden_hash":0}',
     ...overrides,
   }
 }
@@ -39,6 +40,7 @@ beforeEach(() => {
 afterEach(() => {
   inputRecorder.stop()
   inputRecorder.take()
+  delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
 })
 
 describe('generateBugReport', () => {
@@ -85,6 +87,59 @@ describe('generateBugReport', () => {
 
     // peek() must not have cleared the recorder's buffer.
     expect(inputRecorder.peek()).toHaveLength(1)
+
+    expect(bundle.recording).toBe('{"version":2,"calls":[],"golden_hash":0}')
+  })
+
+  it('peeks the session recording rather than taking it (unaffected by repeat reports)', async () => {
+    const scene = fakeScene()
+    const store = fakeStore()
+    setStoreForTest(store)
+
+    await generateBugReport(scene)
+    await generateBugReport(scene)
+
+    expect(store.calls).toHaveLength(2)
+    for (const call of store.calls) {
+      expect(JSON.parse(call.json).recording).toBe('{"version":2,"calls":[],"golden_hash":0}')
+    }
+  })
+
+  it('falls back to the panic capture when peek_recording throws (a poisoned instance)', async () => {
+    const scene = fakeScene({
+      peek_recording: () => {
+        throw new Error(
+          'recursive use of an object detected which would lead to unsafe aliasing in rust',
+        )
+      },
+    })
+    const store = fakeStore()
+    setStoreForTest(store)
+    ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = {
+      at: '2026-01-01T00:00:00.000Z',
+      message: 'panicked at crates/kernel/src/document.rs:1',
+      recording: '{"version":2,"calls":[{"stub":true}],"golden_hash":0}',
+    }
+
+    await generateBugReport(scene)
+
+    const bundle = JSON.parse(store.calls[0].json)
+    expect(bundle.recording).toBe('{"version":2,"calls":[{"stub":true}],"golden_hash":0}')
+  })
+
+  it('leaves recording null when peek_recording throws and there is no panic capture', async () => {
+    const scene = fakeScene({
+      peek_recording: () => {
+        throw new Error('boom')
+      },
+    })
+    const store = fakeStore()
+    setStoreForTest(store)
+
+    await generateBugReport(scene)
+
+    const bundle = JSON.parse(store.calls[0].json)
+    expect(bundle.recording).toBeNull()
   })
 
   it('does not disrupt an ongoing recording (peek, not take)', async () => {

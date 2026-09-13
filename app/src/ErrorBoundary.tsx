@@ -10,10 +10,16 @@
  *
  * Note: error boundaries only catch render/lifecycle errors, not errors thrown
  * inside event handlers or async callbacks. A fully-white window is the former,
- * which is exactly what this addresses.
+ * which is exactly what this addresses. A Rust kernel panic is usually the
+ * latter: the tool or undo handler that hit it catches the trap, and the app
+ * keeps running on the poisoned instance. So the boundary also listens for the
+ * wasm panic hook's `KERNEL_PANIC_EVENT` and stops the app right away, while
+ * the recording the hook captured is still in memory for Save reproducer.
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { getEntries } from './log/LogStore'
+import { getPanicCapture, KERNEL_PANIC_EVENT } from './log/panicCapture'
+import { saveCrashReproducer } from './log/reproducerDump'
 
 export const LAST_ERROR_KEY = 'hew:lastError'
 
@@ -31,6 +37,9 @@ interface Props {
 
 interface State {
   error: Error | null
+  /** What stopped the app: a render/lifecycle throw, or a kernel panic the
+   *  wasm hook reported (no render error exists to show as the symptom). */
+  source: 'render' | 'panic'
   componentStack: string
   /** Recent captured console errors — includes the kernel `panicked at …` line
    *  that poisons the wasm instance (the thrown error is only the symptom). */
@@ -38,31 +47,78 @@ interface State {
   /** Brief "Copied" confirmation on the copy-details button, mirroring
    *  LogPanel's own copy-button feedback. */
   copied: boolean
+  /** Save-reproducer button feedback: idle → saving → saved/error. */
+  saveState: 'idle' | 'saving' | 'saved' | 'error'
+  /** The saved file's path (Tauri only — web downloads have no path), shown
+   *  under the buttons after a successful save. */
+  savedPath: string | null
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null, componentStack: '', recentErrors: [], copied: false }
+  state: State = {
+    error: null,
+    source: 'render',
+    componentStack: '',
+    recentErrors: [],
+    copied: false,
+    saveState: 'idle',
+    savedPath: null,
+  }
 
   static getDerivedStateFromError(error: Error): Partial<State> {
-    return { error }
+    return { error, source: 'render' }
+  }
+
+  componentDidMount() {
+    window.addEventListener(KERNEL_PANIC_EVENT, this.handleKernelPanic)
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener(KERNEL_PANIC_EVENT, this.handleKernelPanic)
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    const stack = info.componentStack ?? ''
+    this.recordCrash(error, info.componentStack ?? '', 'Hew crashed during render:')
+  }
+
+  /** The wasm panic hook's event: stop the app now rather than wait for a
+   *  render to trip over the poisoned instance, which may never happen. */
+  private handleKernelPanic = () => {
+    if (this.state.error !== null) return
+    const error = new Error(getPanicCapture()?.message ?? 'kernel panic')
+    this.setState({ error, source: 'panic' })
+    this.recordCrash(error, '', 'Hew stopped on a kernel panic:')
+  }
+
+  private recordCrash(error: Error, stack: string, label: string) {
     // The original failure (often a Rust kernel panic) poisons the wasm instance
-    // *before* the render trap we caught here. The wasm panic hook records it to
-    // localStorage (it bypasses the JS console capture), so read that first, then
-    // append any recent captured console errors.
+    // *before* the render trap we caught here. Prefer the in-memory panic
+    // capture (this page session, carries the recording a reproducer needs) —
+    // fall back to the wasm panic hook's localStorage record (bypasses the JS
+    // console capture, survives a reload) only when there is no capture, e.g.
+    // after a reload where the poisoned instance no longer exists in memory.
     const recentErrors: string[] = []
-    try {
-      const panic = localStorage.getItem('hew:lastPanic')
-      if (panic !== null) recentErrors.push(`kernel panic — ${panic}`)
-    } catch {
-      /* ignore */
+    // The hook also console.errors the panic, which the console capture copies
+    // into LogStore; skip that copy so one panic isn't listed twice.
+    let panicMessage: string | null = null
+    const capture = getPanicCapture()
+    if (capture !== null) {
+      panicMessage = capture.message
+      recentErrors.push(`kernel panic — ${capture.at}\n${capture.message}`)
+    } else {
+      try {
+        const panic = localStorage.getItem('hew:lastPanic')
+        if (panic !== null) {
+          panicMessage = panic.slice(panic.indexOf('\n') + 1)
+          recentErrors.push(`kernel panic — ${panic}`)
+        }
+      } catch {
+        /* ignore */
+      }
     }
     recentErrors.push(
       ...getEntries()
-        .filter((e) => e.level === 'error')
+        .filter((e) => e.level === 'error' && e.message !== panicMessage)
         .slice(-8)
         .map((e) => e.message),
     )
@@ -73,7 +129,7 @@ export class ErrorBoundary extends Component<Props, State> {
       /* ignore storage failures */
     }
     // eslint-disable-next-line no-console
-    console.error('Hew crashed during render:', error, stack)
+    console.error(label, error, stack)
     this.setState({ componentStack: stack, recentErrors })
   }
 
@@ -85,8 +141,33 @@ export class ErrorBoundary extends Component<Props, State> {
     window.setTimeout(() => this.setState({ copied: false }), 1200)
   }
 
+  private saveButtonLabel(): string {
+    switch (this.state.saveState) {
+      case 'saving':
+        return 'Saving…'
+      case 'saved':
+        return 'Saved'
+      case 'error':
+        return "Couldn't save"
+      case 'idle':
+        return 'Save reproducer'
+    }
+  }
+
+  private handleSaveReproducer = () => {
+    if (this.state.saveState === 'saving') return
+    this.setState({ saveState: 'saving', savedPath: null })
+    void saveCrashReproducer().then((result) => {
+      if (result.ok) {
+        this.setState({ saveState: 'saved', savedPath: result.path })
+      } else {
+        this.setState({ saveState: 'error', savedPath: null })
+      }
+    })
+  }
+
   render() {
-    const { error, componentStack, recentErrors, copied } = this.state
+    const { error, source, componentStack, recentErrors, copied, saveState, savedPath } = this.state
     if (error === null) return this.props.children
 
     return (
@@ -139,11 +220,35 @@ export class ErrorBoundary extends Component<Props, State> {
             border: '1px solid var(--border-strong, #333)',
             borderRadius: 4,
             cursor: 'pointer',
+            marginRight: 8,
             marginBottom: 16,
           }}
         >
           {copied ? 'Copied' : 'Copy details'}
         </button>
+        <button
+          onClick={this.handleSaveReproducer}
+          style={{
+            padding: '6px 16px',
+            fontSize: 13,
+            background: 'var(--surface-input, #111)',
+            color: 'var(--text-primary, #eee)',
+            border: '1px solid var(--border-strong, #333)',
+            borderRadius: 4,
+            cursor: 'pointer',
+            marginBottom: 16,
+          }}
+        >
+          {this.saveButtonLabel()}
+        </button>
+        {saveState === 'saved' && savedPath !== null && (
+          <div style={{ color: 'var(--text-secondary, #bbb)', marginTop: -8, marginBottom: 16 }}>
+            Saved to {savedPath}
+          </div>
+        )}
+        <p style={{ color: 'var(--text-secondary, #bbb)', marginTop: 0, marginBottom: 16 }}>
+          Save reproducer writes a file with the steps that led here. Attach it to your bug report.
+        </p>
         {recentErrors.length > 0 && (
           <>
             <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>
@@ -165,23 +270,27 @@ export class ErrorBoundary extends Component<Props, State> {
             </pre>
           </>
         )}
-        <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>Render error (symptom):</div>
-        <pre
-          style={{
-            whiteSpace: 'pre-wrap',
-            background: 'var(--surface-input, #111)',
-            border: '1px solid var(--border-strong, #333)',
-            borderRadius: 4,
-            padding: 12,
-            color: 'var(--danger-base, #f88)',
-            fontSize: 12,
-          }}
-        >
-          {error.message}
-          {'\n\n'}
-          {error.stack}
-          {componentStack ? `\n\n${componentStack}` : ''}
-        </pre>
+        {source === 'render' && (
+          <>
+            <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>Render error (symptom):</div>
+            <pre
+              style={{
+                whiteSpace: 'pre-wrap',
+                background: 'var(--surface-input, #111)',
+                border: '1px solid var(--border-strong, #333)',
+                borderRadius: 4,
+                padding: 12,
+                color: 'var(--danger-base, #f88)',
+                fontSize: 12,
+              }}
+            >
+              {error.message}
+              {'\n\n'}
+              {error.stack}
+              {componentStack ? `\n\n${componentStack}` : ''}
+            </pre>
+          </>
+        )}
       </div>
     )
   }

@@ -901,8 +901,11 @@ enum DocAction {
     SetAxes { before: AxesFrame, after: AxesFrame },
     /// A single sketch vertex dragged to a new position (Phase D per-vertex
     /// edit). Topology-preserving, so the inverse is just the old position:
-    /// undo restores `old_pos`, redo re-applies `new_pos`; both the `SketchId`
-    /// and the `SketchVertexId` are handle-stable.
+    /// undo restores `old_pos`, redo re-applies `new_pos`. The `SketchId` is
+    /// handle-stable, but `vertex` is only a hint: undoing an extrusion of the
+    /// sketch in between re-keys the vertices it restores, so undo and redo
+    /// find the vertex by position (`Document::resolve_moved_sketch_vertex`)
+    /// and refuse with [`DocumentError::InverseDiverged`] when it is gone.
     MovedSketchVertex {
         sketch: SketchId,
         vertex: SketchVertexId,
@@ -2354,8 +2357,10 @@ pub enum DocumentError {
     /// Replaying a per-Object inverse failed — a kernel bug, surfaced loudly.
     InverseFailed(KernelOpError),
     /// A replayed per-Object inverse/redo ran but did not reproduce the
-    /// recorded state (rule 9 proof failure) — a kernel bug, surfaced loudly;
-    /// the object is untouched.
+    /// recorded state (rule 9 proof failure), or the document no longer holds
+    /// what a step recorded (a sketch vertex drag whose vertex is gone) — a
+    /// kernel bug, surfaced loudly; the document is untouched and the step
+    /// stays on its stack.
     InverseDiverged,
     /// A geometry-creating in-instance op (`extrude_region_in_instance`) was
     /// given a typed world-space distance to map through an instance pose
@@ -11169,6 +11174,44 @@ impl Document {
         })
     }
 
+    /// The vertex a recorded [`DocAction::MovedSketchVertex`] names, found
+    /// at `at` — where the drag left it (undo) or where undo put it back
+    /// (redo) — or `None` when the live sketch has no vertex there.
+    ///
+    /// The recorded key is tried first, but it is not durable: undoing an
+    /// extrusion of this sketch re-inserts the consumed scaffolding's
+    /// vertices into their original slots under fresh generations
+    /// ([`Sketch::restore_edges`]), so the key goes stale while a vertex
+    /// still sits exactly at the recorded position. Resolving by position
+    /// is the same geometry-not-ids posture as
+    /// [`Document::redo_created_object`]. Sticky welding keeps sketch
+    /// vertices [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) apart; a
+    /// position that nonetheless matches more than one vertex is refused
+    /// rather than guessed.
+    fn resolve_moved_sketch_vertex(
+        &self,
+        sketch: SketchId,
+        vertex: SketchVertexId,
+        at: Point3,
+    ) -> Option<SketchVertexId> {
+        if self.hidden_sketches.contains(&sketch) {
+            return None;
+        }
+        let vertices = self.sketches.get(sketch)?.vertices();
+        let is_at = |p: Point3| p.approx_eq(at, crate::tol::POINT_MERGE);
+        if vertices.get(vertex).is_some_and(|v| is_at(v.position)) {
+            return Some(vertex);
+        }
+        let mut near = vertices
+            .iter()
+            .filter(|(_, v)| is_at(v.position))
+            .map(|(id, _)| id);
+        match (near.next(), near.next()) {
+            (Some(id), None) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Non-destructively groups sibling nodes into a new [`Group`](GroupRecord)
     /// (ARCHITECTURE.md). Unlike a boolean union, no geometry is welded and no
     /// member is consumed — the members keep their identity, geometry, and
@@ -16473,7 +16516,12 @@ impl Document {
                 match self.undo() {
                     Ok(child_change) => merge_doc_change(&mut change, child_change),
                     Err(error) => {
+                        // Roll back the children undone so far and keep the
+                        // compound itself: `checkpoint` was taken after the
+                        // pop, so without the re-push a refused child would
+                        // drop the whole step from history.
                         *self = checkpoint;
+                        self.undo.push(action.clone());
                         return Err(error);
                     }
                 }
@@ -16918,13 +16966,22 @@ impl Document {
                 sketch,
                 vertex,
                 old_pos,
-                ..
+                new_pos,
             } => {
-                // Undo a vertex drag by moving it back. The reverse move is
-                // topology-preserving by construction, so it cannot be refused.
-                self.sketches[sketch]
-                    .move_vertex(vertex, old_pos)
-                    .expect("reverse of a validated vertex move must re-apply");
+                // Undo a vertex drag by moving it back. The recorded key can
+                // be stale by now (see `resolve_moved_sketch_vertex`), so the
+                // vertex is found where the drag left it. A vertex that is no
+                // longer there, or a reverse move the sketch refuses, means
+                // the document no longer matches what this step recorded: the
+                // step returns to the undo stack and nothing changes.
+                let Some(v) = self.resolve_moved_sketch_vertex(sketch, vertex, new_pos) else {
+                    self.undo.push(action);
+                    return Err(DocumentError::InverseDiverged);
+                };
+                if self.sketches[sketch].move_vertex(v, old_pos).is_err() {
+                    self.undo.push(action);
+                    return Err(DocumentError::InverseDiverged);
+                }
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -17912,7 +17969,10 @@ impl Document {
                 match self.redo() {
                     Ok(child_change) => merge_doc_change(&mut change, child_change),
                     Err(error) => {
+                        // Mirror of the undo side: roll back and keep the
+                        // compound on the redo stack.
                         *self = checkpoint;
+                        self.redo.push(action.clone());
                         return Err(error);
                     }
                 }
@@ -18375,13 +18435,20 @@ impl Document {
             &DocAction::MovedSketchVertex {
                 sketch,
                 vertex,
+                old_pos,
                 new_pos,
-                ..
             } => {
-                // Redo a vertex drag by re-applying the new position.
-                self.sketches[sketch]
-                    .move_vertex(vertex, new_pos)
-                    .expect("forward of a validated vertex move must re-apply");
+                // Redo a vertex drag by re-applying the new position, finding
+                // the vertex where undo left it — the mirror of the undo arm,
+                // with the same typed refusal when the document diverged.
+                let Some(v) = self.resolve_moved_sketch_vertex(sketch, vertex, old_pos) else {
+                    self.redo.push(action);
+                    return Err(DocumentError::InverseDiverged);
+                };
+                if self.sketches[sketch].move_vertex(v, new_pos).is_err() {
+                    self.redo.push(action);
+                    return Err(DocumentError::InverseDiverged);
+                }
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],

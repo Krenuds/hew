@@ -4,6 +4,12 @@
  * far + serialized .hew + diagnostic-log tail} to disk so "it broke" becomes
  * "here is a model + an input log that reproduces it".
  *
+ * Also exports `saveCrashReproducer`, the same bundle assembled on demand
+ * from the crash screen's "Save reproducer" button — a Rust panic poisons
+ * the wasm instance before the auto-dump above ever runs (every `Scene` call
+ * throws afterwards, `take_recording()` included), so it sources `recording`
+ * from the panic hook's in-memory capture (./panicCapture.ts) instead.
+ *
  * Depends on:
  *   -  recording (docs/dev/DIAGNOSTICS.md): `scene.start_recording()` /
  *     `scene.take_recording()` — the typed Scene command stream.
@@ -17,6 +23,7 @@
 
 import * as diagnosticLog from './diagnosticLog'
 import { makeReproducerStore, type ReproducerStore } from '../io/reproducerStore'
+import { getPanicCapture } from './panicCapture'
 
 /** The minimal Scene surface this module needs — see crates/wasm-api/src/lib.rs. */
 export interface RecordableScene {
@@ -106,6 +113,71 @@ function base64FromBytes(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
+/** An assembled bundle, ready to hand to a `ReproducerStore.write()` call. */
+interface AssembledBundle {
+  name: string
+  json: string
+}
+
+/**
+ * Build a {@link ReproducerBundle} (manifest + recording/log/hew) and its
+ * `<prefix>-<ISO-timestamp>.json` filename, shared by `dumpReproducer` and
+ * `saveCrashReproducer` — the two differ only in how they source `recording`
+ * (a live scene vs. the panic capture) and in what happens with the result
+ * (rate-limited best-effort vs. a user-facing ok/path pair), not in how the
+ * bundle itself is put together.
+ */
+function assembleBundle(
+  prefix: string,
+  reason: string,
+  now: number,
+  recording: string | null,
+  hew: string | null,
+  stateHash: string,
+): AssembledBundle {
+  let log = ''
+  try {
+    const records = diagnosticLog.getRecords()
+    const tail = records.slice(Math.max(0, records.length - LOG_TAIL_RECORDS))
+    log = diagnosticLog.toNDJSON(tail)
+  } catch {
+    log = ''
+  }
+
+  const bundle: ReproducerBundle = {
+    manifest: {
+      reason,
+      ts: now,
+      appVersion: typeof __HEW_VERSION__ !== 'undefined' ? __HEW_VERSION__ : '0.0.0',
+      stateHash,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+    },
+    recording,
+    log,
+    hew,
+  }
+
+  const name = `${prefix}-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`
+  return { name, json: JSON.stringify(bundle) }
+}
+
+/** Settles when the dump in flight finishes, so the crash screen's Save
+ *  reproducer can wait its turn instead of reporting a false failure. */
+let dumpSettled: Promise<void> = Promise.resolve()
+let settleDump: () => void = () => {}
+
+function beginDump(): void {
+  dumping = true
+  dumpSettled = new Promise((resolve) => {
+    settleDump = resolve
+  })
+}
+
+function endDump(): void {
+  dumping = false
+  settleDump()
+}
+
 /**
  * Gather a reproducer bundle from the registered scene + diagnostic log and
  * write it via the reproducer store as `reproducer-<ISO-timestamp>.json`.
@@ -115,14 +187,20 @@ function base64FromBytes(bytes: Uint8Array): string {
  * scene still produces a bundle with `recording`/`hew` set to null rather
  * than aborting. Rate-limited so an error storm doesn't write hundreds of
  * files. Returns the path (Tauri) or null (web download / rate-limited /
- * re-entrant / failed).
+ * re-entrant / failed / stood down).
+ *
+ * Stands down once a kernel panic has been captured: every later uncaught
+ * error is the poisoned instance's "recursive use" symptom, and the crash
+ * screen the panic raised owns saving a reproducer, so dumping here as well
+ * would only add an unrequested second download on web.
  */
 export async function dumpReproducer(reason: string): Promise<string | null> {
   if (dumping) return null
+  if (getPanicCapture() !== null) return null
   const now = Date.now()
   if (now - lastDumpAt < RATE_LIMIT_MS) return null
 
-  dumping = true
+  beginDump()
   lastDumpAt = now
   try {
     const scene = registeredScene
@@ -149,37 +227,82 @@ export async function dumpReproducer(reason: string): Promise<string | null> {
       }
     }
 
-    let log = ''
+    const { name, json } = assembleBundle('reproducer', reason, now, recording, hew, stateHash)
     try {
-      const records = diagnosticLog.getRecords()
-      const tail = records.slice(Math.max(0, records.length - LOG_TAIL_RECORDS))
-      log = diagnosticLog.toNDJSON(tail)
-    } catch {
-      log = ''
-    }
-
-    const bundle: ReproducerBundle = {
-      manifest: {
-        reason,
-        ts: now,
-        appVersion: typeof __HEW_VERSION__ !== 'undefined' ? __HEW_VERSION__ : '0.0.0',
-        stateHash,
-        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
-      },
-      recording,
-      log,
-      hew,
-    }
-
-    const name = `reproducer-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`
-    try {
-      return await getStore().write(name, JSON.stringify(bundle))
+      return await getStore().write(name, json)
     } catch {
       return null
     }
   } catch {
     // Never throw out of the failure handler.
     return null
+  } finally {
+    endDump()
+  }
+}
+
+/**
+ * Save a reproducer bundle from the crash screen (ErrorBoundary's "Save
+ * reproducer" button) — user-triggered, so unlike `dumpReproducer` it is
+ * NOT subject to `RATE_LIMIT_MS` (an auto-dump moments earlier must not
+ * swallow a deliberate click), and a dump already in flight (either
+ * function's) is waited out rather than raced or reported as a failure.
+ *
+ * Recording: a panic capture (docs/dev/DIAGNOSTICS.md) is preferred when one
+ * exists, since the registered scene is almost always poisoned by then and
+ * `take_recording()` would just throw; only with no capture at all — a crash
+ * that isn't a kernel panic — is `scene.take_recording()` tried directly.
+ *
+ * Best-effort like `dumpReproducer`: never throws, and a throwing/missing
+ * scene still produces a bundle with `hew` set to null rather than aborting.
+ */
+export async function saveCrashReproducer(): Promise<{ ok: boolean; path: string | null }> {
+  while (dumping) await dumpSettled
+  beginDump()
+  try {
+    const capture = getPanicCapture()
+    const scene = registeredScene
+
+    let recording: string | null = null
+    if (capture !== null) {
+      recording = capture.recording
+    } else if (scene !== null) {
+      try {
+        recording = scene.take_recording()
+      } catch {
+        recording = null
+      }
+    }
+
+    let hew: string | null = null
+    let stateHash = '0'
+    if (scene !== null) {
+      try {
+        hew = base64FromBytes(scene.save())
+      } catch {
+        hew = null
+      }
+      try {
+        stateHash = scene.state_hash().toString()
+      } catch {
+        stateHash = '0'
+      }
+    }
+
+    const reason = capture !== null ? `kernel-panic: ${capture.message.split('\n')[0]}` : 'crash-screen'
+
+    const { name, json } = assembleBundle('reproducer', reason, Date.now(), recording, hew, stateHash)
+    try {
+      const path = await getStore().write(name, json)
+      return { ok: true, path }
+    } catch {
+      return { ok: false, path: null }
+    }
+  } catch {
+    // Never throw — this is fired from a button click, not a failure
+    // handler, but the contract still holds: saving a reproducer must never
+    // itself crash the (already-crashed) app.
+    return { ok: false, path: null }
   } finally {
     dumping = false
   }

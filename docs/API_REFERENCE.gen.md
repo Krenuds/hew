@@ -1587,8 +1587,8 @@ Redo the most recently undone entry.
 **Refusals:**
 
 - `nothing_to_redo` — Nothing to redo.
-- `inverse_failed` — This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
-- `inverse_diverged` — Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
+- `inverse_failed` — This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
+- `inverse_diverged` — Undo or redo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
 
 ### `hew.history.status`
 
@@ -1722,8 +1722,8 @@ Undo the top history entry (optionally guarded by expected_label).
 
 - `expected_label_mismatch`
 - `nothing_to_undo` — Nothing to undo.
-- `inverse_failed` — This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
-- `inverse_diverged` — Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
+- `inverse_failed` — This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
+- `inverse_diverged` — Undo or redo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.
 
 ## hew.library
 

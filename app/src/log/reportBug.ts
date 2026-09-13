@@ -4,7 +4,10 @@
  * reproducerDump.ts (auto-triggered on an uncaught error/rejection), this is
  * fired explicitly from a menu action — there is no failure to react to, so
  * the bundle additionally carries OS/GPU/app-version and the input recorder's
- * buffer (peeked, not taken, so an ongoing recording is undisturbed).
+ * buffer (peeked, not taken, so an ongoing recording is undisturbed). The
+ * session's high-level command recording is peeked too, for the same
+ * reason: a later crash reproducer may still need every call `take_recording`
+ * would otherwise consume.
  *
  * Structurally this mirrors reproducerDump.ts: a minimal Scene surface
  * (`ReportableScene`), best-effort try/catch around every scene call so a
@@ -16,11 +19,13 @@
 import * as diagnosticLog from './diagnosticLog'
 import * as inputRecorder from '../recording/inputRecorder'
 import { makeReproducerStore, type ReproducerStore } from '../io/reproducerStore'
+import { getPanicCapture } from './panicCapture'
 
 /** The minimal Scene surface this module needs — see crates/wasm-api/src/lib.rs. */
 export interface ReportableScene {
   save(): Uint8Array
   state_hash(): bigint
+  peek_recording(): string
 }
 
 /**
@@ -53,6 +58,14 @@ export interface BugReportBundle {
   log: string
   /** The buffered low-level input events (peeked, not cleared). */
   input: inputRecorder.InputEvent[]
+  /**
+   * The session's high-level command recording (docs/dev/DIAGNOSTICS.md),
+   * peeked — not taken — so an ongoing recording (and whatever a later crash
+   * reproducer needs from it) is undisturbed. Null if unavailable (a
+   * throwing scene falls back to the panic capture, in case the poisoned
+   * instance is what's being reported).
+   */
+  recording: string | null
 }
 
 /** Cap on how many diagnostic-log records to include in the bundle. */
@@ -114,12 +127,13 @@ function detectGpu(): string {
 
 /**
  * Assemble a bug-report bundle from `scene` + the diagnostic log + the
- * buffered input recording, and write it via the reproducer store as
- * `bug-report-<ISO-timestamp>.json`. Best-effort: never throws (mirrors
- * reproducerDump.dumpReproducer); a throwing scene still produces a bundle
- * with `hew`/`stateHash` set to null/'0' rather than aborting. Returns a
- * [`BugReportResult`] so the caller can report success (saved path / web
- * download) vs. failure to the user.
+ * buffered input recording + the peeked session recording, and write it via
+ * the reproducer store as `bug-report-<ISO-timestamp>.json`. Best-effort:
+ * never throws (mirrors reproducerDump.dumpReproducer); a throwing scene
+ * still produces a bundle with `hew`/`stateHash`/`recording` set to
+ * null/'0'/null rather than aborting. Returns a [`BugReportResult`] so the
+ * caller can report success (saved path / web download) vs. failure to the
+ * user.
  */
 export async function generateBugReport(
   scene: ReportableScene,
@@ -157,6 +171,18 @@ export async function generateBugReport(
       input = []
     }
 
+    // NEVER take_recording() here: this fires from a menu action, not a
+    // failure handler, and stealing the buffer would rob a later crash
+    // reproducer of the calls that led up to it. Fall back to the panic
+    // capture only if the scene itself can't be peeked (most likely because
+    // it's already poisoned by the panic the capture is from).
+    let recording: string | null = null
+    try {
+      recording = scene.peek_recording()
+    } catch {
+      recording = getPanicCapture()?.recording ?? null
+    }
+
     let userAgent = ''
     try {
       userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : ''
@@ -191,6 +217,7 @@ export async function generateBugReport(
       hew,
       log,
       input,
+      recording,
     }
 
     const name = `bug-report-${new Date(now).toISOString().replace(/[:.]/g, '-')}.json`

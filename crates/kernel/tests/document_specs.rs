@@ -731,6 +731,129 @@ fn move_sketch_vertex_rejects_a_retopologizing_drag() {
     );
 }
 
+/// A vertex drag stays reversible after an extrusion of its sketch is undone
+/// in between. Consuming the region deletes the doomed vertices, and undoing
+/// the extrusion re-inserts them into their original slots under fresh keys,
+/// so the `SketchVertexId` the drag recorded is stale by the time the drag
+/// itself is undone. Undo and redo must still reverse the drag.
+#[test]
+fn move_sketch_vertex_undo_survives_an_undone_extrusion() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let corner = Point3::new(2.0, 2.0, 0.0);
+    let dragged = Point3::new(2.5, 1.7, 0.0);
+    let v = sketch_vertex_at(&doc, s, corner);
+    doc.move_sketch_vertex(s, v, dragged).expect("move corner");
+    let region = only_region(&doc, s);
+    doc.extrude_region(s, region, 1.0).expect("extrude");
+
+    for round in 0..2 {
+        doc.undo().expect("undo extrusion");
+        doc.undo()
+            .expect("undo vertex move after an undone extrusion");
+        sketch_vertex_at(&doc, s, corner);
+        assert!(
+            !doc.sketch(s)
+                .unwrap()
+                .vertices()
+                .iter()
+                .any(|(_, v)| approx_pt(v.position, dragged)),
+            "round {round}: undo moved the corner back"
+        );
+
+        doc.redo().expect("redo vertex move");
+        sketch_vertex_at(&doc, s, dragged);
+        doc.redo().expect("redo extrusion");
+    }
+}
+
+/// When the sketch no longer matches what a vertex drag recorded — nothing
+/// sits where the step expects the vertex — undo refuses typed instead of
+/// guessing, leaves the document untouched, and keeps the step on the stack
+/// so it applies once the sketch matches again. Redo holds the same contract.
+#[test]
+fn move_sketch_vertex_history_refuses_typed_when_the_sketch_diverged() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let corner = Point3::new(2.0, 2.0, 0.0);
+    let dragged = Point3::new(2.5, 1.7, 0.0);
+    let elsewhere = Point3::new(2.2, 2.3, 0.0);
+    let v = sketch_vertex_at(&doc, s, corner);
+    doc.move_sketch_vertex(s, v, dragged).expect("move corner");
+
+    // Diverge the sketch outside the undo history.
+    let sk = doc.sketch_mut(s).unwrap();
+    sk.move_vertex(v, elsewhere).expect("out-of-history move");
+    let depth = doc.undo_depth();
+    assert_eq!(doc.undo(), Err(DocumentError::InverseDiverged));
+    assert_eq!(doc.undo_depth(), depth, "the refused step stays undoable");
+    sketch_vertex_at(&doc, s, elsewhere);
+
+    let sk = doc.sketch_mut(s).unwrap();
+    sk.move_vertex(v, dragged)
+        .expect("realign with the history");
+    doc.undo().expect("undo once the sketch matches again");
+    sketch_vertex_at(&doc, s, corner);
+
+    let sk = doc.sketch_mut(s).unwrap();
+    sk.move_vertex(v, elsewhere).expect("diverge again");
+    assert_eq!(doc.redo(), Err(DocumentError::InverseDiverged));
+    sketch_vertex_at(&doc, s, elsewhere);
+
+    let sk = doc.sketch_mut(s).unwrap();
+    sk.move_vertex(v, corner).expect("realign with the history");
+    doc.redo().expect("redo once the sketch matches again");
+    sketch_vertex_at(&doc, s, dragged);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// However a corner drag and an extrusion of the same sketch interleave
+    /// with undo and redo, neither step ever fails, and the corner always
+    /// lands exactly where each step left it.
+    #[test]
+    fn prop_corner_drag_round_trips_around_an_extrusion(
+        w in 0.5f64..5.0,
+        h in 0.5f64..5.0,
+        corner in 0usize..4,
+        fx in -0.3f64..0.3,
+        fy in -0.3f64..0.3,
+        extrude in any::<bool>(),
+        rounds in 1usize..4,
+    ) {
+        let mut doc = Document::new();
+        let s = doc.add_sketch(ground());
+        draw_rect(&mut doc, s, 0.0, 0.0, w, h);
+        let (cx, cy) = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)][corner];
+        let side = w.min(h);
+        let from = Point3::new(cx, cy, 0.0);
+        let to = Point3::new(cx + fx * side, cy + fy * side, 0.0);
+        prop_assume!(!approx_pt(from, to));
+        let v = sketch_vertex_at(&doc, s, from);
+        prop_assume!(doc.move_sketch_vertex(s, v, to).is_ok());
+        if extrude {
+            let region = only_region(&doc, s);
+            doc.extrude_region(s, region, 1.0).expect("extrude the dragged outline");
+        }
+
+        for _ in 0..rounds {
+            if extrude {
+                prop_assert!(doc.undo().is_ok(), "undo extrusion");
+            }
+            prop_assert!(doc.undo().is_ok(), "undo corner drag");
+            sketch_vertex_at(&doc, s, from);
+            prop_assert!(doc.redo().is_ok(), "redo corner drag");
+            sketch_vertex_at(&doc, s, to);
+            if extrude {
+                prop_assert!(doc.redo().is_ok(), "redo extrusion");
+            }
+        }
+    }
+}
+
 #[test]
 fn move_unknown_sketch_vertex_errors() {
     let mut doc = Document::new();

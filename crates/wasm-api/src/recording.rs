@@ -1047,6 +1047,43 @@ pub fn take_calls() -> Vec<RecordedCall> {
     CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
+/// Copies the captured calls without clearing the buffer, for a bug report
+/// that must not take the calls a later crash reproducer needs.
+pub fn peek_calls() -> Vec<RecordedCall> {
+    CALLS.with(|c| c.borrow().clone())
+}
+
+/// The captured calls as [`Recording`] JSON for the panic hook, or `None`
+/// when there is nothing to capture. Never panics and never clears: the
+/// thread-local may be mid-borrow (a panic raised inside [`record`]) or
+/// already torn down, and either yields `None` rather than a second panic
+/// inside the hook. A panicking frame cannot hash the document, so
+/// `golden_hash` is `0`: the artifact reproduces the panic on replay but is
+/// not a regression oracle.
+pub fn panic_snapshot_json() -> Option<String> {
+    #[derive(Serialize)]
+    struct RecordingView<'a> {
+        version: u32,
+        calls: &'a [RecordedCall],
+        golden_hash: u64,
+    }
+    CALLS
+        .try_with(|c| {
+            let calls = c.try_borrow().ok()?;
+            if calls.is_empty() {
+                return None;
+            }
+            serde_json::to_string(&RecordingView {
+                version: RECORDING_FORMAT_VERSION,
+                calls: &calls,
+                golden_hash: 0,
+            })
+            .ok()
+        })
+        .ok()
+        .flatten()
+}
+
 /// Runs `body` with capture suppressed (used during replay so re-issued calls
 /// don't re-record), restoring the prior state after.
 pub fn without_capture<R>(body: impl FnOnce() -> R) -> R {
@@ -1082,6 +1119,44 @@ mod tests {
         let calls = take_calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0], RecordedCall::BeginGroundSketch);
+    }
+
+    #[test]
+    fn peek_calls_copies_without_clearing() {
+        reset();
+        start();
+        record(RecordedCall::BeginGroundSketch);
+        assert_eq!(peek_calls(), vec![RecordedCall::BeginGroundSketch]);
+        assert_eq!(take_calls().len(), 1, "peeking left the buffer for take");
+    }
+
+    #[test]
+    fn panic_snapshot_parses_as_a_recording_and_leaves_the_buffer() {
+        reset();
+        assert_eq!(
+            panic_snapshot_json(),
+            None,
+            "nothing captured, nothing handed over"
+        );
+        start();
+        record(RecordedCall::BeginGroundSketch);
+        let json = panic_snapshot_json().expect("a captured call is snapshotted");
+        let rec: Recording = serde_json::from_str(&json).expect("parses as a Recording");
+        assert_eq!(rec.version, RECORDING_FORMAT_VERSION);
+        assert_eq!(rec.calls, vec![RecordedCall::BeginGroundSketch]);
+        assert_eq!(rec.golden_hash, 0, "a panicking frame has no golden");
+        assert_eq!(take_calls().len(), 1, "the snapshot did not clear");
+    }
+
+    #[test]
+    fn panic_snapshot_yields_none_while_the_buffer_is_borrowed() {
+        reset();
+        start();
+        record(RecordedCall::BeginGroundSketch);
+        CALLS.with(|c| {
+            let _held = c.borrow_mut();
+            assert_eq!(panic_snapshot_json(), None);
+        });
     }
 
     #[test]

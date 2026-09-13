@@ -270,10 +270,12 @@ const DESCRIPTIONS: Record<string, string> = {
   // ---------------------------------------------------------- history
   NothingToUndo: 'Nothing to undo.',
   NothingToRedo: 'Nothing to redo.',
+  // Both are raised by redo as well as undo (the same proof-carrying replay
+  // runs in either direction), so the copy must not name one.
   InverseFailed:
-    "This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.",
+    "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.",
   InverseDiverged:
-    'Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.',
+    'Undo or redo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.',
   // Raised only on the FORWARD commit of a 3D-text placement, where
   // `place_text` folds the just-closed drawing gesture into one undo step
   // and does not find it at the top of the history. Never raised by an

@@ -11,7 +11,13 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { fireEvent } from '@testing-library/react'
-import { computeEditContext, computeLitInstances, applyEditContext, isToolSwitchAllowedUnderReadOnly } from './Viewport'
+import {
+  computeEditContext,
+  computeLitInstances,
+  applyEditContext,
+  isToolSwitchAllowedUnderReadOnly,
+  mapUndoRedoError,
+} from './Viewport'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import type { EditContext, Tool } from '../tools/types'
@@ -257,5 +263,39 @@ describe('isToolSwitchAllowedUnderReadOnly (shop-mode adversarial review, CRITIC
     ]) {
       expect(isToolSwitchAllowedUnderReadOnly(name)).toBe(false)
     }
+  })
+})
+
+// runUndo/runRedo's error-mapping, extracted as a standalone pure function
+// (mapUndoRedoError) specifically so this contract — a refused undo/redo's
+// kernel copy reaching the user, but a poisoned instance's code-less throw
+// left alone for the crash screen — is unit-testable without mounting the
+// whole component/WASM stack.
+describe('mapUndoRedoError', () => {
+  it('maps a typed kernel refusal to its plain-language copy', () => {
+    expect(mapUndoRedoError(new Error('RestoreConflicts: newer drawing is in the way'))).toEqual({
+      code: 'RestoreConflicts',
+      message:
+        'Undo needs to put the original outline back, but newer drawing is in its way. Erase the overlapping lines and undo again.',
+    })
+  })
+
+  it('maps every undo/redo-specific refusal code (InverseFailed, InverseDiverged)', () => {
+    expect(mapUndoRedoError(new Error('InverseFailed: could not invert')))
+      .toEqual({ code: 'InverseFailed', message: expect.stringContaining('Report Bug') })
+    expect(mapUndoRedoError(new Error('InverseDiverged: digest mismatch')))
+      .toEqual({ code: 'InverseDiverged', message: expect.stringContaining('Report Bug') })
+  })
+
+  it('returns null for a code-less error (a poisoned instance) — left to the crash screen', () => {
+    expect(
+      mapUndoRedoError(
+        new Error('recursive use of an object detected which would lead to unsafe aliasing in rust'),
+      ),
+    ).toBeNull()
+  })
+
+  it('returns null for a non-Error throw with no CODE: prefix', () => {
+    expect(mapUndoRedoError('boom')).toBeNull()
   })
 })
