@@ -2,7 +2,8 @@
 
 Everything here repackages the release artifacts GitHub Actions already
 produces (`.github/workflows/release.yml`) — the Linux `.deb` for x86_64
-and aarch64 — for distributions whose users asked for a native package.
+and aarch64, and the notarized universal macOS `.dmg` — for platforms
+whose users asked for a native package.
 Nothing is built from source here: the desktop build needs pnpm, wasm-pack
 and a pinned wasm-opt at build time, and none of these ecosystems can
 express that offline dependency chain cleanly, so every package below is a
@@ -17,6 +18,7 @@ run or pushed by hand.
 | `pacman/hew-bin/` | a `PKGBUILD` build recipe, built by CI (never AUR — AUR has stopped accepting new maintainer registrations, and this route is a strictly better user experience anyway: a real signed binary repo, no local build) | a self-hosted, GPG-signed pacman repository under `hew3d/hew-packages` (GitHub Pages) |
 | `gentoo/` | a Gentoo overlay: `media-gfx/hew-bin` ebuild, `metadata.xml`, `Manifest`, and the overlay's own `profiles/` and `metadata/` | the `hew3d/gentoo-overlay` repository, added with `eselect repository add hew3d git https://github.com/hew3d/gentoo-overlay.git` |
 | `flatpak/` | a Flatpak manifest (`com.hew3d.Hew.yml`) and AppStream metainfo | a self-hosted, GPG-signed Flatpak repo under `hew3d/hew-packages`, plus a single-file `.flatpak` bundle attached to each GitHub release |
+| `homebrew/` | a Homebrew cask (`Casks/hew.rb`) that installs the release `.dmg` and links `hew-cli` onto `PATH`, plus the tap's own `README.md` | the `hew3d/homebrew-tap` repository, installed with `brew install --cask hew3d/tap/hew` |
 | `pages/index.html` | the landing page for `hew3d.github.io/hew-packages`, with install instructions for all three | published as-is alongside the pacman/Flatpak repos |
 | `scripts/` | the render/build/validate scripts the workflow calls; see the header comment in each for what it does | n/a — CI-only |
 
@@ -43,8 +45,18 @@ cutting a new release. Job graph:
    wholesale, then attaches the `.flatpak` bundle to the GitHub release.
 6. **gentoo-publish** — after validation passes, republishes
    `packaging/gentoo/` wholesale into `hew3d/gentoo-overlay`.
+7. **homebrew-validate** — lints and audits the rendered cask, then
+   installs it for real on a macOS runner (the `.dmg` download and
+   checksum, the app, and the `hew-cli` link), then uninstalls it with
+   `--zap` under a scratch `HOME` seeded with stand-ins for user work that
+   must survive (`scripts/validate-homebrew-cask.sh`). If the release has
+   no `.dmg`, render leaves the cask unrendered and only the two Homebrew
+   jobs fail; the Linux targets still publish.
+8. **homebrew-publish** — after validation passes, republishes
+   `packaging/homebrew/` wholesale into `hew3d/homebrew-tap`.
 
-Both `hew3d/hew-packages` and `hew3d/gentoo-overlay` are rebuilt and
+`hew3d/hew-packages`, `hew3d/gentoo-overlay`, and `hew3d/homebrew-tap` are
+all rebuilt and
 republished **wholesale** on every run rather than incrementally appended
 to — there's no persistent ostree object store or pacman package history to
 grow unbounded, at the cost of not supporting downgrades or Flatpak delta
@@ -54,8 +66,11 @@ ecosystem's users start asking for version history.
 ## One-time setup (not automatable — these are account- and repo-level
 actions someone with the right access has to do once)
 
-- Create `hew3d/hew-packages` (public) and `hew3d/gentoo-overlay` if either
-  doesn't already exist.
+- Create `hew3d/hew-packages` (public), `hew3d/gentoo-overlay`, and
+  `hew3d/homebrew-tap` (public, default branch `main`) if any of them
+  doesn't already exist. Homebrew requires the `homebrew-` name prefix for
+  `hew3d/tap` to resolve. Anything committed to these by hand is
+  overwritten on the next run.
 - Enable GitHub Pages on `hew3d/hew-packages`: Settings → Pages → Deploy
   from a branch → `main` / root.
 - Generate a dedicated GPG signing keypair (no passphrase, since CI signs
@@ -65,8 +80,20 @@ actions someone with the right access has to do once)
   CI; losing it means re-keying and breaking trust for every existing
   pacman/Flatpak install until they re-add the remote.
 - Create a fine-grained Personal Access Token scoped to exactly
-  `hew3d/hew-packages` and `hew3d/gentoo-overlay` with Contents: Read and
-  write, and add it as the `HEW_PACKAGES_TOKEN` secret on `hew3d/hew`.
+  `hew3d/hew-packages`, `hew3d/gentoo-overlay`, and `hew3d/homebrew-tap`
+  with Contents: Read and write, and add it as the `HEW_PACKAGES_TOKEN`
+  secret on `hew3d/hew`.
+
+## Why the cask keeps the in-app updater
+
+A cask installs a prebuilt app by definition, so the cask uses the same
+signed and notarized `.dmg` the download page serves, updater included,
+rather than a second updater-free build that would need its own universal
+build and notarization on every release. It declares `auto_updates true`,
+which is how Homebrew treats self-updating apps: the app replaces itself
+in place, and `brew upgrade` leaves it alone unless run with `--greedy`.
+The tap still moves to each new release, so fresh installs always get the
+current version.
 
 ## Why not a source package
 

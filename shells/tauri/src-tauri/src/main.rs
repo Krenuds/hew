@@ -51,8 +51,8 @@ mod relay_client;
 // check on launch, plus a manual "Check for Updates" menu item. The whole
 // flow lives shell-side — check, native confirm, download, restart prompt —
 // so the webview is granted no update-related capability, and a
-// `--no-default-features` build (Flathub/Homebrew/winget/AUR, which own their
-// own updates) drops the module, the menu item, and the launch check together.
+// `--no-default-features` build (Flathub/winget/AUR, which own their own
+// updates) drops the module, the menu item, and the launch check together.
 // ---------------------------------------------------------------------------
 #[cfg(feature = "updater")]
 mod updater {

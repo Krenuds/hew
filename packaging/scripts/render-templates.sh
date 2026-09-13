@@ -4,8 +4,8 @@
 #   packaging/scripts/render-templates.sh v1.1.0
 #
 # Reads the asset digests from the GitHub API (no download), then rewrites
-# the pacman PKGBUILD, the Gentoo ebuild filename, and the Flatpak
-# manifest/metainfo in place. Gentoo's Manifest wants BLAKE2B and SHA512 as
+# the pacman PKGBUILD, the Gentoo ebuild filename, the Flatpak
+# manifest/metainfo, and the Homebrew cask in place. Gentoo's Manifest wants BLAKE2B and SHA512 as
 # well, which the API does not carry, so the two .deb files ARE downloaded
 # for that step only.
 #
@@ -22,6 +22,10 @@ digest() { gh release view "$tag" --repo "$repo" --json assets -q ".assets[] | s
 amd64_deb="Hew_${version}_amd64.deb"; arm64_deb="Hew_${version}_arm64.deb"
 sha_amd64="$(digest "$amd64_deb")"; sha_arm64="$(digest "$arm64_deb")"
 [ -n "$sha_amd64" ] && [ -n "$sha_arm64" ] || { echo "release $tag has no .deb digests yet" >&2; exit 1; }
+# Only the cask needs the .dmg, so a release without one still renders the
+# Linux targets; validate-homebrew-cask.sh refuses the stale cask instead.
+mac_dmg="Hew_${version}_universal.dmg"; sha_mac="$(digest "$mac_dmg")"
+[ -n "$sha_mac" ] || echo "::warning::release $tag has no $mac_dmg digest; the Homebrew cask is left unrendered"
 
 # pacman (PKGBUILD) — x86_64 only, see the comment in the PKGBUILD itself
 sed -i.bak -E \
@@ -66,5 +70,13 @@ s=re.sub(r'sha256: [0-9a-f]{64}', lambda m: 'sha256: '+next(shas), s)
 open(p,'w').write(s)
 PY
 sed -i.bak -E "s/<release version=\"[0-9.]+\" date=\"[0-9-]+\"/<release version=\"${version}\" date=\"$(date +%F)\"/" "$here/flatpak/com.hew3d.Hew.metainfo.xml"
+
+# Homebrew cask — the universal .dmg covers both Apple Silicon and Intel
+if [ -n "$sha_mac" ]; then
+  sed -i.bak -E \
+    -e "s/^  version \"[^\"]*\"$/  version \"${version}\"/" \
+    -e "s/^  sha256 \"[0-9a-f]*\"$/  sha256 \"${sha_mac}\"/" \
+    "$here/homebrew/Casks/hew.rb"
+fi
 find "$here" -maxdepth 3 -name '*.bak' -delete
 echo "rendered $tag"

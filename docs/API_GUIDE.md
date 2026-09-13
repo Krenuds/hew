@@ -20,13 +20,14 @@ when you need the exact rule rather than the working example.
 ## Install `hew-cli`
 
 `hew-cli` is the client, and it ships with every install of the desktop
-app — installing Hew installs the CLI too. None of these add it to your
-shell's `PATH` automatically except the Linux `.deb`/`.rpm`, so scripts
-and MCP configuration below reference the full path:
+app — installing Hew installs the CLI too. Only the Homebrew cask and the
+Linux `.deb`/`.rpm` add it to your shell's `PATH` automatically, so
+scripts and MCP configuration below reference the full path:
 
 | Platform | Where it lands |
 | --- | --- |
 | macOS | Inside the app bundle: `/Applications/Hew.app/Contents/MacOS/hew-cli` |
+| macOS, Homebrew (`brew install --cask hew3d/tap/hew`) | In the same app bundle, and linked onto `PATH` as `hew-cli` |
 | Windows | Next to `hew.exe` in the install directory — by default a per-user install at `%LOCALAPPDATA%\Hew\hew-cli.exe` |
 | Linux, `.deb`/`.rpm` install | On `PATH` as `hew-cli` |
 | Linux, AppImage | Bundled inside the image but not runnable without extracting it first (`./Hew.AppImage --appimage-extract`, then `squashfs-root/usr/bin/hew-cli`) — install the `.deb`/`.rpm` instead if you want `hew-cli` for scripting or MCP |
@@ -599,6 +600,11 @@ macOS:
   }
 }
 ```
+
+A Homebrew install lives at that same path. Keep the full path there
+even though `hew-cli` is on your `PATH`: an MCP host launched from the
+Dock or Finder does not inherit your shell's `PATH`, so a bare
+`hew-cli` may not be found.
 
 Windows (substitute your username for `<you>`):
 

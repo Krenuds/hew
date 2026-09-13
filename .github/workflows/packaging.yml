@@ -1,22 +1,24 @@
-# Third-party Linux packaging — Arch (a self-hosted signed pacman repo,
-# not AUR: AUR has stopped accepting new maintainer registrations), a
-# Gentoo overlay, and a self-hosted signed Flatpak repo, all repackaging
-# the release's .deb rather than building from source (see
-# packaging/README.md for why). Everything here is produced and published
-# by this workflow — nobody runs any of it by hand.
+# Third-party packaging — Arch (a self-hosted signed pacman repo, not AUR:
+# AUR has stopped accepting new maintainer registrations), a Gentoo overlay,
+# and a self-hosted signed Flatpak repo, all repackaging the release's .deb
+# rather than building from source (see packaging/README.md for why); plus a
+# Homebrew tap whose cask installs the release's notarized macOS .dmg as-is.
+# Everything here is produced and published by this workflow — nobody runs
+# any of it by hand.
 #
 # Triggers on `release: published` (releases stay drafts until a human
 # publishes one, so this only ever fires on a deliberate act) and on
 # workflow_dispatch for testing against an already-published tag without
 # cutting a new release.
 #
-# Two target repos get pushed to, each with its own credential:
+# Three target repos get pushed to, all with the same credential
+# (HEW_PACKAGES_TOKEN — one fine-grained PAT scoped to exactly these three):
 #   hew3d/hew-packages   — GitHub Pages host for the pacman repo and the
-#                          Flatpak repo (HEW_PACKAGES_TOKEN)
-#   hew3d/gentoo-overlay — the Gentoo overlay git repo (also
-#                          HEW_PACKAGES_TOKEN — one fine-grained PAT scoped
-#                          to both repos)
-# Both repos are rebuilt and republished wholesale on every run rather than
+#                          Flatpak repo
+#   hew3d/gentoo-overlay — the Gentoo overlay git repo
+#   hew3d/homebrew-tap   — the Homebrew tap (`brew install --cask
+#                          hew3d/tap/hew`)
+# All three are rebuilt and republished wholesale on every run rather than
 # incrementally appended to: no persistent ostree object store or pacman
 # package history to grow unbounded, at the cost of not supporting
 # downgrades or Flatpak delta updates. Fine at Hew's current scale.
@@ -35,8 +37,8 @@ on:
 permissions:
   contents: write # gh release upload (the Flatpak bundle) needs this on hew3d/hew
 
-# Two overlapping runs would both wipe-and-push hew3d/hew-packages or
-# hew3d/gentoo-overlay; the plain (non-force) push means the loser just
+# Two overlapping runs would both wipe-and-push the same target repo; the
+# plain (non-force) push means the loser just
 # fails rather than corrupting anything, but serializing avoids that
 # entirely rather than relying on a race to fail safely.
 concurrency:
@@ -201,3 +203,47 @@ jobs:
           git diff --cached --quiet && { echo "nothing changed"; exit 0; }
           git commit -m "media-gfx/hew-bin: publish ${TAG}"
           git push
+
+  homebrew-validate:
+    # Installs the rendered cask for real on a macOS runner — download,
+    # checksum, the app, and the hew-cli link — then zaps it under a scratch
+    # HOME, so a wrong digest, a moved sidecar, or an over-broad zap list
+    # fails here instead of on a user's machine.
+    needs: render
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+      - env:
+          # brew audit --online queries the GitHub API (livecheck); without a
+          # token it shares the runner pool's anonymous rate limit.
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x packaging/scripts/*.sh
+          packaging/scripts/validate-homebrew-cask.sh "${TAG#v}"
+
+  homebrew-publish:
+    needs: [render, homebrew-validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendered-packaging
+          path: packaging/
+      - env:
+          HEW_PACKAGES_TOKEN: ${{ secrets.HEW_PACKAGES_TOKEN }}
+        run: |
+          git clone --depth=1 "https://x-access-token:${HEW_PACKAGES_TOKEN}@github.com/hew3d/homebrew-tap.git" tap-repo
+          find tap-repo -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
+          cp -r packaging/homebrew/. tap-repo/
+          cd tap-repo
+          git config user.name "hew-packaging"
+          git config user.email "packaging@hew3d.com"
+          git add -A
+          git diff --cached --quiet && { echo "nothing changed"; exit 0; }
+          git commit -m "hew: publish ${TAG}"
+          # Explicit refspec: the first run may clone an empty repository,
+          # whose unborn branch has no upstream for a bare `git push`.
+          git push origin HEAD:main

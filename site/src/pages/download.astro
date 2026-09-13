@@ -67,6 +67,11 @@ const webTarballUrl = `https://github.com/${repo}/releases/download/v${version}/
           managers.
         </li>
         <li>
+          <a href="https://github.com/hew3d/homebrew-tap">Homebrew</a>{' '}
+          — <code>brew install --cask hew3d/tap/hew</code> on macOS, which
+          also puts <code>hew-cli</code> on your PATH.
+        </li>
+        <li>
           <a href={webTarballUrl}>Self-host the web app</a>{' '}
           — a tarball of the static web build; unzip it behind any file
           server.
@@ -202,6 +207,10 @@ const webTarballUrl = `https://github.com/${repo}/releases/download/v${version}/
   .more li {
     color: var(--color-text-muted);
     font-size: 0.9375rem;
+  }
+
+  .more code {
+    white-space: nowrap;
   }
 
   .more a {

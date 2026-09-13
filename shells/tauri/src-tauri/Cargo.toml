@@ -114,8 +114,10 @@ windows-sys = { version = "0.61", features = [
 # Updates" menu item, talking to the signed `latest.json` published on
 # GitHub Releases. On by default, so the builds we ship directly (the
 # notarized .dmg, the NSIS installer, the AppImage) can update themselves
-# in place. Package-manager builds (Flathub, Homebrew, winget, AUR) own
-# their own updates, so they build with `--no-default-features` and the
-# updater — plugin, menu item, and launch check — compiles out entirely.
+# in place. Package-manager builds (Flathub, winget, AUR) own their own
+# updates, so they build with `--no-default-features` and the updater —
+# plugin, menu item, and launch check — compiles out entirely. The Homebrew
+# cask is not one of them: it installs the notarized .dmg unchanged and
+# declares `auto_updates`, leaving updates to this updater.
 default = ["updater"]
 updater = ["dep:tauri-plugin-updater"]

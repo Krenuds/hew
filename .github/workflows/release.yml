@@ -809,7 +809,9 @@ jobs:
           | **Relay** — self-hosted Open on Phone (Linux) | [.tar.gz][relay-x64] | [.tar.gz][relay-arm64] |
 
           - $MAC_NOTE
-            covers Apple Silicon and Intel.
+            covers Apple Silicon and Intel. Homebrew users can
+            \`brew install --cask hew3d/tap/hew\` instead, which also puts
+            \`hew-cli\` on the PATH.
           - Windows installers are not code-signed yet, so SmartScreen may
             warn on first run — choose **More info**, then **Run anyway**.
           - On Linux, mark the AppImage executable (\`chmod +x\`) before
