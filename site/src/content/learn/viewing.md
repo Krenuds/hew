@@ -16,7 +16,7 @@ Camera navigation never interrupts your work. With any tool active, at any momen
 | Pan | Drag with the **right mouse button** |
 | Zoom | **Scroll wheel** — zooms toward the cursor |
 
-Zooming follows the cursor, so point at what you want to get closer to and scroll. Orbiting pivots around whatever is under the cursor when you start the drag, and each scroll step covers a fixed fraction of the distance to the surface you're pointing at — so a small detail on a large model is a few scrolls away, and orbiting around it keeps it on screen. The camera has gentle inertia.
+Zooming follows the cursor, so point at what you want to get closer to and scroll. Orbiting pivots around whatever is under the cursor when you start the drag, and each scroll step covers a fixed fraction of the distance to the surface you're pointing at — so a small detail on a large model is a few scrolls away, and orbiting around it keeps it on screen. The camera has gentle inertia. Hold `⌘` (Mac) or `Ctrl` (Windows, Linux) during a drag for a precise orbit or pan instead: the camera tracks the pointer 1:1 with no inertia for as long as the key is held. Pressing it while the view is still coasting from a released drag stops it dead.
 
 ## With the camera tools
 
@@ -26,7 +26,7 @@ If you're on a trackpad or prefer left-button navigation, activate a dedicated c
 - **Pan** — press `H`, or Camera ▸ Pan
 - **Zoom** — press `Z` (drag up/down), or Camera ▸ Zoom. Hold `Shift` while dragging (or Shift-scroll) to change the field of view instead — see below.
 
-While the Orbit tool is active, holding `Shift` temporarily pans instead, the same convention SketchUp users know.
+While the Orbit tool is active, holding `Shift` temporarily pans instead, the same convention SketchUp users know. This also works partway through a drag: press `Shift` mid-orbit to switch to panning, and release it to go back to orbiting, without letting go of the mouse button.
 
 When you're done navigating, press `Space` to return to the Select tool (or the shortcut of whatever tool you were using).
 

@@ -85,6 +85,7 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, isPointOnDrawPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
@@ -207,12 +208,56 @@ type FaceStage =
     }
 
 
+/**
+ * The segment just placed, kept in a `RetypeWindow` (retypeWindow.ts) so a
+ * length typed straight after the click resizes THAT segment — SketchUp's
+ * "click the end point, then type the length" — rather than starting the
+ * next one. Unlike the closed shapes, a Line chain stays live after the
+ * click, so the same typed length has two possible meanings; the pointer
+ * decides: the window stays open only while the pointer has not moved
+ * since the commit (`RETYPE_POINTER_STILL_COS`), and the moment it moves,
+ * a typed length is the NEXT segment along the cursor, exactly as before.
+ *
+ * Plane mode retracts and re-lays the committed segment through the shared
+ * undo/re-commit cycle, restoring the chain bookkeeping (`_chainVertices`,
+ * `_prevSegmentDir`, the anchor) to what it was before that segment so the
+ * re-commit is indistinguishable from the original click. Face mode has
+ * nothing in the kernel yet (the path commits when the chain ends), so it
+ * simply moves the last appended point.
+ */
+type RetypeSpec =
+  | {
+      mode: 'plane'
+      plane: DrawPlane
+      target: SketchTarget
+      anchor: V3
+      endpoint: V3
+      chainLen: number
+      prevSegmentDir: V3 | null
+    }
+  | { mode: 'face'; index: number }
+
+/** How far, in canvas pixels, the pointer may drift after the commit and
+ *  still count as "not moved" for the retype window — comfortably above a
+ *  resting hand's jitter, well below any deliberate move to aim the next
+ *  segment. Read off `onPointerScreenMove` (Tool interface), which works
+ *  under parallel projection too. */
+const RETYPE_POINTER_STILL_PX = 4
+/** cos(0.005 rad): the ray-angle fallback for the same test when no screen
+ *  coordinate has been seen (a host that never calls `onPointerScreenMove`)
+ *  — perspective only; under parallel projection every ray shares one
+ *  direction, which is exactly why the pixel test above is the primary. */
+const RETYPE_POINTER_STILL_COS = Math.cos(0.005)
+
 export class LineTool implements Tool {
   readonly name = 'Line'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
+      if (this.retype.isOpen) {
+        return 'Type a length to resize the segment you just drew, or move to start the next one — double-click or Esc to finish.'
+      }
       return 'Click the next point — type a length for an exact segment; double-click or Esc to finish.'
     }
     if (this.idlePlaneLock !== null) {
@@ -259,6 +304,26 @@ export class LineTool implements Tool {
 
   /** VCB buffer — raw string being typed by the user (length, in display units) */
   private typed: string = ''
+
+  /** The segment (or face-path point) just placed, resizable by a typed
+   *  length until the pointer moves — see `RetypeSpec`. */
+  private readonly retype: RetypeWindow<RetypeSpec>
+  /** The pointer ray direction when the window was armed; a move past
+   *  `RETYPE_POINTER_STILL_COS` from it closes the window (the fallback
+   *  test — see `_retypeScreen`). */
+  private _retypeRayDir: V3 | null = null
+  /** The pointer's canvas-pixel position when the window was armed, and
+   *  the latest one seen — a drift past `RETYPE_POINTER_STILL_PX` closes
+   *  the window (the primary "has the pointer moved?" test). */
+  private _retypeScreen: [number, number] | null = null
+  private _lastScreen: [number, number] | null = null
+  /** The most recent pointer ray direction (move or press) — what a commit
+   *  arms the window with. */
+  private _lastRayDir: V3 | null = null
+  /** True while a retype is re-laying a segment, so the commit path does
+   *  not re-arm the window from inside the cycle (the window re-arms
+   *  itself on the outcome). */
+  private _retyping = false
 
   /** Last rubber-band cursor positions, tracked for typed-entry direction */
   private _lastPlaneCursor: V3 | null = null
@@ -476,6 +541,7 @@ export class LineTool implements Tool {
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
     this.sketchCache = sketchCache
+    this.retype = new RetypeWindow(wasmScene)
   }
 
   /** The single editing-context channel (component-edit-parity.md phase A1;
@@ -741,10 +807,29 @@ export class LineTool implements Tool {
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._lastViewDir = ray.direction
+    this._lastRayDir = ray.direction
+    // The pointer moved on: the segment just placed is settled and a typed
+    // length now means the next one (module doc — `RetypeSpec`).
+    if (this.retype.isOpen && this._retypeRayDir !== null && this._retypeScreen === null) {
+      const d = this._retypeRayDir
+      const dot = d[0] * ray.direction[0] + d[1] * ray.direction[1] + d[2] * ray.direction[2]
+      if (dot < RETYPE_POINTER_STILL_COS) this.retype.close()
+    }
     if (this._currentMode(ray, this._snapOnBoundary(snap)) === 'face') {
       this._onPointerMoveFace(snap, ray)
     } else {
       this._onPointerMovePlane(snap, ray)
+    }
+  }
+
+  /** Screen-pixel companion to `onPointerMove` (Tool.onPointerScreenMove):
+   *  the retype window's primary "has the pointer moved on?" test. */
+  onPointerScreenMove(xPx: number, yPx: number): void {
+    this._lastScreen = [xPx, yPx]
+    if (this.retype.isOpen && this._retypeScreen !== null) {
+      if (Math.hypot(xPx - this._retypeScreen[0], yPx - this._retypeScreen[1]) > RETYPE_POINTER_STILL_PX) {
+        this.retype.close()
+      }
     }
   }
 
@@ -945,6 +1030,9 @@ export class LineTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    this._lastRayDir = ray.direction
+    // A new press ends the window; the segment it places re-arms it.
+    this.retype.close()
     // The phantom second pointerdown of a double-click (used to finish a
     // chain) is suppressed upstream in the Viewport by `ev.detail >= 2`, so a
     // genuine double-click places exactly one point then `onDoubleClick` ends
@@ -1004,6 +1092,10 @@ export class LineTool implements Tool {
 
     // ── Axis lock via arrow keys (mirrors MoveTool) ──
     if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      // Changing the axis lock is aiming the NEXT segment: the window on the
+      // one just placed closes, so a typed length goes to the locked segment
+      // through `_commitTyped` (which honours the lock via the live cursor).
+      this.retype.close()
       const requested = arrowToAxis(ev.key)
       if (requested === null || requested === this.lockAxis) {
         // ArrowDown, or pressing same arrow again → clear lock
@@ -1025,7 +1117,8 @@ export class LineTool implements Tool {
       }
       const meters = parseLengthToMeters(this.typed)
       if (meters !== null) {
-        this._commitTyped(meters)
+        if (this.retype.isOpen) this._retypeLast(meters)
+        else this._commitTyped(meters)
       }
       return
     }
@@ -1112,6 +1205,7 @@ export class LineTool implements Tool {
       if (axis === null) return
       this.lockAxis = axis
       this.shiftAxisLock = true
+      this.retype.close() // a Shift-lock aims the next segment — see the arrow branch
     } else if (this.shiftAxisLock) {
       this.lockAxis = null
       this.shiftAxisLock = false
@@ -1172,6 +1266,7 @@ export class LineTool implements Tool {
    * stage has >= 2 accumulated points, commit the cut first.
    */
   private _endChain(): void {
+    this.retype.close()
     if (this.faceStage.kind === 'anchored' && this.faceStage.points.length >= 2) {
       const { object, face, points } = this.faceStage
       this._commitFacePath(object, face, points)
@@ -1191,6 +1286,7 @@ export class LineTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
@@ -1343,7 +1439,7 @@ export class LineTool implements Tool {
   }
 
   /** Commit one segment anchor -> cursor, then chain forward from cursor. */
-  private _commitPlaneSegment(plane: DrawPlane, target: SketchTarget, anchor: V3, cursor: V3): void {
+  private _commitPlaneSegment(plane: DrawPlane, target: SketchTarget, anchor: V3, cursor: V3): boolean {
     // Skip degenerate zero-length segments — one Euclidean check at
     // `DEGENERATE_SEGMENT_EPS` (the kernel's own `DegenerateSegment` line,
     // see the constant's doc) for ground and non-ground alike. This used to
@@ -1367,7 +1463,7 @@ export class LineTool implements Tool {
     // `OffsetTool._commit`'s identical guard/toast for the same reason.
     if (segmentLength(anchor, cursor) <= DEGENERATE_SEGMENT_EPS) {
       this.onToast("That point is the same as the last one — move the cursor before clicking")
-      return
+      return false
     }
 
     // Re-home (design §2b) instead of letting the kernel refuse: `cursor`
@@ -1387,6 +1483,12 @@ export class LineTool implements Tool {
     // cursor's z through instead of forcing it back to 0) — an up-arrow Z
     // lock from an ordinary ground anchor, the canonical case, re-homes
     // here exactly like a locked segment leaving any other frozen plane.
+    // Chain bookkeeping as it stood BEFORE this segment — what a retype
+    // restores so the re-commit sees exactly the state this click saw.
+    const chainLenBefore = this._chainVertices.length
+    const prevDirBefore = this._prevSegmentDir
+    let armRetype = false
+
     let effectivePlane = plane
     let effectiveTarget = target
     if (!isPointOnDrawPlane(cursor, plane)) {
@@ -1467,13 +1569,27 @@ export class LineTool implements Tool {
           this._clearPreview()
           this.onMeasurementCb('')
           this._publishTransient()
+          armRetype = true
         }
       })
+      // Arm only AFTER the gesture bracket closed: `sketch_end_gesture` is
+      // what records the undo step and moves the history generation, so a
+      // stamp taken inside the gesture would already be stale.
+      if (armRetype && !this._retyping) {
+        this.retype.arm({
+          mode: 'plane', plane, target, anchor, endpoint: cursor,
+          chainLen: chainLenBefore, prevSegmentDir: prevDirBefore,
+        })
+        this._retypeRayDir = this._lastRayDir
+        this._retypeScreen = this._lastScreen
+      }
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
@@ -1538,6 +1654,80 @@ export class LineTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     this._publishTransient()
+    if (!this._retyping) {
+      this.retype.arm({ mode: 'face', index: points.length - 1 })
+      this._retypeRayDir = this._lastRayDir
+      this._retypeScreen = this._lastScreen
+    }
+  }
+
+  /**
+   * Resize the segment just placed to `distance` along its own direction
+   * (module doc — `RetypeSpec`). Plane mode: the shared undo/re-commit cycle
+   * with the chain bookkeeping restored around it. Face mode: move the last
+   * appended point — nothing has reached the kernel yet.
+   */
+  private _retypeLast(distance: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    // A signed length flips the segment to the other side of its start, as
+    // a typed NEW segment does (`_commitTyped` → `pointAlong`); only a
+    // near-zero length is refused — and never silently (this file's rule:
+    // an honest "nothing to commit" beats silence, see `_commitPlaneSegment`).
+    if (Math.abs(distance) <= DEGENERATE_SEGMENT_EPS) {
+      this.onToast("That point is the same as the last one — move the cursor before clicking")
+      this.typed = ''
+      this.onMeasurementCb('')
+      return
+    }
+    if (spec.mode === 'face') {
+      if (this.faceStage.kind !== 'anchored' || this.faceStage.points.length - 1 !== spec.index || spec.index < 1) {
+        this.retype.close()
+        return
+      }
+      const { points } = this.faceStage
+      const prev = points[spec.index - 1]
+      const dir = directionBetween(prev, points[spec.index])
+      if (dir === null) return
+      points[spec.index] = pointAlong(prev, dir, distance)
+      this.typed = ''
+      this._clearPreview()
+      this.onMeasurementCb('')
+      this._publishTransient()
+      return
+    }
+    const dir = directionBetween(spec.anchor, spec.endpoint)
+    if (dir === null) return
+    const newEnd = pointAlong(spec.anchor, dir, distance)
+    const outcome = this.retype.apply(
+      (hot) => this._relayPlaneSegment(hot as Extract<RetypeSpec, { mode: 'plane' }>, newEnd),
+      (hot) => this._relayPlaneSegment(hot as Extract<RetypeSpec, { mode: 'plane' }>, (hot as Extract<RetypeSpec, { mode: 'plane' }>).endpoint),
+      (hot) => ({ ...hot, endpoint: newEnd } as RetypeSpec),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('line'))
+  }
+
+  /** Re-lay the hot segment to `end` through the ordinary commit path, with
+   *  the chain bookkeeping first put back to what it was before that
+   *  segment (its own commit will advance it again). */
+  private _relayPlaneSegment(hot: Extract<RetypeSpec, { mode: 'plane' }>, end: V3): boolean {
+    this._retyping = true
+    try {
+      this.planeStage = { kind: 'anchored', plane: hot.plane, target: hot.target, anchor: hot.anchor }
+      this._chainVertices.length = hot.chainLen
+      this._prevSegmentDir = hot.prevSegmentDir
+      this.typed = ''
+      this.onMeasurementCb('')
+      return this._commitPlaneSegment(hot.plane, hot.target, hot.anchor, end)
+    } finally {
+      this._retyping = false
+    }
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
   }
 
   /** Cut `face` along the accumulated path (boundary-to-boundary). */

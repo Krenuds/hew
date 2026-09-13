@@ -67,6 +67,7 @@ function makeWasmScene(opts: {
   let nextRegionsCreated: bigint[] = []
 
   const scene = {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       planes.set(sketchCounter, GROUND_PLANE_ARR)

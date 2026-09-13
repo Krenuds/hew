@@ -92,6 +92,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editPolygonBuffer, isPolygonInputKey, parsePolygonSideCount, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { segmentLength } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
@@ -158,11 +159,29 @@ type FaceStage =
       center: V3
     }
 
+/**
+ * The just-committed polygon, kept in a `RetypeWindow` (retypeWindow.ts) so
+ * a radius or an `Ns` side count typed AFTER the rim click redraws it in
+ * place — `center` stays, `rim` fixes the circumradius direction (one vertex
+ * always sits there), `sides` is the count it was drawn with.
+ */
+type RetypeSpec = {
+  center: V3
+  rim: V3
+  sides: number
+} & (
+  | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
+  | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
+)
+
 export class PolygonTool implements Tool {
   readonly name = 'Polygon'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
+      return 'Type an exact radius, or Ns for N sides, to redraw the polygon you just drew — or click the centre of the next one.'
+    }
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
       return 'Click to set the radius — or type an exact radius, or Ns for N sides.'
     }
@@ -208,8 +227,15 @@ export class PolygonTool implements Tool {
     return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
 
-  /** VCB buffer — raw string being typed by the user (radius or `<n>s`, in display units) */
+  /** VCB buffer — raw string being typed by the user (radius or `<n>s`, in
+   *  display units). While IDLE with the retype window open it is the
+   *  post-click entry for the polygon just drawn. */
   private typed: string = ''
+
+  /** The just-committed polygon, redrawable by a typed radius or side count
+   *  until the next pointer action, Escape, tool switch, or any other
+   *  document mutation (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
 
   /** Last rubber-band cursor positions, tracked for typed-entry direction
    *  and for refreshing the preview immediately after a side-count change. */
@@ -249,6 +275,7 @@ export class PolygonTool implements Tool {
     this.onMeasurementCb = onMeasurement
     this.sketchCache = sketchCache
     this.onSideCountChangeCb = onSideCountChange
+    this.retype = new RetypeWindow(wasmScene)
   }
 
   /** The current side count. */
@@ -482,7 +509,9 @@ export class PolygonTool implements Tool {
       // Face mode
       if (this.faceStage.kind !== 'anchored') {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       const { planePoint, normal } = this.faceStage
@@ -490,7 +519,9 @@ export class PolygonTool implements Tool {
       const cursorOnPlane = rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
       if (cursorOnPlane === null) {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       this._lastFaceCursor = cursorOnPlane
@@ -504,14 +535,18 @@ export class PolygonTool implements Tool {
           this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
         }
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       const { plane } = this.planeStage
       const cursor = this._planeCursor(snap, ray, plane)
       if (cursor === null) {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       this._lastPlaneCursor = cursor
@@ -520,6 +555,8 @@ export class PolygonTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next polygon has begun.
+    this.disarmRetype()
     if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
@@ -546,7 +583,29 @@ export class PolygonTool implements Tool {
    * but IS armed for Escape's purposes.
    */
   hasArmedGesture(): boolean {
-    return this.capturingInput() || this.idlePlaneLock !== null
+    return this.capturingInput() || this.idlePlaneLock !== null || this.typed !== ''
+  }
+
+  /**
+   * Per-key refinement of the capture (see Tool.capturesKey): an anchored
+   * gesture keeps the whole keyboard, exactly as before; the IDLE retype
+   * window takes only what a typed radius / `Ns` needs
+   * (`idleRetypeCapturesKey`).
+   */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.typed, isPolygonInputKey)
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (!this.capturingInput() && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -554,6 +613,11 @@ export class PolygonTool implements Tool {
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
+      if (!this.capturingInput() && this.typed !== '' && this.retype.isOpen) {
+        this.disarmRetype()
+        return
+      }
+      if (!this.capturingInput()) this.retype.close()
       if (!this.capturingInput() && this.idlePlaneLock !== null) {
         this.idlePlaneLock = null
         this._lastIdleHoverPoint = null
@@ -569,6 +633,27 @@ export class PolygonTool implements Tool {
     }
 
     if (!this.capturingInput()) {
+      // Idle retype window (see `RetypeSpec`): the keys `capturesKey` admits
+      // edit the buffer; Enter redraws the just-committed polygon — `Ns`
+      // with a new side count, a length with a new circumradius.
+      if (this.retype.isOpen && this.capturesKey(ev.key)) {
+        if (ev.key === 'Enter') {
+          const buf = this.typed
+          this.typed = ''
+          this.onMeasurementCb('')
+          const n = parsePolygonSideCount(buf)
+          if (n !== null) {
+            this._retypeSides(clampSides(n))
+            return
+          }
+          const meters = parseLengthToMeters(buf)
+          if (meters !== null) this._retypeRadius(Math.abs(meters))
+          return
+        }
+        this.typed = editPolygonBuffer(this.typed, ev.key, getLengthUnit())
+        this.onMeasurementCb(this.typed === '' ? '' : this._typedReadout())
+        return
+      }
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
@@ -637,6 +722,7 @@ export class PolygonTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
@@ -731,7 +817,9 @@ export class PolygonTool implements Tool {
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      this._commitPlanePolygon(plane, target, center, rim)
+      if (this._commitPlanePolygon(plane, target, center, rim)) {
+        this.retype.arm({ mode: 'plane', plane, target, center, rim, sides: this.sides })
+      }
     } else if (this.faceStage.kind === 'anchored') {
       const { object, face, normal, center } = this.faceStage
       const basis = facePlaneBasis(normal)
@@ -760,8 +848,63 @@ export class PolygonTool implements Tool {
       this._lastFaceCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      this._commitFacePolygon(object, face, rim, center, normal)
+      if (this._commitFacePolygon(object, face, rim, center, normal)) {
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim, sides: this.sides })
+      }
     }
+  }
+
+  /**
+   * Redraw the just-committed polygon with circumradius `r`: the new rim
+   * sits `r` along the committed center→rim direction, same side count.
+   */
+  private _retypeRadius(r: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    const { center, rim } = spec
+    const len = segmentLength(center, rim)
+    if (len < 1e-9 || r < DEGENERATE_RADIUS_M) return
+    const k = r / len
+    const newRim: V3 = [
+      center[0] + (rim[0] - center[0]) * k,
+      center[1] + (rim[1] - center[1]) * k,
+      center[2] + (rim[2] - center[2]) * k,
+    ]
+    this._retypeApply(newRim, spec.sides)
+  }
+
+  /**
+   * Redraw the just-committed polygon with `sides` sides, same circumradius
+   * and rim vertex. The count also becomes the session default, exactly as
+   * an `Ns` typed mid-gesture does.
+   */
+  private _retypeSides(sides: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    this._retypeApply(spec.rim, sides)
+  }
+
+  private _retypeApply(rim: V3, sides: number): void {
+    const outcome = this.retype.apply(
+      (hot) => this._commitHot(hot, rim, sides),
+      (hot) => this._commitHot(hot, hot.rim, hot.sides),
+      (hot) => ({ ...hot, rim, sides }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('polygon'))
+    const kept = this.retype.spec
+    if (kept !== null) {
+      this.sides = kept.sides
+      this.onSideCountChangeCb(this.sides)
+    }
+  }
+
+  /** Lay a polygon with `rim`/`sides` down through the hot record's own
+   *  commit path (the helpers read `this.sides`). */
+  private _commitHot(hot: RetypeSpec, rim: V3, sides: number): boolean {
+    this.sides = sides
+    return hot.mode === 'plane'
+      ? this._commitPlanePolygon(hot.plane, hot.target, hot.center, rim)
+      : this._commitFacePolygon(hot.object, hot.face, rim, hot.center, hot.normal)
   }
 
   // ------------------------------------------------------------------ plane mode
@@ -799,12 +942,13 @@ export class PolygonTool implements Tool {
         return
       }
 
-      this._commitPlanePolygon(plane, target, center, cursor)
+      const committed = this._commitPlanePolygon(plane, target, center, cursor)
       this.planeStage = { kind: 'idle' }
       this.typed = ''
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
+      if (committed) this.retype.arm({ mode: 'plane', plane, target, center, rim: cursor, sides: this.sides })
     }
   }
 
@@ -819,11 +963,11 @@ export class PolygonTool implements Tool {
    *  geometry, not an approximation to suppress) — the kernel's
    *  `SketchCurveKind::Polygon` is what keeps the circumcircle from being
    *  mistaken for a curve. */
-  private _commitPlanePolygon(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): void {
+  private _commitPlanePolygon(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): boolean {
     const verts = plane.ground
       ? circlePolygonGround([center[0], center[1]], [rim[0], rim[1]], this.sides)
       : circlePolygonFace(center, rim, plane.normal, this.sides)
-    if (verts === null || verts.length === 0) return // degenerate — ignore
+    if (verts === null || verts.length === 0) return false // degenerate — ignore
 
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
@@ -877,11 +1021,13 @@ export class PolygonTool implements Tool {
         }
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
       })
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
@@ -938,14 +1084,16 @@ export class PolygonTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
 
-      this._commitFacePolygon(object, face, cursorOnPlane, center, normal)
+      if (this._commitFacePolygon(object, face, cursorOnPlane, center, normal)) {
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, sides: this.sides })
+      }
     }
   }
 
   /** Split the given face with an N-gon loop defined by center/rim/normal. */
-  private _commitFacePolygon(object: bigint, face: bigint, rim: V3, center: V3, normal: V3): void {
+  private _commitFacePolygon(object: bigint, face: bigint, rim: V3, center: V3, normal: V3): boolean {
     const verts = circlePolygonFace(center, rim, normal, this.sides)
-    if (verts === null) return // degenerate — ignore
+    if (verts === null) return false // degenerate — ignore
 
     // Flatten the N vertices into a Float64Array of xyz triples
     const loopPts = new Float64Array(verts.length * 3)
@@ -966,11 +1114,13 @@ export class PolygonTool implements Tool {
         this.wasmScene.split_face_inner(object, face, loopPts)
       }
       this.onFaceImprint(object)
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 

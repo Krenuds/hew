@@ -46,6 +46,7 @@ function makeWasmScene(opts: {
 } = {}): WasmScene {
   let sketchCounter = 41n
   return {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -379,5 +380,116 @@ describe('CircleTool — instance editing context (component-edit-parity.md phas
     expect(scene.sketch_begin_curve_with).toHaveBeenCalledWith(
       expect.any(BigInt), 1, 1, 0, expect.closeTo(3, 6),
     )
+  })
+})
+
+// Post-click radius retype (retypeWindow.ts): type a radius after the rim
+// click and the circle just drawn redraws at that radius.
+describe('CircleTool — retype the radius after the rim click', () => {
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    let gen = 1n
+    let changed = 0
+    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
+      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
+      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      __bump: () => { gen += 1n },
+    }
+    return scene as unknown as WasmScene & { __bump(): void }
+  }
+  const key = (tool: CircleTool, k: string) => tool.onKey(makeKeyEvent(k))
+  const typeLen = (tool: CircleTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
+  const addCalls = (scene: WasmScene) => (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+  /** Max distance of the segment endpoints committed since call index `from`
+   *  to `center` — the radius actually drawn by that commit. */
+  function drawnRadius(scene: WasmScene, from: number, center: [number, number]): number {
+    const calls = addCalls(scene).slice(from)
+    return Math.max(...calls.map((c) => Math.hypot((c[1] as number) - center[0], (c[2] as number) - center[1])))
+  }
+
+  it('two clicks then a typed radius: one undo, then the circle redrawn at that radius around the same centre, keeping its direction', () => {
+    const scene = makeRetypeScene()
+    const { tool, onCommit } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 1 }), RAY) // rim toward +x, radius 1
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(tool.statusHint()).toContain('resize the circle')
+    expect(tool.capturesKey('3')).toBe(true)
+    expect(tool.capturesKey('c')).toBe(false) // empty buffer: shortcuts still work
+    let from = addCalls(scene).length
+    typeLen(tool, '3')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledTimes(2)
+    expect(drawnRadius(scene, from, [1, 1])).toBeCloseTo(3, 6)
+    // The rim vertex (vertex 0 of the chain) still sits on the +x side of the centre.
+    const first = addCalls(scene)[from]
+    expect(first[1]).toBeCloseTo(4, 6)
+    expect(first[2]).toBeCloseTo(1, 6)
+    // Still open: a second radius goes through too.
+    from = addCalls(scene).length
+    typeLen(tool, '0.5')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(drawnRadius(scene, from, [1, 1])).toBeCloseTo(0.5, 6)
+  })
+
+  it('a typed (Enter) rim commit arms the window as well', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    typeLen(tool, '2')
+    const from = addCalls(scene).length
+    typeLen(tool, '1')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(drawnRadius(scene, from, [0, 0])).toBeCloseTo(1, 6)
+  })
+
+  it('Escape drops an open buffer and closes the window; a new click closes it too', () => {
+    const scene = makeRetypeScene()
+    const { tool, onMeasurement } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0 }), RAY)
+    key(tool, '3')
+    expect(tool.hasArmedGesture()).toBe(true)
+    key(tool, 'Escape')
+    expect(onMeasurement).toHaveBeenLastCalledWith('')
+    expect(tool.capturesKey('3')).toBe(false)
+    tool.onPointerDown(makeSnap({ x: 5, y: 5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 6, y: 5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 9, y: 9 }), RAY) // first click of a third circle
+    expect(tool.capturingInput()).toBe(true)
+    typeLen(tool, '2')
+    expect(scene.scene_undo).not.toHaveBeenCalled() // a fresh commit, not a retype
+  })
+
+  it('an intervening action makes the retype stale: a toast, nothing undone', () => {
+    const scene = makeRetypeScene()
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0 }), RAY)
+    scene.__bump()
+    typeLen(tool, '3')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('circle'))
+  })
+
+  it('a face circle retypes through split_face_inner_with_curve with the new radius', () => {
+    const scene = makeRetypeScene({ pick: makePick(7n, 3n), faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.setEditContext({ kind: 'object', id: 7n })
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // centre
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), { origin: [1, 0, 5], direction: [0, 0, -1] }) // rim, radius 1
+    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
+    typeLen(tool, '2.5')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(2)
+    const call = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(call[4]).toBeCloseTo(2.5, 6) // radius argument
+    expect(onFaceImprint).toHaveBeenCalledTimes(2)
   })
 })

@@ -87,6 +87,7 @@ import {
   parseArraySpec,
   pointAlong,
 } from './moveInput'
+import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import type { NodeRef } from '../panels/treeModel'
 import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
@@ -118,12 +119,28 @@ type Stage =
       dest: [number, number, number]
     }
 
+/**
+ * The move (or copy) just committed, kept in a `RetypeWindow`
+ * (retypeWindow.ts) so a distance typed AFTER the commit redoes it at that
+ * distance along the same direction — a negative value flips it. `copy`
+ * is the copy toggle in force at the commit, re-applied for the redo. Lives
+ * beside the ×N / /N array window: while idle, one typed buffer serves
+ * both — a buffer that parses as an array spec (`3x`, `/3`) resolves the
+ * array, anything else that parses as a length retypes the distance.
+ */
+type RetypeSpec = { nodes: NodeRef[]; vector: [number, number, number]; copy: boolean }
+
 export class MoveTool implements Tool {
   readonly name = 'Move'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
+      if (this.retype.isOpen) {
+        return this.arrayHot !== null
+          ? 'Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies.'
+          : 'Type an exact distance to redo the move you just made — or click a base point to start another.'
+      }
       if (this.arrayHot !== null) {
         return 'Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.'
       }
@@ -174,6 +191,15 @@ export class MoveTool implements Tool {
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
   private arrayTyped: string = ''
+
+  /** The ×N / /N spec the array window last resolved, or null while the hot
+   *  copy is still a single copy — a distance typed afterwards re-spaces the
+   *  whole array rather than collapsing it back to one copy. */
+  private arrayLast: { mode: 'multiply' | 'divide'; count: number } | null = null
+  /** The move/copy just committed, redoable at a typed distance until the
+   *  next pointer action, Escape, tool switch, or other document mutation
+   *  (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
 
   /** THREE.js LineSegments for the axis guide drawn in the preview group */
   private guideLine: THREE.LineSegments | null = null
@@ -248,6 +274,7 @@ export class MoveTool implements Tool {
     this.onCommit = onCommit
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.retype = new RetypeWindow(wasmScene)
     this.instanceGroupGetter = instanceGroupGetter
     this.onCopyModeChange = onCopyModeChange
     this.onArrayCommit = onArrayCommit ?? onCommit
@@ -313,13 +340,35 @@ export class MoveTool implements Tool {
    */
   capturesKey(key: string): boolean {
     if (this.stage.kind === 'base') return true
-    if (this.arrayHot === null) return false
-    return (
-      (key >= '0' && key <= '9') ||
-      key === 'x' || key === 'X' || key === '*' || key === '/' ||
-      key === 'Backspace' || key === 'Delete' || key === 'Enter'
-    )
+    if (this.arrayHot === null && !this.retype.isOpen) return false
+    const arrayKey = key === 'x' || key === 'X' || key === '*' || key === '/'
+    if ((key >= '0' && key <= '9') || key === '-' || key === '.') return true
+    // The array window's own set, unchanged: its tokens and the guarded
+    // Delete keystroke, whatever the buffer holds.
+    if (this.arrayHot !== null && (arrayKey || key === 'Backspace' || key === 'Delete' || key === 'Enter')) return true
+    // The retype window: with an empty buffer every other key keeps its
+    // global meaning; once something is typed the length grammar follows.
+    if (this.typed === '' || key === ' ') return false // Space always resets to Select
+    return key === 'Enter' || key === 'Backspace' || arrayKey || isLengthInputKey(key)
   }
+
+  /** Armed for Escape's purposes while a gesture is live, the array window
+   *  is open, or a post-commit value is being typed. */
+  hasArmedGesture(): boolean {
+    return this.stage.kind === 'base' || this.arrayHot !== null || this.typed !== ''
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`), alongside
+   *  `disarmArray`. */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.stage.kind === 'idle' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
+  }
+
 
   /**
    * Cleanly close the armed ×N / /N window without resolving it — called by
@@ -330,6 +379,8 @@ export class MoveTool implements Tool {
    * simply no longer exists.
    */
   disarmArray(): void {
+    // An explicit document command ends the retype window too — same reason.
+    this.retype.close()
     if (this.arrayHot === null && this.arrayTyped === '') return
     this.arrayHot = null
     this.arrayTyped = ''
@@ -414,6 +465,14 @@ export class MoveTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next move begins —
+    // and a half-typed post-commit value must not leak into the next
+    // gesture's own length buffer.
+    this.retype.close()
+    if (this.stage.kind === 'idle' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
@@ -488,18 +547,28 @@ export class MoveTool implements Tool {
       return
     }
 
-    // ── Array-copy VCB (×N / /N), while a copy commit is "hot" ──
+    // ── Idle: the array window (×N / /N while a copy is "hot") and the
+    // retype window (a distance after any commit) share one buffer — see
+    // `RetypeSpec`. Enter routes by what the buffer parses as.
     if (this.stage.kind === 'idle') {
-      if (this.arrayHot !== null) {
-        if (ev.key === 'Enter') {
-          this._resolveArray()
+      if (this.arrayHot === null && !this.retype.isOpen) return
+      if (ev.key === 'Enter') {
+        const buf = this.typed
+        this.typed = ''
+        this.onMeasurementCb('')
+        if (this.arrayHot !== null && parseArraySpec(buf) !== null) {
+          this.arrayTyped = buf
+          this._resolveArray() // re-arms the retype window on the array
           return
         }
-        const next = editArrayBuffer(this.arrayTyped, ev.key)
-        if (next !== this.arrayTyped) {
-          this.arrayTyped = next
-          this.onMeasurementCb(this._arrayReadout())
-        }
+        const meters = parseLengthToMeters(buf)
+        if (meters !== null && this.retype.isOpen) this._retypeDistance(meters)
+        return
+      }
+      const next = this._editIdleBuffer(this.typed, ev.key)
+      if (next !== this.typed) {
+        this.typed = next
+        this.onMeasurementCb(this._idleReadout())
       }
       return
     }
@@ -594,6 +663,7 @@ export class MoveTool implements Tool {
   }
 
   private _resetToIdle(): void {
+    this.retype.close()
     this.stage = { kind: 'idle' }
     this.lockAxis = null
     this.shiftAxisLock = false
@@ -609,8 +679,13 @@ export class MoveTool implements Tool {
     return buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
   }
 
-  private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): void {
+  /** True when the kernel accepted the commit (false = refused, toasted).
+   *  Opens the retype window on the result either way it commits — a plain
+   *  move or a copy (whose array window opens alongside). */
+  private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): boolean {
     try {
+      const genBefore = this.wasmScene.history_generation()
+      this.arrayLast = null
       const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
       const copyables = nodes.filter(
         (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
@@ -679,15 +754,112 @@ export class MoveTool implements Tool {
             this.onCommit(committed)
           }
         }
+        this.retype.armFrom({ nodes, vector: [tx, ty, tz], copy: true }, genBefore)
       } else {
         commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
         this.onCommit(nodes)
+        this.retype.armFrom({ nodes, vector: [tx, ty, tz], copy: false }, genBefore)
       }
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
     }
+  }
+
+  /**
+   * Redo the move/copy just committed at |`d`| along its own direction (a
+   * negative value flips it) through the shared window: undo the commit,
+   * re-commit under the copy toggle it was made with, roll back on refusal.
+   */
+  private _retypeDistance(d: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    const [vx, vy, vz] = spec.vector
+    const len = Math.hypot(vx, vy, vz)
+    if (len < 1e-12 || Math.abs(d) < 1e-9) return
+    const k = d / len
+    const v: [number, number, number] = [vx * k, vy * k, vz * k]
+    const arrayed = this.arrayLast !== null && this.arrayHot !== null
+    const outcome = this.retype.apply(
+      (hot) => (arrayed ? this._relayArray(hot, v) : this._commitHot(hot, v)),
+      (hot) => (arrayed ? this._relayArray(hot, hot.vector) : this._commitHot(hot, hot.vector)),
+      (hot) => ({ ...hot, vector: v }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('move'))
+  }
+
+  /**
+   * Re-space the array the window last resolved so its single-copy vector
+   * is `v` (SketchUp: after `3x`, typing a new distance moves all three
+   * copies), keeping the resolved count and multiply/divide mode. The array
+   * window is re-stamped on the new vector so a further `Nx` continues from
+   * the new spacing.
+   */
+  private _relayArray(hot: RetypeSpec, v: [number, number, number]): boolean {
+    const spec = this.arrayLast
+    if (spec === null) return this._commitHot(hot, v)
+    const step: [number, number, number] =
+      spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
+    try {
+      const created = this._duplicateArray(
+        hot.nodes,
+        affineToFloat64(translationAffine(step[0], step[1], step[2])),
+        spec.count,
+      )
+      this.arrayHot = {
+        sources: hot.nodes,
+        vector: v,
+        historyGen: this.wasmScene.history_generation().toString(),
+      }
+      this.selection = created
+      this.onArrayCommit(created)
+      return true
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+  }
+
+  /** Lay the hot move down along `v`, under the copy toggle it was committed with. */
+  private _commitHot(hot: RetypeSpec, v: [number, number, number]): boolean {
+    const prev = this.copyMode
+    this.copyMode = hot.copy
+    try {
+      return this._commit(hot.nodes, v[0], v[1], v[2])
+    } finally {
+      this.copyMode = prev
+    }
+  }
+
+  /** The idle buffer's editor: an array token (`x`, `/`) or a buffer already
+   *  holding one follows the array grammar; everything else the length
+   *  grammar. */
+  private _editIdleBuffer(buf: string, key: string): string {
+    const multiplyKey = key === 'x' || key === 'X' || key === '*'
+    if (this.arrayHot !== null) {
+      // A copy is hot: the full array grammar, `/` included (divide).
+      if (/[x/]/.test(buf) || multiplyKey || key === '/') return editArrayBuffer(buf, key)
+    } else if (multiplyKey || /x/.test(buf)) {
+      // No copy to array: an `x3` attempt is still kept as typed — so Enter
+      // finds no length in it and stays inert — rather than being read as
+      // the distance `3`. `/` here is an imperial fraction bar (`1/2"`).
+      return editArrayBuffer(buf, key)
+    }
+    if (isLengthInputKey(key)) return editLengthBuffer(buf, key, getLengthUnit())
+    return buf
+  }
+
+  /** The idle buffer's readout: an array spec as typed (`3×`), a length in
+   *  display units. */
+  private _idleReadout(): string {
+    if (this.typed === '') return ''
+    const arrayish = /x/.test(this.typed) || (this.arrayHot !== null && /\//.test(this.typed))
+    return arrayish ? this.typed.replace('x', '×') : this._decorate(this._typedReadout())
   }
 
   /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs. */
@@ -785,6 +957,10 @@ export class MoveTool implements Tool {
       vector: hot.vector,
       historyGen: this.wasmScene.history_generation().toString(),
     }
+    this.arrayLast = spec
+    // A distance typed now re-spaces THIS array (see `_relayArray`); the
+    // array is one `duplicate_selection_array` step, so one undo retracts it.
+    this.retype.arm({ nodes: hot.sources, vector: hot.vector, copy: true }, 1)
     this.selection = created
     this.onArrayCommit(created)
   }

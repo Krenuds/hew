@@ -279,6 +279,19 @@ export interface Tool {
   onPointerRawMove?(xPx: number, yPx: number, buttons: number, mods: { shift: boolean }): void
 
   /**
+   * (optional) The pointer's canvas-pixel position on every ordinary move,
+   * delivered right AFTER `onPointerMove` for the same event — unlike
+   * `onPointerRawMove` this does NOT opt the tool out of snap resolution,
+   * it only adds the screen coordinate a world-space tool cannot recover
+   * from its ray (under parallel projection every ray shares one direction,
+   * so "has the pointer moved a few pixels?" is unanswerable from rays
+   * alone). LineTool's post-click retype window uses it to tell "type the
+   * length of the segment just placed" from "move, then type the next
+   * segment". Feature-detected with `'onPointerScreenMove' in tool`.
+   */
+  onPointerScreenMove?(xPx: number, yPx: number): void
+
+  /**
    * (optional) Raw canvas-relative CSS-pixel pointer position at a genuine
    * left-button pointerDOWN, called alongside `onPointerDown` (both fire).
    * Pairs with `onPointerRawMove` for a screen-space drag gesture that needs

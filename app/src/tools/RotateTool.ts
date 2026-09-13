@@ -140,6 +140,7 @@ import {
   parseArraySpec,
   parseDistance,
 } from './moveInput'
+import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
@@ -212,12 +213,27 @@ interface Spoke {
   color: number
 }
 
+/**
+ * The rotation (or rotated copy) just committed, kept in a `RetypeWindow`
+ * (retypeWindow.ts) so an angle typed AFTER the commit redoes it — about
+ * the same pivot and axis, in the committed direction for a positive value
+ * and the opposite for a negative one. `copy` is the copy toggle in force
+ * at the commit. Lives beside the ×N / /N array window exactly as in
+ * MoveTool: one idle buffer, routed by what it parses as.
+ */
+type RetypeSpec = { nodes: NodeRef[]; pivot: Vec3; axis: Vec3; theta: number; copy: boolean }
+
 export class RotateTool implements Tool {
   readonly name = 'Rotate'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
+      if (this.retype.isOpen) {
+        return this.arrayHot !== null
+          ? 'Type an exact angle to redo the copy you just made, or 3x / 3/ for an array — Enter applies.'
+          : 'Type an exact angle to redo the rotation you just made — or click to set the center of another.'
+      }
       if (this.arrayHot !== null) {
         return 'Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies.'
       }
@@ -316,6 +332,15 @@ export class RotateTool implements Tool {
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
   private arrayTyped: string = ''
+
+  /** The ×N / /N spec the array window last resolved, or null while the hot
+   *  copy is still a single copy — an angle typed afterwards re-spaces the
+   *  whole array (see `_relayArray`). */
+  private arrayLast: { mode: 'multiply' | 'divide'; count: number } | null = null
+  /** The rotation/copy just committed, redoable at a typed angle until the
+   *  next pointer action, Escape, tool switch, or other document mutation
+   *  (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
   /**
    * Commit callback for an ×N / /N array re-resolve. Unlike `onCommit`'s
    * targeted refresh, this must trigger a FULL scene refresh — see
@@ -344,6 +369,7 @@ export class RotateTool implements Tool {
     this.onToast = onToast
     this.instanceGroupGetter = instanceGroupGetter
     this.onMeasurementCb = onMeasurement
+    this.retype = new RetypeWindow(wasmScene)
     this.onCopyModeChange = onCopyModeChange
     this.onArrayCommit = onArrayCommit ?? onCommit
   }
@@ -401,13 +427,32 @@ export class RotateTool implements Tool {
   capturesKey(key: string): boolean {
     if (this.stage.kind === 'ref') return true
     if (this.stage.kind === 'pivot') return key === 'Delete' || key === 'Backspace'
-    if (this.arrayHot === null) return false
-    return (
-      (key >= '0' && key <= '9') ||
-      key === 'x' || key === 'X' || key === '*' || key === '/' ||
-      key === 'Backspace' || key === 'Delete' || key === 'Enter'
-    )
+    if (this.arrayHot === null && !this.retype.isOpen) return false
+    const arrayKey = key === 'x' || key === 'X' || key === '*' || key === '/'
+    if ((key >= '0' && key <= '9') || key === '-' || key === '.') return true
+    // The array window's own set, unchanged (see MoveTool.capturesKey).
+    if (this.arrayHot !== null && (arrayKey || key === 'Backspace' || key === 'Delete' || key === 'Enter')) return true
+    if (this.typed === '') return false
+    return key === 'Enter' || key === 'Backspace' || arrayKey || key === '.' || key === '-'
   }
+
+  /** Armed for Escape's purposes while a gesture is live, the array window
+   *  is open, or a post-commit angle is being typed. */
+  hasArmedGesture(): boolean {
+    return this.stage.kind !== 'idle' || this.arrayHot !== null || this.typed !== ''
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`), alongside
+   *  `disarmArray`. */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.stage.kind === 'idle' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
+  }
+
 
   /**
    * Cleanly close the armed ×N / /N window without resolving it — see
@@ -415,6 +460,8 @@ export class RotateTool implements Tool {
    * before an explicit delete/undo/redo command).
    */
   disarmArray(): void {
+    // An explicit document command ends the retype window too — same reason.
+    this.retype.close()
     if (this.arrayHot === null && this.arrayTyped === '') return
     this.arrayHot = null
     this.arrayTyped = ''
@@ -513,6 +560,8 @@ export class RotateTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next rotation begins.
+    this.retype.close()
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
@@ -615,15 +664,39 @@ export class RotateTool implements Tool {
     // Only intercepts when the window is actually armed — an idle Rotate
     // with no hot window still needs Shift/arrow inference-locking below
     // (unlike MoveTool, which has no idle-phase axis behavior to preserve).
-    if (this.stage.kind === 'idle' && this.arrayHot !== null) {
+    // Idle: the array window (×N / /N while a copy is "hot") and the retype
+    // window (an angle after any commit) share one buffer — see `RetypeSpec`.
+    if (this.stage.kind === 'idle' && (this.arrayHot !== null || this.retype.isOpen)) {
       if (ev.key === 'Enter') {
-        this._resolveArray()
+        const buf = this.typed
+        this.typed = ''
+        this.onMeasurementCb('')
+        if (this.arrayHot !== null && parseArraySpec(buf) !== null) {
+          this.arrayTyped = buf
+          this._resolveArray() // re-arms the retype window on the array
+          return
+        }
+        const deg = parseDistance(buf)
+        if (deg !== null && this.retype.isOpen) this._retypeAngle(deg)
         return
       }
-      const next = editArrayBuffer(this.arrayTyped, ev.key)
-      if (next !== this.arrayTyped) {
-        this.arrayTyped = next
-        this.onMeasurementCb(this._arrayReadout())
+      // Array tokens: the full grammar while a copy is hot; otherwise an
+      // `x3` attempt is kept as typed so Enter stays inert (see MoveTool's
+      // `_editIdleBuffer`).
+      const multiplyKey = ev.key === 'x' || ev.key === 'X' || ev.key === '*'
+      const arrayKey = this.arrayHot !== null
+        ? (multiplyKey || ev.key === '/' || /[x/]/.test(this.typed))
+        : (multiplyKey || /x/.test(this.typed))
+      const next = arrayKey
+        ? editArrayBuffer(this.typed, ev.key)
+        : ((ev.key >= '0' && ev.key <= '9') || ev.key === '.' || ev.key === '-' || ev.key === 'Backspace')
+          ? editNumericBuffer(this.typed, ev.key)
+          : this.typed
+      if (next !== this.typed) {
+        this.typed = next
+        this.onMeasurementCb(
+          this.typed === '' ? '' : /[x/]/.test(this.typed) ? this.typed.replace('x', '×') : `${this.typed}°`,
+        )
       }
       return
     }
@@ -866,8 +939,13 @@ export class RotateTool implements Tool {
    * rotation affine: see the class doc comment for the full reasoning
    * (kernel primitives, undo-step counts, sketch envelope).
    */
-  private _commit(nodes: NodeRef[], pivot: Vec3, axis: Vec3, theta: number): void {
+  /** True when the kernel accepted the commit (false = refused, toasted).
+   *  Opens the retype window on the result — a plain rotation or a copy
+   *  (whose array window opens alongside). */
+  private _commit(nodes: NodeRef[], pivot: Vec3, axis: Vec3, theta: number): boolean {
     try {
+      const genAtStart = this.wasmScene.history_generation()
+      this.arrayLast = null
       const affine = rotateAboutPivotAxis(pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2], theta)
       const affineF64 = affineToFloat64(affine)
       const copyables = nodes.filter(
@@ -923,14 +1001,90 @@ export class RotateTool implements Tool {
             this.onCommit(committed)
           }
         }
+        this.retype.armFrom({ nodes, pivot, axis, theta, copy: true }, genAtStart)
       } else {
         commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
         this.onCommit(nodes)
+        this.retype.armFrom({ nodes, pivot, axis, theta, copy: false }, genAtStart)
       }
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+  }
+
+  /**
+   * Redo the rotation just committed at |`deg`| degrees — the committed
+   * direction for a positive value, the opposite for a negative one — about
+   * the same pivot and axis, through the shared window.
+   */
+  private _retypeAngle(deg: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    const theta = (spec.theta < 0 ? -1 : 1) * (deg * Math.PI) / 180
+    if (Math.abs(theta) < 1e-9) return
+    const arrayed = this.arrayLast !== null && this.arrayHot !== null
+    const outcome = this.retype.apply(
+      (hot) => (arrayed ? this._relayArray(hot, theta) : this._commitHot(hot, theta)),
+      (hot) => (arrayed ? this._relayArray(hot, hot.theta) : this._commitHot(hot, hot.theta)),
+      (hot) => ({ ...hot, theta }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('rotation'))
+  }
+
+  /**
+   * Re-space the array the window last resolved so its single-copy angle is
+   * `theta` (SketchUp: after `3x`, typing a new angle re-fans all three
+   * copies), keeping the resolved count and multiply/divide mode. The array
+   * window is re-stamped on the new angle so a further `Nx` continues from it.
+   */
+  private _relayArray(hot: RetypeSpec, theta: number): boolean {
+    const spec = this.arrayLast
+    const arr = this.arrayHot
+    if (spec === null || arr === null) return this._commitHot(hot, theta)
+    const per = spec.mode === 'divide' ? theta / spec.count : theta
+    const genBefore = this.wasmScene.history_generation()
+    try {
+      const affines: Float64Array[] = []
+      for (let k = 1; k <= spec.count; k += 1) {
+        affines.push(affineToFloat64(rotateAboutPivotAxis(
+          hot.pivot[0], hot.pivot[1], hot.pivot[2], hot.axis[0], hot.axis[1], hot.axis[2], per * k,
+        )))
+      }
+      const created = arr.sketchSources.length > 0
+        ? duplicateSketchSelectionByAffineArray(this.wasmScene, arr.sketchSources, affines)
+        : []
+      if (arr.copySources.length > 0) {
+        created.push(...this._duplicateArray(arr.copySources, affines[0], spec.count))
+      }
+      this.arrayHot = {
+        ...arr,
+        theta,
+        recordedEntries: Number(this.wasmScene.history_generation() - genBefore),
+        historyGen: this.wasmScene.history_generation().toString(),
+      }
+      this.selection = created
+      this.onArrayCommit(created)
+      return true
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+  }
+
+  /** Lay the hot rotation down at `theta`, under the copy toggle it was committed with. */
+  private _commitHot(hot: RetypeSpec, theta: number): boolean {
+    const prev = this.copyMode
+    this.copyMode = hot.copy
+    try {
+      return this._commit(hot.nodes, hot.pivot, hot.axis, theta)
+    } finally {
+      this.copyMode = prev
     }
   }
 
@@ -1045,11 +1199,18 @@ export class RotateTool implements Tool {
       recordedEntries,
       historyGen: this.wasmScene.history_generation().toString(),
     }
+    this.arrayLast = spec
+    // An angle typed now re-spaces THIS array (see `_relayArray`).
+    this.retype.arm(
+      { nodes: [...hot.copySources, ...hot.sketchSources], pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true },
+      recordedEntries,
+    )
     this.selection = created
     this.onArrayCommit(created)
   }
 
   private _resetToIdle(): void {
+    this.retype.close()
     this.stage = { kind: 'idle' }
     this.lockedNormal = null
     this.candidateNormal = null

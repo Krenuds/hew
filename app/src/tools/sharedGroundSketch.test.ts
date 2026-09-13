@@ -29,6 +29,7 @@ function makeWasmScene() {
   const segmentSketches: bigint[] = []
   let sketchCounter = 41n
   const scene = {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter

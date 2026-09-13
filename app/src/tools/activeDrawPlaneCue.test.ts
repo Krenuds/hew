@@ -61,6 +61,7 @@ function makeWasmScene(opts: {
     // legacy world-axis fast paths; see drawPlane.test.ts for moved-frame
     // coverage of `axisDrawPlane` itself.
     axes: vi.fn(() => new Float64Array(opts.frame ?? [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => { sketchCounter += 1n; return sketchCounter }),
     begin_sketch_on_plane: vi.fn(() => { sketchCounter += 1n; return sketchCounter }),
     pick_face: vi.fn(() => opts.pick?.()),

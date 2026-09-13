@@ -12,7 +12,7 @@ Follow Me sweeps a closed profile along a path and answers with a new watertight
 
 ## The gesture
 
-1. Select the path with the Select tool — a drawn line, curve, or any connected run of sketch edges. One click on one line is enough: Follow Me takes the whole connected run it belongs to. Once picked, the path highlights boldly along its whole length, so it's obvious what you're about to sweep.
+1. Select the path with the Select tool — a drawn line, curve, or any connected run of sketch edges. Follow Me sweeps exactly what's selected: a single clicked segment is swept alone. To sweep a whole polyline, triple-click one of its segments first — that selects the whole connected run, which then highlights boldly along its full length, so it's obvious what you're about to sweep.
 2. Activate Follow Me (tool rail, or search "sweep" in the palette).
 3. Click the profile — a closed sketch region sitting square across the path's end. A plain click sweeps the whole path; press and drag along the path instead for a partial sweep (see [A partial sweep](#a-partial-sweep) below).
 

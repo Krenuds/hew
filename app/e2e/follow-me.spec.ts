@@ -115,7 +115,7 @@ async function expectNoRefusalToast(page: Page): Promise<void> {
   }
 }
 
-test('Follow Me: one click on one Line-tool segment sweeps the whole L run (preselect flow)', async ({
+test('Follow Me: one click on one Line-tool segment sweeps THAT segment only (preselect flow)', async ({
   page,
 }) => {
   const ctx = await setup(page)
@@ -152,8 +152,11 @@ test('Follow Me: one click on one Line-tool segment sweeps the whole L run (pres
   await clickWorld(page, ctx, 2, 2, 0)
   await page.keyboard.press('Escape')
 
-  // The kernel welded the two segments into ONE island — the invariant the
-  // one-click promise rides on.
+  // The kernel welded the two segments into ONE island — so the single
+  // segment about to be selected genuinely belongs to a longer run, and the
+  // sweep stopping short of the corner is the tool honouring the selection,
+  // not a disconnected path. (A triple-click selects the whole island; the
+  // whole-run sweep is covered by follow-me-single-segment.spec.ts.)
   const lIsland = await page.evaluate(() => {
     const h = window.__hew_test!
     for (const s of h.getSketchIds()) {
@@ -181,7 +184,8 @@ test('Follow Me: one click on one Line-tool segment sweeps the whole L run (pres
   await clickWorld(page, ctx, 0, 0, 0.7) // center of the standing square
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 
-  // The sweep covers BOTH legs: a face stands over each of them.
+  // The sweep covers ONLY the selected first leg: a face stands over it and
+  // none over the second leg — the selection IS the path.
   const probes = await page.evaluate(() => {
     const h = window.__hew_test!
     const ids = h.getObjectIds()
@@ -193,7 +197,7 @@ test('Follow Me: one click on one Line-tool segment sweeps the whole L run (pres
   })
   expect(probes.solid).toBe(true)
   expect(probes.leg1).toBe(true)
-  expect(probes.leg2).toBe(true)
+  expect(probes.leg2).toBe(false)
   await expectNoRefusalToast(page)
 })
 

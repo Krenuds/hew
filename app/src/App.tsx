@@ -31,7 +31,7 @@ import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/Unsa
 import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -947,28 +947,42 @@ export default function App() {
     setWatertightMap(new Map(wtMap))
   }, [])
 
-  const handleSelect = useCallback((node: NodeRef | null, additive: boolean) => {
+  const handleSelect = useCallback((node: NodeRef | null, mode: SelectMode) => {
     // Node, guide, and annotation selection are mutually exclusive.
     setSelectedGuide(null)
     setSelectedAnnotation(null)
-    setSelectedIds((cur) => nextSelection(cur, node, additive))
+    setSelectedIds((cur) => nextSelection(cur, node, mode))
   }, [])
 
-  /** Lift a multi-node selection (marquee, Select All) from the viewport.
-   * Non-additive replaces; additive (shift-drag) merges without duplicates. */
-  const handleSelectMany = useCallback((nodes: NodeRef[], additive: boolean) => {
+  /** Lift a multi-node selection (marquee, Select All, Invert Selection)
+   * from the viewport. `mode` is the Select tool's modifier matrix
+   * (`selectModeFor`): replace / toggle / add / subtract — see
+   * `mergeSelection`. */
+  const handleSelectMany = useCallback((nodes: NodeRef[], mode: SelectMode) => {
     setSelectedGuide(null)
     setSelectedAnnotation(null)
-    setSelectedIds((cur) => {
-      if (!additive) return nodes
-      const seen = new Set(cur.map(nodeKey))
-      return [...cur, ...nodes.filter((n) => !seen.has(nodeKey(n)))]
-    })
+    setSelectedIds((cur) => mergeSelection(cur, nodes, mode))
+  }, [])
+
+  /** The Outliner's row click: its modifier reading is a list's (Shift or
+   * ⌘/Ctrl = toggle the row), not the viewport's four-way matrix, so it
+   * keeps a boolean and maps onto toggle/replace here. */
+  const handleOutlinerSelect = useCallback(
+    (node: NodeRef, additive: boolean) => handleSelect(node, additive ? 'toggle' : 'replace'),
+    [handleSelect],
+  )
+
+  /** Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A): clear every kind of selection
+   * — nodes, guide, annotation — without touching the editing context. */
+  const handleSelectNone = useCallback(() => {
+    setSelectedGuide(null)
+    setSelectedAnnotation(null)
+    setSelectedIds([])
   }, [])
 
   /** Replace the selection outright (Object Info's "(N instances)" click). */
   const handleReplaceSelection = useCallback(
-    (nodes: NodeRef[]) => handleSelectMany(nodes, false),
+    (nodes: NodeRef[]) => handleSelectMany(nodes, 'replace'),
     [handleSelectMany],
   )
 
@@ -4020,6 +4034,19 @@ export default function App() {
         if (forwardToTextField('selectAll')) break
         viewportApi.current?.selectAll()
         break
+      // Select None / Invert Selection have no text-field analog: like
+      // Paste In Place, a fire that lands while a field has focus (the
+      // native macOS ⇧⌘A key equivalent reaches here regardless) simply
+      // does nothing rather than changing the scene selection out from
+      // under an in-progress rename.
+      case 'edit-select-none':
+        if (isTextFieldFocused()) break
+        handleSelectNone()
+        break
+      case 'edit-invert-selection':
+        if (isTextFieldFocused()) break
+        viewportApi.current?.invertSelection()
+        break
       case 'edit-delete': deleteSelection(); break
       case 'edit-copy':
         if (forwardToTextField('copy')) break
@@ -4788,9 +4815,13 @@ export default function App() {
   // accelerator, because a native CmdOrCtrl+A fires even while typing in a
   // text field and would hijack select-all-text into a scene-wide selection.
   // Here a focused text field keeps the browser's own select-all.
+  // ⇧⌘A / Ctrl+Shift+A → Select None (SketchUp's macOS binding; its Windows
+  // Ctrl+T is a browser-reserved new-tab key, so the Shift chord is the one
+  // that works in the web app and the desktop shell alike). Same handler,
+  // same typing guard: a focused text field keeps the key.
   useEffect(() => {
     const onSelectAllKey = (ev: KeyboardEvent) => {
-      if (!(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return
+      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
       if (ev.key.toLowerCase() !== 'a') return
       // Modal welcome screen: swallow (no scene select-all, no page-wide
       // text selection of the app behind the overlay).
@@ -4800,7 +4831,7 @@ export default function App() {
         target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
       if (isTyping) return // let the focused field select its own text
       ev.preventDefault()
-      menuActionRef.current('edit-select-all')
+      menuActionRef.current(ev.shiftKey ? 'edit-select-none' : 'edit-select-all')
     }
     window.addEventListener('keydown', onSelectAllKey)
     return () => window.removeEventListener('keydown', onSelectAllKey)
@@ -5975,7 +6006,7 @@ export default function App() {
               activeContext={activeContext}
               sessionStack={sessionStack}
               sessionMembers={sessionMembers}
-              onSelect={handleSelect}
+              onSelect={handleOutlinerSelect}
               onEnterContext={enterNode}
               onExitContext={handleExitToModel}
               onSetContextDepth={handleSetPathDepth}

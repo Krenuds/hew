@@ -5,6 +5,7 @@ import {
   breadcrumb,
   isTreeRowDimmed,
   nextSelection,
+  mergeSelection,
   canBoolean,
   canGroup,
   canUngroup,
@@ -558,25 +559,84 @@ describe('nextSelection (NodeRef)', () => {
   const g: NodeRef = { kind: 'group', id: 30n }
 
   it('replaces on a plain click', () => {
-    expect(nextSelection([a], b, false)).toEqual([b])
+    expect(nextSelection([a], b, 'replace')).toEqual([b])
   })
 
   it('clears on an empty click', () => {
-    expect(nextSelection([a, b], null, false)).toEqual([])
+    expect(nextSelection([a, b], null, 'replace')).toEqual([])
   })
 
-  it('appends a new node additively, preserving order', () => {
-    expect(nextSelection([a], b, true)).toEqual([a, b])
+  it('keeps the selection on a modified empty click (toggle/add/subtract on air)', () => {
+    expect(nextSelection([a, b], null, 'toggle')).toEqual([a, b])
+    expect(nextSelection([a, b], null, 'add')).toEqual([a, b])
+    expect(nextSelection([a, b], null, 'subtract')).toEqual([a, b])
   })
 
-  it('toggles an already-selected node off additively', () => {
-    expect(nextSelection([a, b], a, true)).toEqual([b])
+  it('toggle appends a new node, preserving order', () => {
+    expect(nextSelection([a], b, 'toggle')).toEqual([a, b])
+  })
+
+  it('toggle removes an already-selected node', () => {
+    expect(nextSelection([a, b], a, 'toggle')).toEqual([b])
+  })
+
+  it('add appends a new node and never removes a selected one', () => {
+    expect(nextSelection([a], b, 'add')).toEqual([a, b])
+    expect(nextSelection([a, b], a, 'add')).toEqual([a, b])
+  })
+
+  it('subtract removes a selected node and never adds an unselected one', () => {
+    expect(nextSelection([a, b], a, 'subtract')).toEqual([b])
+    expect(nextSelection([a], b, 'subtract')).toEqual([a])
   })
 
   it('treats object and group with same id as distinct', () => {
     const sameIdGroup: NodeRef = { kind: 'group', id: 10n }
     // a is {object,10n}; sameIdGroup is {group,10n} — different nodes
-    expect(nextSelection([a], sameIdGroup, true)).toEqual([a, sameIdGroup])
+    expect(nextSelection([a], sameIdGroup, 'toggle')).toEqual([a, sameIdGroup])
+    expect(nextSelection([a, g], g, 'subtract')).toEqual([a])
+  })
+})
+
+describe('mergeSelection (marquee / Select All / Invert)', () => {
+  const a: NodeRef = { kind: 'object', id: 10n }
+  const b: NodeRef = { kind: 'object', id: 20n }
+  const c: NodeRef = { kind: 'group', id: 30n }
+  const e: NodeRef = { kind: 'sketch-edge', id: 4n, sketch: 9n }
+
+  it('replace hands back the picked nodes (an empty pick clears)', () => {
+    expect(mergeSelection([a], [b, c], 'replace')).toEqual([b, c])
+    expect(mergeSelection([a], [], 'replace')).toEqual([])
+  })
+
+  it('add merges without duplicates, keeping the existing order first', () => {
+    expect(mergeSelection([a, b], [b, c], 'add')).toEqual([a, b, c])
+  })
+
+  it('add returns the same array when every picked node is already selected', () => {
+    const cur = [a, b]
+    expect(mergeSelection(cur, [b, a], 'add')).toBe(cur)
+  })
+
+  it('subtract drops the picked nodes and keeps the rest in order', () => {
+    expect(mergeSelection([a, b, c], [b], 'subtract')).toEqual([a, c])
+    const cur = [a]
+    expect(mergeSelection(cur, [b], 'subtract')).toBe(cur)
+  })
+
+  it('toggle flips each picked node: selected ones leave, unselected ones join', () => {
+    expect(mergeSelection([a, b], [b, c], 'toggle')).toEqual([a, c])
+  })
+
+  it('toggle with nothing picked leaves the selection untouched', () => {
+    const cur = [a, b]
+    expect(mergeSelection(cur, [], 'toggle')).toBe(cur)
+  })
+
+  it('keys sketch sub-entities by owning sketch too', () => {
+    const eOther: NodeRef = { kind: 'sketch-edge', id: 4n, sketch: 8n }
+    expect(mergeSelection([e], [eOther], 'add')).toEqual([e, eOther])
+    expect(mergeSelection([e], [eOther], 'subtract')).toEqual([e])
   })
 })
 

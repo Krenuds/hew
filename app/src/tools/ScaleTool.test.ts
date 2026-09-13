@@ -39,6 +39,7 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
 
 function makeWasmScene() {
   return {
+    history_generation: vi.fn(() => 1n),
     transform_selection: vi.fn(),
     transform_def_member: vi.fn(),
     transform_def_selection: vi.fn(),
@@ -687,5 +688,76 @@ describe('ScaleTool — setEditContext aborts an armed gesture on a genuine chan
     tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
 
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+// Post-commit retype (retypeWindow.ts): type a factor or a dimension after a
+// grip drag commits and the scale is redone on the same grip axes.
+describe('ScaleTool — retype the factor or dimension after the commit', () => {
+  const ID = 9n
+  const MIN: [number, number, number] = [0, 0, 0]
+  const MAX: [number, number, number] = [2, 2, 1]
+  function makeBoxTool() {
+    const t = makeTool([{ kind: 'object', id: ID } as NodeRef], makeBoxObjectsGroup(ID, MIN, MAX))
+    // A stateful history for the window: transform_selection records a step.
+    let gen = 1n
+    t.wasmScene.history_generation.mockImplementation(() => gen)
+    t.wasmScene.transform_selection.mockImplementation(() => { gen += 1n })
+    const undo = vi.fn(() => { gen += 1n; return { free: vi.fn() } })
+    Object.assign(t.wasmScene, { scene_undo: undo, scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }) })
+    return { ...t, undo }
+  }
+  const typeIn = (tool: ScaleTool, text: string) => { for (const ch of text) tool.onKey({ key: ch } as KeyboardEvent); tool.onKey({ key: 'Enter' } as KeyboardEvent) }
+
+  it('the +Z face drag doubled the height; typing 3 redoes it ×3 on Z only, then 0.5m sets the height to 0.5 m', () => {
+    const t = makeBoxTool()
+    const top: [number, number, number] = [(MIN[0] + MAX[0]) / 2, (MIN[1] + MAX[1]) / 2, MAX[2]]
+    const height = MAX[2] - MIN[2]
+    t.tool.onPointerDown(makeSnap({ x: top[0], y: top[1], z: top[2] }), rayAt(top))
+    const dragged: [number, number, number] = [top[0], top[1], MIN[2] + 2 * height]
+    t.tool.onPointerMove(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
+    t.tool.onPointerDown(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(lastAffine(t.wasmScene)[10]).toBeCloseTo(2, 9)
+    expect(t.tool.statusHint()).toContain('redo the scale')
+    expect(t.tool.capturesKey('3')).toBe(true)
+    expect(t.tool.capturesKey('s')).toBe(false)
+
+    typeIn(t.tool, '3')
+    expect(t.undo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(2)
+    const a = lastAffine(t.wasmScene)
+    expect(a[0]).toBeCloseTo(1, 9)
+    expect(a[5]).toBeCloseTo(1, 9)
+    expect(a[10]).toBeCloseTo(3, 9)
+
+    // A length is a target dimension measured against the PRE-scale height.
+    typeIn(t.tool, '0.5m')
+    expect(t.undo).toHaveBeenCalledTimes(2)
+    expect(lastAffine(t.wasmScene)[10]).toBeCloseTo(0.5 / height, 9)
+  })
+})
+
+describe('ScaleTool — an identity retype retracts the scale', () => {
+  it('typing 1 after a ×2 undoes the scale and closes the window instead of redoing the old one', () => {
+    const ID = 9n
+    const t = makeTool([{ kind: 'object', id: ID } as NodeRef], makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1]))
+    let gen = 1n
+    t.wasmScene.history_generation.mockImplementation(() => gen)
+    t.wasmScene.transform_selection.mockImplementation(() => { gen += 1n })
+    const undo = vi.fn(() => { gen += 1n; return { free: vi.fn() } })
+    const redo = vi.fn(() => { gen += 1n; return { free: vi.fn() } })
+    Object.assign(t.wasmScene, { scene_undo: undo, scene_redo: redo })
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1]))
+    t.tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2]))
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2]))
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    for (const ch of '1') t.tool.onKey({ key: ch } as KeyboardEvent)
+    t.tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    expect(undo).toHaveBeenCalledTimes(1)
+    expect(redo).not.toHaveBeenCalled()
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1) // no identity re-commit
+    expect(t.tool.capturesKey('2')).toBe(false) // window closed
+    expect(t.onCommit).toHaveBeenCalledTimes(2) // the retract refreshed the host
   })
 })

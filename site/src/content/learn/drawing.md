@@ -30,6 +30,8 @@ To finish a chain *without* closing it: double-click, press `Enter` with nothing
 
 **Exact lengths:** once a chain is started, type a length (e.g. `750mm`) and press `Enter` — the next segment commits at exactly that length along the direction you're pointing.
 
+Type a length right after a segment commits, before moving the cursor, and it resizes *that* segment instead, along the direction it was already drawn — the chain then continues from the new end point. Move the cursor first and a typed length goes back to drawing the next segment, as above (see "Typing exact values" below).
+
 **Axis locking:** hold `Shift` to lock the segment to whichever axis it's already leaning toward, or press an arrow key for an explicit lock: `→` locks to X (red), `←` to Y (green), `↑` to Z (blue). Press `↓` (or the same arrow again) to unlock.
 
 **Axis inference:** you usually don't need the lock at all. Move roughly along an axis and the segment snaps onto it by itself, the rubber band turning that axis's colour and the tooltip naming it. Move away and it lets go — it's a suggestion, not a commitment. A held lock draws a heavier line, so you can always tell which one you have. A point you snap to always wins over an inferred axis, and so does a construction guide you placed yourself.
@@ -47,6 +49,8 @@ One consequence worth knowing: an outline that ends up spread across two planes 
 
 **Exact dimensions:** after the first click, type both dimensions separated by a comma or an `x` (`2m,1m`, `50 x 30`, `3',18"`) and press `Enter`. A single value makes a square. The rectangle grows in the direction your cursor was heading.
 
+You can also type dimensions *after* the second click. The rectangle you just drew resizes in place, keeping the same first corner and growth direction — retype and press `Enter` again as many times as you like, until you click, press `Esc`, switch tools, or make any other change to the model. Every drawing tool works this way; see "Typing exact values" below.
+
 ## Circle (`C`)
 
 1. Click to set the center.
@@ -57,6 +61,8 @@ One consequence worth knowing: an outline that ends up spread across two planes 
 Note the difference from the line tool: there, an arrow picks the *direction* a segment runs, so `↑` draws straight up. Here an arrow picks the *plane's own axis* — the direction it faces — so `→` and `←` give you upright planes, and `↑` gives you a flat one at the height of the point you clicked.
 
 Hew's circles are stored as regular polygons, but they remember the exact circle you drew — center and radius ride along with the shape, power the Center/Quadrant/Tangent snaps, keep extruded walls smooth on screen, and let STL export re-facet the wall at whatever resolution you pick. The stored facet count adapts to the size of the circle: small circles get 24 sides, larger ones up to 96, keeping the worst chord deviation at about half a millimeter.
+
+Type a radius after the second click, too: the circle you just drew redraws around the same center, at the new radius (see "Typing exact values" below).
 
 ## Polygon
 
@@ -69,6 +75,8 @@ A regular N-sided polygon, for hex bolt heads and nuts, gear blanks, standoffs, 
 
 Unlike Circle, a polygon carries no hidden analytic shape — the straight facets you see are its exact geometry, stored as plain edges like any other drawn line. The typed radius is the **circumradius**, center to vertex, matching SketchUp's Polygon tool.
 
+Both a radius and `Ns` also work after the second click: the polygon you just drew redraws at the new radius, the new side count, or both, around the same center (see "Typing exact values" below).
+
 ## Arc (`A`)
 
 A two-point arc, like SketchUp's:
@@ -78,6 +86,8 @@ A two-point arc, like SketchUp's:
 3. Move perpendicular to the chord to pull out the bulge, then click to commit.
 
 `Esc` steps back one stage at a time. The readout shows the arc's radius. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs facet at the same density as circles of the same radius, and like circles they carry their exact center and radius for snapping, smooth display, and export.
+
+A typed length after the third click works too: the arc you just drew redraws with that bulge, on the same side of the same chord and with the same open/pie/segment closure (see "Typing exact values" below).
 
 **Closing the arc:** press `Option`/`Alt` mid-gesture to cycle what the commit produces — the open arc, a **pie** closed to the center with two straight edges, or a **segment** closed with the chord. The preview draws the closing edges and the readout names the mode. Both closed forms are complete profiles: on the ground they become a region immediately, and on a face they split it, ready to push/pull. The chosen mode sticks for further arcs until you switch tools.
 
@@ -115,6 +125,8 @@ On a sketch region, the offset outline joins the same sketch, so both the origin
 
 If the distance is more than the shape can absorb — an inward offset past the middle, or an arc squeezed to nothing — the preview disappears and committing is refused with a message; nothing is committed halfway.
 
+Type a distance right after the click commits too: the offset you just made redoes at the new distance — positive keeps the same inward or outward direction, negative flips it — as many times as you like, until you click a face or profile, press `Esc`, or switch tools.
+
 ## Editing a sketch
 
 **Deleting a line or curve.** With the Select tool, click any sketch line to select it — a facet of a drawn arc or circle selects the whole curve — and press `Delete`. If the line separated two regions, they merge; if it closed a region, the region opens back up. Deleting a shape's last line removes it entirely. Every line you can see is an ordinary line: pulling a region into a solid removes its outline from the sketch (the outline became the solid's base), so nothing invisible lingers behind to complicate later edits. What survives an extrusion — a wall shared with a neighboring shape, a stray construction line — deletes like anything else.
@@ -139,5 +151,9 @@ There's no input box to click, and none appears. With a tool mid-gesture, start 
 - A bare number, read in your current display unit (`1.5` = 1.5 m in Meters mode, 1.5" in an imperial mode).
 - An explicit unit that overrides the display unit: `mm`, `cm`, `m`, `km`, `in`, `ft` — `250mm`, `3.5cm`, `6"`, `2'`.
 - Feet-inches-fractions, SketchUp style: `5'3"`, `5' 3-1/2"`, `3 1/2"`, `5/8"`.
+
+**Right after the click, too.** Any measurement you can type *before* a shape's committing click, you can also type immediately *after* it: the shape you just drew redraws at the new value, in place — same anchor point, same direction, same everything except the number you changed. Retype and press `Enter` again as many times as you like, until you click, press `Esc`, switch tools, or make any other change to the model (an undo included); a single undo afterward removes the shape entirely, no matter how many times you retyped it. Each tool's section above notes exactly what redraws.
+
+The modify tools work the same way right after *their* commit: Push/Pull, Offset (above), Move, Rotate, and Scale each redo the operation you just made at a newly typed value rather than starting a fresh one. [Push/Pull](/learn/push-pull/) and [Move, Rotate, and Scale](/learn/moving-and-transforming/) cover exactly what redoes for each.
 
 Angle tools (Rotate, Protractor) take plain degrees; Scale takes a plain factor, or a length in any of the forms above as a target dimension for the axis being dragged. Display units are set in **Settings ▸ Units** ([Settings](/learn/settings/)).

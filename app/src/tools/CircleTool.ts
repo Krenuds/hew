@@ -68,6 +68,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editLengthBuffer, isLengthInputKey, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { segmentLength } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
@@ -134,11 +135,28 @@ type FaceStage =
     }
 
 
+/**
+ * The just-committed circle, kept in a `RetypeWindow` (retypeWindow.ts) so a
+ * radius typed AFTER the rim click resizes it in place — `center` stays,
+ * `rim` fixes the direction the radius is measured along (and so the
+ * facet phase), the same idiom Rectangle's post-click `W,D` follows.
+ */
+type RetypeSpec = {
+  center: V3
+  rim: V3
+} & (
+  | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
+  | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
+)
+
 export class CircleTool implements Tool {
   readonly name = 'Circle'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
+      return 'Type an exact radius to resize the circle you just drew — or click the centre of the next one.'
+    }
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
       return 'Click to set the radius — or type an exact radius.'
     }
@@ -178,8 +196,15 @@ export class CircleTool implements Tool {
     return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
 
-  /** VCB buffer — raw string being typed by the user (radius, in display units) */
+  /** VCB buffer — raw string being typed by the user (radius, in display
+   *  units). While IDLE with the retype window open it is the post-click
+   *  radius being typed for the circle just drawn. */
   private typed: string = ''
+
+  /** The just-committed circle, resizable by a typed radius until the next
+   *  pointer action, Escape, tool switch, or any other document mutation
+   *  (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
 
   /** Last rubber-band cursor positions, tracked for typed-entry direction */
   private _lastPlaneCursor: V3 | null = null
@@ -216,6 +241,7 @@ export class CircleTool implements Tool {
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
     this.sketchCache = sketchCache
+    this.retype = new RetypeWindow(wasmScene)
   }
 
   /** The single editing-context channel (component-edit-parity.md phase A1;
@@ -437,7 +463,9 @@ export class CircleTool implements Tool {
       // Face mode
       if (this.faceStage.kind !== 'anchored') {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       const { center, normal, planePoint } = this.faceStage
@@ -445,7 +473,9 @@ export class CircleTool implements Tool {
       const cursorOnPlane = rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
       if (cursorOnPlane === null) {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       this._lastFaceCursor = cursorOnPlane
@@ -466,14 +496,18 @@ export class CircleTool implements Tool {
           this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
         }
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       const { plane, center } = this.planeStage
       const cursor = this._planeCursor(snap, ray, plane)
       if (cursor === null) {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key and must not wipe it.
+        if (this.typed === '') this.onMeasurementCb('')
         return
       }
       this._lastPlaneCursor = cursor
@@ -503,6 +537,8 @@ export class CircleTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next circle has begun.
+    this.disarmRetype()
     if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
@@ -529,7 +565,28 @@ export class CircleTool implements Tool {
    * but IS armed for Escape's purposes.
    */
   hasArmedGesture(): boolean {
-    return this.capturingInput() || this.idlePlaneLock !== null
+    return this.capturingInput() || this.idlePlaneLock !== null || this.typed !== ''
+  }
+
+  /**
+   * Per-key refinement of the capture (see Tool.capturesKey): an anchored
+   * gesture keeps the whole keyboard, exactly as before; the IDLE retype
+   * window takes only what a typed radius needs (`idleRetypeCapturesKey`).
+   */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (!this.capturingInput() && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -537,6 +594,11 @@ export class CircleTool implements Tool {
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
+      if (!this.capturingInput() && this.typed !== '' && this.retype.isOpen) {
+        this.disarmRetype()
+        return
+      }
+      if (!this.capturingInput()) this.retype.close()
       if (!this.capturingInput() && this.idlePlaneLock !== null) {
         this.idlePlaneLock = null
         this._lastIdleHoverPoint = null
@@ -552,6 +614,20 @@ export class CircleTool implements Tool {
     }
 
     if (!this.capturingInput()) {
+      // Idle retype window (see `RetypeSpec`): the keys `capturesKey` admits
+      // edit the buffer; Enter resizes the just-committed circle.
+      if (this.retype.isOpen && this.capturesKey(ev.key)) {
+        if (ev.key === 'Enter') {
+          const meters = parseLengthToMeters(this.typed)
+          this.typed = ''
+          this.onMeasurementCb('')
+          if (meters !== null) this._retypeRadius(Math.abs(meters))
+          return
+        }
+        this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+        this.onMeasurementCb(this.typed === '' ? '' : this._typedReadout())
+        return
+      }
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
@@ -602,6 +678,7 @@ export class CircleTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
@@ -686,7 +763,9 @@ export class CircleTool implements Tool {
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      this._commitPlaneCircle(plane, target, center, rim)
+      if (this._commitPlaneCircle(plane, target, center, rim)) {
+        this.retype.arm({ mode: 'plane', plane, target, center, rim })
+      }
     } else if (this.faceStage.kind === 'anchored') {
       const { object, face, normal, center } = this.faceStage
       const basis = facePlaneBasis(normal)
@@ -715,8 +794,42 @@ export class CircleTool implements Tool {
       this._lastFaceCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      this._commitFaceCircle(object, face, center, rim, normal)
+      if (this._commitFaceCircle(object, face, center, rim, normal)) {
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim })
+      }
     }
+  }
+
+  /**
+   * Resize the just-committed circle to radius `r` through the shared
+   * window: the new rim sits `r` along the committed center→rim direction,
+   * so a retyped circle is indistinguishable from one clicked there.
+   */
+  private _retypeRadius(r: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    const { center, rim } = spec
+    const len = segmentLength(center, rim)
+    if (len < 1e-9 || r < 1e-7) return
+    const k = r / len
+    const newRim: V3 = [
+      center[0] + (rim[0] - center[0]) * k,
+      center[1] + (rim[1] - center[1]) * k,
+      center[2] + (rim[2] - center[2]) * k,
+    ]
+    const outcome = this.retype.apply(
+      (hot) => this._commitHot(hot, newRim),
+      (hot) => this._commitHot(hot, hot.rim),
+      (hot) => ({ ...hot, rim: newRim }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('circle'))
+  }
+
+  /** Lay a circle with `rim` down through the hot record's own commit path. */
+  private _commitHot(hot: RetypeSpec, rim: V3): boolean {
+    return hot.mode === 'plane'
+      ? this._commitPlaneCircle(hot.plane, hot.target, hot.center, rim)
+      : this._commitFaceCircle(hot.object, hot.face, hot.center, rim, hot.normal)
   }
 
   // ------------------------------------------------------------------ plane mode
@@ -754,12 +867,13 @@ export class CircleTool implements Tool {
         return
       }
 
-      this._commitPlaneCircle(plane, target, center, cursor)
+      const committed = this._commitPlaneCircle(plane, target, center, cursor)
       this.planeStage = { kind: 'idle' }
       this.typed = ''
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
+      if (committed) this.retype.arm({ mode: 'plane', plane, target, center, rim: cursor })
     }
   }
 
@@ -767,7 +881,7 @@ export class CircleTool implements Tool {
    *  curve chain) into `target`'s sketch — used by both ground and
    *  non-ground plane/sketch mode (real face mode instead imprints via
    *  `split_face_inner_with_curve`, see `_commitFaceCircle`). */
-  private _commitPlaneCircle(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): void {
+  private _commitPlaneCircle(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): boolean {
     const verts = plane.ground
       ? circlePolygonGround(
           [center[0], center[1]],
@@ -775,7 +889,7 @@ export class CircleTool implements Tool {
           groundSegments([center[0], center[1]], [rim[0], rim[1]]),
         )
       : circlePolygonFace(center, rim, plane.normal, faceSegments(center, rim))
-    if (verts === null || verts.length === 0) return // degenerate — ignore
+    if (verts === null || verts.length === 0) return false // degenerate — ignore
 
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
@@ -836,11 +950,13 @@ export class CircleTool implements Tool {
         }
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
       })
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
@@ -884,15 +1000,17 @@ export class CircleTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
 
-      this._commitFaceVerts(object, face, verts, center)
+      if (this._commitFaceVerts(object, face, verts, center)) {
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane })
+      }
     }
   }
 
   /** Split the given face with a circle loop defined by center/rim/normal. */
-  private _commitFaceCircle(object: bigint, face: bigint, center: V3, rim: V3, normal: V3): void {
+  private _commitFaceCircle(object: bigint, face: bigint, center: V3, rim: V3, normal: V3): boolean {
     const verts = circlePolygonFace(center, rim, normal, faceSegments(center, rim))
-    if (verts === null) return // degenerate — ignore
-    this._commitFaceVerts(object, face, verts, center)
+    if (verts === null) return false // degenerate — ignore
+    return this._commitFaceVerts(object, face, verts, center)
   }
 
   /**
@@ -904,7 +1022,7 @@ export class CircleTool implements Tool {
    * the loop's own first vertex, so it matches the imprinted points exactly
    * (the kernel refuses a claim that does not describe the loop).
    */
-  private _commitFaceVerts(object: bigint, face: bigint, verts: V3[], center: V3): void {
+  private _commitFaceVerts(object: bigint, face: bigint, verts: V3[], center: V3): boolean {
     // Flatten the N vertices into a Float64Array of xyz triples
     const loopPts = new Float64Array(verts.length * 3)
     for (let i = 0; i < verts.length; i++) {
@@ -937,11 +1055,13 @@ export class CircleTool implements Tool {
         this.wasmScene.split_face_inner_with_curve(object, face, loopPts, centerArr, radius)
       }
       this.onFaceImprint(object)
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 

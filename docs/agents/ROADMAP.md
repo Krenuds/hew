@@ -37,6 +37,24 @@ below.
   measurement follows a hovered sketch's plane, an idle arrow-key plane
   lock, or (Tape Measure's parallel guides) the plane a picked face or
   edge actually lies in
+- Exact-dimension typing works both mid-gesture (before the committing
+  click) and right after the shape is already drawn, on every draw tool
+  that takes a typed measurement: Rectangle's `W,D`, Circle's and
+  Polygon's radius (Polygon's side count too, via `Ns`), Arc's bulge, and
+  Line's last segment length. Typing a value and pressing Enter redraws
+  the just-drawn shape in place — same anchor, same growth direction (and
+  for Arc, same side of the chord and open/pie/segment closure) — as
+  often as needed until the next click, Escape, tool switch, or other
+  model change; undo of a resize removes the shape in one step. One
+  shared engine (`app/src/tools/retypeWindow.ts`) owns the undo →
+  recommit → restore cycle every tool's post-click window goes through;
+  each tool supplies only its own geometry and typed-value grammar. The
+  same engine backs the modify tools' own post-commit windows: Push/Pull
+  and Offset redo their last distance (positive keeps the committed
+  direction, negative flips it), Move redoes its last distance or copy
+  (sharing its typed buffer with the ×N/`÷N` array window), Rotate redoes
+  its last angle the same way, and Scale redoes its last factor or target
+  dimension about the same pivot and driven axes
 - Drawing right up to a face's edges: a profile drawn on a face whose
   sides run along part of the face boundary (a rectangle from one edge's
   midpoint to another's, or flush against an edge) imprints as one or more
@@ -123,6 +141,12 @@ below.
   whose walls would ram a distant part of a non-convex solid still refuses,
   since that is a real self-intersection.) Undo of a wall-building push is
   exact, recorded as data
+- Follow Me honors the selection exactly as the path: a single selected
+  sketch segment sweeps only that segment, rather than expanding to its
+  whole connected run; triple-clicking a segment with the Select tool
+  selects the whole run first when that's what's wanted. Clicking a line
+  from inside the tool (skipping preselection) still picks up its whole
+  connected shape
 - Follow Me: sweep a closed sketch profile — or any face of a solid —
   along a path (a connected chain of sketch edges, a solid face's
   boundary, or a face reached through a component instance) into a new
@@ -200,6 +224,13 @@ below.
   (a millimetre at model scale) and clipping planes that follow the eye —
   so a small detail of a large model is reachable, stays on screen while
   orbiting, and renders without z-fighting
+- Shift pressed or released mid-drag switches an orbit drag to a pan and
+  back, for the Orbit tool's left-drag, a middle-button orbit under any
+  tool, and the Pan tool's left-drag; holding Ctrl (Windows/Linux) or ⌘
+  (macOS) during an orbit or pan puts the camera in a precise 1:1 mode —
+  no inertia (the coasting tail and the slight lag while moving) for as
+  long as the key is held, and pressing it while the camera is still
+  coasting stops it dead
 - Position Camera, Look Around, and Walk: first-person camera placement
   and walkthrough navigation (click or drag to stand and look, mouse-look,
   and forward/turn/strafe movement), sharing one session eye height that's
@@ -520,6 +551,14 @@ below.
   level, with push/pull holding to the same eligibility. Groups and
   components keep their explicit double-click editing step — their members
   are not directly editable from outside
+- The Select tool's full SketchUp modifier matrix, on both a click and a
+  marquee drag: plain replaces the selection; Shift toggles each picked
+  node; Ctrl/⌘/Option always adds; Shift plus one of those always
+  subtracts. Triple-clicking a sketch line (or a drawn arc/circle) selects
+  its whole connected shape, while a single click still selects just the
+  one segment under the cursor. Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A)
+  and Edit ▸ Invert Selection round out Select All, mirrored on the native
+  menu bar and the command palette
 - Stage-aware status-bar guidance: every tool tells you what to do next
   ("Click the opposite corner — or type exact dimensions"), updating live
   as the gesture advances

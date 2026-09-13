@@ -82,6 +82,7 @@ function makeWasmScene(opts: {
     ? opts.instancePose
     : new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
   return {
+    history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
     pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
@@ -490,6 +491,10 @@ describe('OffsetTool — cancel and status hint', () => {
     expect(tool.statusHint()).toContain('click to commit')
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
+    // Committed: the retype window offers to redo the offset at a typed
+    // distance; Escape closes it and the pick guidance returns.
+    expect(tool.statusHint()).toContain('redo the offset')
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
     expect(tool.statusHint()).toContain('Click a face')
   })
 })
@@ -654,6 +659,79 @@ describe('OffsetTool — setEditContext aborts an armed gesture on a genuine cha
 
     tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
 
+    expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+// Post-commit distance retype (retypeWindow.ts): type a distance after the
+// commit click and the offset just made is redone at that distance.
+describe('OffsetTool — retype the distance after the commit', () => {
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    let gen = 1n
+    let changed = 0
+    const baseOffset = base.sketch_offset_region as (...args: unknown[]) => unknown
+    const baseFace = base.offset_face as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
+      sketch_offset_region: vi.fn((...args: unknown[]) => { const r = baseOffset(...args); changed += 1; return r }),
+      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      offset_face: vi.fn((...args: unknown[]) => { const r = baseFace(...args); gen += 1n; return r }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    }
+    return scene as unknown as WasmScene
+  }
+  const typeIn = (tool: OffsetTool, text: string) => { for (const ch of text) tool.onKey(makeKeyEvent(ch)); tool.onKey(makeKeyEvent('Enter')) }
+  const regionDistances = (scene: WasmScene) => (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as number)
+
+  it('a profile offset redone at a typed distance keeps its inward direction; a negative value flips it', () => {
+    const scene = makeRetypeScene({ regionPick: makeRegionPick(9n, 7n) })
+    const { tool, onCommit } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    tool.onPointerDown(null, rayAt(1, 0.5))
+    const first = regionDistances(scene)
+    expect(first.length).toBe(1)
+    expect(first[0]).toBeLessThan(0) // inward
+    expect(tool.statusHint()).toContain('redo the offset')
+    typeIn(tool, '0.2')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(regionDistances(scene)[1]).toBeCloseTo(-0.2, 9)
+    expect((scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[1].slice(0, 2)).toEqual([9n, 7n])
+    typeIn(tool, '-0.2')
+    expect(regionDistances(scene)[2]).toBeCloseTo(0.2, 9)
+    expect(onCommit).toHaveBeenCalledTimes(3)
+  })
+
+  it('a face offset retypes through offset_face', () => {
+    const scene = makeRetypeScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    tool.onPointerDown(null, rayAt(1, 0.5))
+    expect(scene.offset_face).toHaveBeenCalledTimes(1)
+    typeIn(tool, '0.3')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    const calls = (scene.offset_face as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls.length).toBe(2)
+    expect(Math.abs(calls[1][2] as number)).toBeCloseTo(0.3, 9)
+    expect(Math.sign(calls[1][2] as number)).toBe(Math.sign(calls[0][2] as number))
+    expect(onFaceImprint).toHaveBeenCalledTimes(2)
+  })
+
+  it('a zero typed distance is refused with the usual toast; a new pick closes the window', () => {
+    const scene = makeRetypeScene({ regionPick: makeRegionPick(9n, 7n) })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    tool.onPointerDown(null, rayAt(1, 0.5))
+    typeIn(tool, '0')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledWith('Move more before committing the offset')
+    tool.onPointerDown(null, rayAt(1, 1)) // picks again → window closed
     expect(tool.capturingInput()).toBe(true)
   })
 })

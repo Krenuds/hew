@@ -106,7 +106,9 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef } from '../panels/treeModel'
+import { collectLeafIds, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
+import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import {
@@ -350,8 +352,10 @@ interface Props {
   selectedIds?: NodeRef[]
   /** Lit set for isolation rendering — null = top level. */
   activeLitSet?: Set<bigint> | null
-  /** Lift an in-viewport selection up to the parent. `additive` = shift-click. */
-  onSelect?: (node: NodeRef | null, additive: boolean) => void
+  /** Lift an in-viewport selection up to the parent. `mode` is the Select
+   * tool's modifier matrix (`selectModeFor`): replace / toggle (Shift) /
+   * add (Ctrl/⌘/Option) / subtract (Shift + those). */
+  onSelect?: (node: NodeRef | null, mode: SelectMode) => void
   /** Shop Mode only (shop-mode playtest): a HELD press on a clear face of a
    *  part while Tape Measure is active requests isolating that part. Driven
    *  from here (not a chrome-level long-press timer) because only the Viewport
@@ -374,9 +378,9 @@ interface Props {
    * (drag-move auto-select, marquee, outliner clicks, …) — those have no
    * single corresponding tap snap to report. */
   onSelectSnap?: (snap: Snap | null) => void
-  /** Lift a multi-node selection (marquee, Select All) up to the parent.
-   * `additive` = shift held: merge into the current selection. */
-  onSelectMany?: (nodes: NodeRef[], additive: boolean) => void
+  /** Lift a multi-node selection (marquee, Select All, Invert Selection) up
+   * to the parent. `mode` as for `onSelect`, read off the marquee's press. */
+  onSelectMany?: (nodes: NodeRef[], mode: SelectMode) => void
   /** Lift a construction-guide pick to the parent; `null` clears. */
   onSelectGuide?: (id: bigint | null) => void
   /** The currently selected guide, reflected into the renderer highlight. */
@@ -951,6 +955,10 @@ export interface ViewportApi {
   /** Select every visible top-level node + free sketch (Edit ▸ Select All);
    * inside a group's editing context, its direct members. */
   selectAll: () => void
+  /** Edit ▸ Invert Selection: everything Select All would pick that is not
+   * selected now, replacing the selection. A selected line or curve counts
+   * its whole connected shape as selected, so that shape stays out. */
+  invertSelection: () => void
   /** Show/hide the origin axes (View ▸ Axes). */
   setAxesVisible: (visible: boolean) => void
   /** Show/hide the ground grid (View ▸ Grid). */
@@ -2208,8 +2216,9 @@ export default function Viewport({
   // (design §1: "the last-used side count persists for the session"),
   // mirroring how currentMaterialIdRef persists Paint's material.
   const polygonSidesRef = useRef<number>(DEFAULT_POLYGON_SIDES)
-  // Whether the in-flight click is a shift-click (additive multi-select).
-  const selectAdditiveRef = useRef(false)
+  // How the in-flight Select click combines with the selection — read off
+  // the press's modifiers (`selectModeFor`) and consumed by handleSelect.
+  const selectModeRef = useRef<SelectMode>('replace')
 
   // Expose tool switch and undo/redo triggers to parent via ref-based mechanism
   const activeToolPropRef = useRef(activeToolProp)
@@ -2624,20 +2633,38 @@ export default function Viewport({
     // so click, drag, and hover agree by construction. `null` means nothing
     // selectable is under the cursor — clear (context-scoped: `additive` is
     // false inside a context, so an in-context miss deselects without exiting).
+    // Set by the THIRD press of a click run on the Select tool (SketchUp's
+    // triple-click "select all connected") and consumed by the very next
+    // handleSelect — which, at the top level, is that press's own deferred
+    // pointerup pick. A line or curve pick then widens to its whole
+    // connected island; anything else is unaffected.
+    let selectIslandOnPick = false
     function handleSelect(snap: Snap | null, ray: Ray): void {
       // Selection is scoped by `resolveSelectableRef`, so Shift-additive is
       // safe inside an editing context too. Component booleans require two
       // sibling definition members; disabling additive selection here made
       // that valid kernel operation unreachable from the real UI.
-      const additive = selectAdditiveRef.current
-      const ref = resolveSelectableRef(snap, ray, selectionDeps())
+      const mode = selectModeRef.current
+      let ref = resolveSelectableRef(snap, ray, selectionDeps())
+      const widen = selectIslandOnPick
+      selectIslandOnPick = false
+      if (widen && ref !== null && ref.sketch !== undefined && (ref.kind === 'sketch-edge' || ref.kind === 'sketch-curve')) {
+        // A curve ref's id is its first facet edge, so the same island query
+        // serves both kinds. A stale handle simply keeps the narrow pick.
+        try {
+          const island = wasmScene.sketch_edge_island(ref.sketch, ref.id)
+          if (island !== undefined) ref = { kind: 'sketch-island', id: island, sketch: ref.sketch }
+        } catch {
+          // keep the narrow pick
+        }
+      }
       // Snap BEFORE node, deliberately: a consumer keying inspection off
       // `onSelect` (Shop Mode's tap-to-inspect) stashes the snap in a ref
       // and reads it inside its `onSelect` handler — firing the snap
       // second would hand that handler the PREVIOUS tap's snap, an
       // off-by-one misreporting which edge/face was actually tapped.
       onSelectSnapRef.current?.(snap)
-      onSelectRef.current?.(ref, additive)
+      onSelectRef.current?.(ref, mode)
       scheduleRender()
     }
 
@@ -2785,16 +2812,62 @@ export default function Viewport({
           .map(nodeRefFromJs)
           .filter((m) => visibleLeaves(m) !== null)
         if (members.length > 0) {
-          onSelectManyRef.current?.(members, false)
+          onSelectManyRef.current?.(members, 'replace')
           scheduleRender()
         }
         return
       }
       const refs = [...visibleTopLevelCandidates().map((c) => c.node), ...visibleSketchRefs()]
       if (refs.length > 0) {
-        onSelectManyRef.current?.(refs, false)
+        onSelectManyRef.current?.(refs, 'replace')
         scheduleRender()
       }
+    }
+
+    /**
+     * Invert Selection (Edit ▸ Invert Selection): the complement of the
+     * current selection within exactly the set Select All would pick at this
+     * level — visible top-level nodes + free sketch islands, or an open
+     * group session's visible direct members. Sub-entity selections
+     * (a line, a curve) have no per-edge complement in that set, so the
+     * island that owns a selected line/curve counts as selected and stays
+     * out — inverting "one segment of an L" yields everything except the L,
+     * never the L minus its segment. Replaces the selection (an inverted
+     * full selection is empty).
+     */
+    function invertSelection(): void {
+      const ctx = activeContextRef.current
+      let candidates: NodeRef[]
+      if (ctx.length > 0) {
+        const top = ctx[ctx.length - 1]
+        if (top.kind !== 'group') return
+        candidates = wasmScene.group_members(top.id)
+          .map(nodeRefFromJs)
+          .filter((m) => visibleLeaves(m) !== null)
+      } else {
+        // Inside an open group session the group's own members are the whole
+        // universe to invert within — free sketches are world-global there
+        // (drawing inside a group targets world sketches by design), but
+        // "everything except what I picked" inside a group must not reach
+        // out to shapes drawn beside it. A component session keeps its own
+        // scoped sketches (`visibleSketchRefs` already filters those).
+        const innermost = sessionStackRef.current[sessionStackRef.current.length - 1]
+        const sketches = innermost !== undefined && innermost.kind === 'group' ? [] : visibleSketchRefs()
+        candidates = [...visibleTopLevelCandidates().map((c) => c.node), ...sketches]
+      }
+      const selected = new Set(selectedIdsRef.current.map(nodeKey))
+      for (const ref of selectedIdsRef.current) {
+        if (ref.sketch === undefined || (ref.kind !== 'sketch-edge' && ref.kind !== 'sketch-curve')) continue
+        try {
+          const island = wasmScene.sketch_edge_island(ref.sketch, ref.id)
+          if (island !== undefined) selected.add(nodeKey({ kind: 'sketch-island', id: island, sketch: ref.sketch }))
+        } catch {
+          // stale handle — nothing to exclude
+        }
+      }
+      const refs = candidates.filter((c) => !selected.has(nodeKey(c)))
+      onSelectManyRef.current?.(refs, 'replace')
+      scheduleRender()
     }
 
     /** The face meshes rendered for one node's visible leaves. */
@@ -3122,7 +3195,7 @@ export default function Viewport({
     function acquireTransformTargets(ray: Ray): NodeRef[] | null {
       const node = pickTransformableUnderCursor(ray)
       if (node === null) return null
-      onSelectRef.current?.(node, false)
+      onSelectRef.current?.(node, 'replace')
       scheduleRender()
       return [node]
     }
@@ -3171,7 +3244,8 @@ export default function Viewport({
     interface MarqueeDrag {
       startX: number
       startY: number
-      additive: boolean
+      /** The press's modifier matrix, applied to the swept nodes on release. */
+      mode: SelectMode
       active: boolean
     }
     let marqueeDrag: MarqueeDrag | null = null
@@ -4211,7 +4285,7 @@ export default function Viewport({
         handleSceneRefresh()
         sceneRenderer.refreshAllSketches()
         sceneRenderer.refreshGuides()
-        onSelectRef.current?.(result, false)
+        onSelectRef.current?.(result, 'replace')
         scheduleRender()
         return result
       }
@@ -4239,7 +4313,7 @@ export default function Viewport({
         handleSceneRefresh()
         sceneRenderer.refreshAllSketches()
         sceneRenderer.refreshGuides()
-        onSelectManyRef.current?.(outcome.settledNodes, false)
+        onSelectManyRef.current?.(outcome.settledNodes, 'replace')
         scheduleRender()
         const undoHint =
           outcome.committedSteps === 1
@@ -4257,7 +4331,7 @@ export default function Viewport({
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       sceneRenderer.refreshGuides()
-      onSelectRef.current?.(outcome.node, false)
+      onSelectRef.current?.(outcome.node, 'replace')
       scheduleRender()
       if (outcome.autoExploded) {
         handleToast('Component exploded to solids for the boolean.')
@@ -4341,6 +4415,9 @@ export default function Viewport({
       }
       if ('forgetRecall' in activeTool) {
         (activeTool as { forgetRecall(): void }).forgetRecall()
+      }
+      if ('disarmRetype' in activeTool) {
+        (activeTool as { disarmRetype(): void }).disarmRetype()
       }
     }
 
@@ -5945,8 +6022,8 @@ export default function Viewport({
               kind: k === 0 ? 'object' : k === 1 ? 'group' : 'instance',
               id: result.rootIds[i],
             }))
-            if (refs.length === 1) onSelectRef.current?.(refs[0], false)
-            else if (refs.length > 1) onSelectManyRef.current?.(refs, false)
+            if (refs.length === 1) onSelectRef.current?.(refs[0], 'replace')
+            else if (refs.length > 1) onSelectManyRef.current?.(refs, 'replace')
             // v1 scope, reported honestly: loose sketches/annotations in a
             // model item are not carried by the insert.
             const skipped = result.worldSketchesSkipped + result.annotationsSkipped
@@ -5987,7 +6064,7 @@ export default function Viewport({
           (instanceId) => {
             handleSceneRefresh()
             sceneRenderer.refreshAllSketches()
-            onSelectRef.current?.({ kind: 'instance', id: instanceId }, false)
+            onSelectRef.current?.({ kind: 'instance', id: instanceId }, 'replace')
           },
           handleToast,
         )
@@ -6002,7 +6079,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -6178,7 +6255,7 @@ export default function Viewport({
         (objectId) => {
           handleSceneRefresh({ objectIds: [objectId] })
           sceneRenderer.refreshAllSketches()
-          onSelectRef.current?.({ kind: 'object', id: objectId }, false)
+          onSelectRef.current?.({ kind: 'object', id: objectId }, 'replace')
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -6298,8 +6375,8 @@ export default function Viewport({
           sceneRenderer.refreshAllSketches()
           // Select the committed nodes — for a copy these are the fresh
           // clones, so a follow-up move chains off the new copies.
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
-          else onSelectManyRef.current?.(nodes, false)
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else onSelectManyRef.current?.(nodes, 'replace')
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -6315,8 +6392,8 @@ export default function Viewport({
         (nodes) => {
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
-          else onSelectManyRef.current?.(nodes, false)
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else onSelectManyRef.current?.(nodes, 'replace')
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
@@ -6334,8 +6411,8 @@ export default function Viewport({
      */
     function beginDragMove(dm: DragMove): void {
       // Select what's about to move so the highlight + dock follow the drag.
-      if (dm.nodes.length === 1) onSelectRef.current?.(dm.nodes[0], false)
-      else onSelectManyRef.current?.(dm.nodes, false)
+      if (dm.nodes.length === 1) onSelectRef.current?.(dm.nodes[0], 'replace')
+      else onSelectManyRef.current?.(dm.nodes, 'replace')
       // A tool switch that bypasses switchToolRef (this one) still needs the
       // same mid-hold-tap reset — see switchToolRef's comment above.
       ctrlTap.reset()
@@ -6363,8 +6440,8 @@ export default function Viewport({
           // Select the committed nodes — for a copy these are the fresh
           // clones, so a follow-up rotation chains off the new copies (see
           // makeMoveTool).
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
-          else onSelectManyRef.current?.(nodes, false)
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else onSelectManyRef.current?.(nodes, 'replace')
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
@@ -6379,8 +6456,8 @@ export default function Viewport({
         (nodes) => {
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
-          else onSelectManyRef.current?.(nodes, false)
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else onSelectManyRef.current?.(nodes, 'replace')
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
@@ -6524,7 +6601,7 @@ export default function Viewport({
         (objectId: bigint) => {
           handleSceneRefresh()
           sceneRenderer.refreshGuides()
-          onSelectRef.current?.({ kind: 'object', id: objectId }, false)
+          onSelectRef.current?.({ kind: 'object', id: objectId }, 'replace')
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -7027,6 +7104,28 @@ export default function Viewport({
     // can dispose and recreate an OrbitControls bound to whichever camera
     // just became active — OrbitControls binds to one camera for its whole
     // lifetime, so a projection change can't just mutate `.object`.
+    // Precise orbit (docs/design/camera.md §7): Ctrl (Windows/Linux) / ⌘
+    // (macOS) HELD turns the camera's inertia off — damping disabled, so a
+    // drag tracks the pointer 1:1 and stops dead on release — for as long as
+    // the key is down. Tracked here so `configureControls` re-applies it to
+    // a rebuilt controls instance (a projection toggle mid-hold must not
+    // silently bring the inertia back). Shift is taken (pan) and Option is
+    // a window-manager drag on some Linux desktops; Ctrl/⌘ was the one free
+    // modifier that works everywhere (on macOS the OS turns a Ctrl+left
+    // press into a secondary click before the page sees it, so ⌘ is the one
+    // to hold there — the guide says so) — OrbitControls' own reading of it
+    // (invert the button) is overridden at press by `onOrbitPressForceBase`
+    // below.
+    let preciseOrbitHeld = false
+    // The base binding (orbit or pan) of the mouse button currently held
+    // down for a camera drag, or null when no switchable drag is live. Set
+    // in `onCameraPointerDown` (a window CAPTURE listener, so it is current
+    // before OrbitControls sees the press) and read by the Shift handlers
+    // to invert the drag in flight — see orbitDragSwitch.ts.
+    let activeDragBase: SwitchableDrag | null = null
+    // The last pointer position seen over the canvas, in client pixels —
+    // the origin a mid-drag switch re-seeds its gesture at.
+    const lastPointerClient = { x: 0, y: 0 }
     function configureControls(c: OrbitControls): void {
       c.mouseButtons = {
         LEFT: null,
@@ -7034,7 +7133,7 @@ export default function Viewport({
         RIGHT: THREE.MOUSE.PAN,
       }
       c.zoomToCursor = true
-      c.enableDamping = true
+      c.enableDamping = !preciseOrbitHeld
       c.dampingFactor = 0.08
       c.screenSpacePanning = true
       // From the world-length state, never re-hardcoded: a controls rebuild
@@ -7086,8 +7185,23 @@ export default function Viewport({
     // the same event), so the flag is always current by then.
     let cameraPointerDown = false
     let cameraDragActive = false
-    function onCameraPointerDown(): void { cameraPointerDown = true }
-    function onCameraPointerUp(): void { cameraPointerDown = false }
+    // Drag OWNERSHIP mirrors OrbitControls' own: the FIRST button down owns
+    // the gesture until every button is up. A second button chorded onto a
+    // live drag is ignored by OrbitControls (`_isTrackingPointer` — same
+    // pointerId), so it must not overwrite `activeDragBase` either, or a
+    // later Shift tap would "restore" the wrong base and flip a still-live
+    // orbit into a pan with no modifier held (adversarial review finding).
+    // `ev.buttons` on a pointerup is the set STILL held after this release.
+    function onCameraPointerDown(ev: PointerEvent): void {
+      if (cameraPointerDown) return
+      cameraPointerDown = true
+      activeDragBase = baseBindingFor(ev.button, controls.mouseButtons.LEFT)
+    }
+    function onCameraPointerUp(ev: PointerEvent): void {
+      if (ev.type === 'pointerup' && ev.pointerType === 'mouse' && ev.buttons !== 0) return
+      cameraPointerDown = false
+      activeDragBase = null
+    }
     function onControlsStart(): void {
       if (!cameraPointerDown || cameraDragActive) return
       cameraDragActive = true
@@ -7107,7 +7221,25 @@ export default function Viewport({
     // `recordCameraInput` are declared later in this effect but, like
     // `apertureBasis` above, this is a `function` declaration (hoisted) only
     // ever CALLED after both exist.
+    // Ctrl/⌘ at press means PRECISE orbit/pan, not OrbitControls' built-in
+    // "invert the button" — undone right after its own pointerdown handler
+    // ran. A bubble-phase listener on the SAME element, registered right
+    // after the controls instance connects its own (inside
+    // `attachControlsListeners`, so a rebuilt instance keeps the order), is
+    // what guarantees it runs after OrbitControls' for the same press. The
+    // clean-tap trackers are reset too: holding the modifier through a drag
+    // is not a tap, and releasing it afterwards must not flip Scale's anchor
+    // or Push/Pull's extrude-as-new mode as a side effect.
+    function onOrbitPressForceBase(ev: PointerEvent): void {
+      if (!(ev.ctrlKey || ev.metaKey) || ev.shiftKey) return
+      if (baseBindingFor(ev.button, controls.mouseButtons.LEFT) === null) return
+      forceBaseAfterPress(controls, ev, controls.mouseButtons.LEFT)
+      ctrlTap.reset()
+      pushPullModifierTap.reset()
+    }
     function attachControlsListeners(c: OrbitControls): void {
+      renderer.domElement.removeEventListener('pointerdown', onOrbitPressForceBase)
+      renderer.domElement.addEventListener('pointerdown', onOrbitPressForceBase)
       c.addEventListener('start', onControlsStart)
       c.addEventListener('start', cancelCameraTween)
       c.addEventListener('end', onControlsEnd)
@@ -7307,15 +7439,22 @@ export default function Viewport({
       scheduleRender()
     }
 
-    // Shift-in-Orbit -> temporary Pan. OrbitControls already handles
-    // this natively: with mouseButtons.LEFT === MOUSE.ROTATE, holding
-    // Shift/Ctrl/Meta during onMouseDown makes it pan instead of rotate (see
+    // Shift-in-Orbit -> temporary Pan. OrbitControls handles the PRESS
+    // natively: with mouseButtons.LEFT === MOUSE.ROTATE, holding Shift
+    // during onMouseDown makes it pan instead of rotate (see
     // OrbitControls.js). So we must NOT touch controls.mouseButtons.LEFT here
-    // — doing so would fight that built-in inversion. These handlers only
-    // swap the cursor to match. Only Orbit is affected; every other tool
-    // behaves exactly as before. Guarded by shiftPanActive so keydown
-    // autorepeat doesn't re-apply the same state repeatedly, and so keyup
-    // only restores the Orbit cursor if we're the ones who changed it.
+    // — doing so would fight that built-in inversion. What OrbitControls
+    // does NOT do is re-read Shift once a drag is live: pressing it halfway
+    // through an orbit used to swap only the cursor while the camera kept
+    // orbiting. `switchLiveDragForShift` closes that gap — a Shift keydown
+    // during a live orbit turns it into a pan from the pointer's current
+    // position (and kills the orbit's inertia so it stops at once), a Shift
+    // keyup during a live Shift-pan turns it back — exactly as if Shift had
+    // been in that state at the press. Button-agnostic: middle-drag orbits
+    // and the Pan tool's left-drag invert the same way (orbitDragSwitch.ts).
+    // The cursor swap below stays Orbit-tool-only, guarded by shiftPanActive
+    // so keydown autorepeat doesn't re-apply the same state repeatedly, and
+    // so keyup only restores the Orbit cursor if we're the ones who changed it.
     //
     // Shift-in-Zoom (camera-playtest2.md §3) is handled in the SAME pair of
     // handlers (per that design's explicit direction — extend rather than
@@ -7325,8 +7464,17 @@ export default function Viewport({
     // real functional effect on a drag — but that decision is made once, at
     // pointerdown, by `onFovDragPointerDownCapture`; these handlers are
     // cursor-only, exactly like the Orbit/Pan swap above.
+    function switchLiveDragForShift(shiftHeld: boolean): void {
+      if (activeDragBase === null) return
+      const live = orbitDragState(controls)
+      if (live !== 'rotate' && live !== 'pan') return
+      const want = desiredDragState(activeDragBase, shiftHeld)
+      if (live === want) return
+      if (switchDragTo(controls, want, lastPointerClient.x, lastPointerClient.y)) scheduleRender()
+    }
     function onShiftKeyDown(ev: KeyboardEvent): void {
       if (ev.key !== 'Shift') return
+      switchLiveDragForShift(true)
       // Move's Shift-held axis lock. Idempotent under keydown autorepeat.
       const at = toolController.activeTool
       if ('setShiftHeld' in at) {
@@ -7359,6 +7507,7 @@ export default function Viewport({
     }
     function onShiftKeyUp(ev: KeyboardEvent): void {
       if (ev.key === 'Shift') {
+        switchLiveDragForShift(false)
         const at = toolController.activeTool
         if ('setShiftHeld' in at) {
           (at as { setShiftHeld(held: boolean): void }).setShiftHeld(false)
@@ -7386,6 +7535,42 @@ export default function Viewport({
     }
     window.addEventListener('keydown', onShiftKeyDown)
     window.addEventListener('keyup', onShiftKeyUp)
+
+    // Precise orbit: Ctrl/⌘ HELD = no inertia (see `preciseOrbitHeld`).
+    // Keydown (not autorepeat) enters it — also stopping any coasting tail
+    // in flight, the most direct "stop" there is — and the release of the
+    // LAST held one of the pair leaves it (a keyup's own ctrlKey/metaKey
+    // already reflect the release). Entering it during a live camera drag
+    // is a hold, not a tap: reset the clean-tap trackers so the eventual
+    // release doesn't flip Scale's anchor / Push/Pull's mode.
+    function onPreciseModifierKeyDown(ev: KeyboardEvent): void {
+      if ((ev.key !== 'Control' && ev.key !== 'Meta') || ev.repeat) return
+      preciseOrbitHeld = true
+      setPreciseOrbit(controls, true)
+      const live = orbitDragState(controls)
+      if (live === 'rotate' || live === 'pan') {
+        ctrlTap.reset()
+        pushPullModifierTap.reset()
+      }
+      scheduleRender()
+    }
+    function onPreciseModifierKeyUp(ev: KeyboardEvent): void {
+      if (ev.key !== 'Control' && ev.key !== 'Meta') return
+      if (ev.ctrlKey || ev.metaKey) return // the other one is still held
+      preciseOrbitHeld = false
+      setPreciseOrbit(controls, false)
+    }
+    // A blur swallows the keyup (Cmd-Tab is the canonical case: the ⌘ that
+    // switched apps is still down when focus leaves) — same posture as
+    // `onWindowBlurClearsShiftLock` just below.
+    function onWindowBlurClearsPreciseOrbit(): void {
+      if (!preciseOrbitHeld) return
+      preciseOrbitHeld = false
+      setPreciseOrbit(controls, false)
+    }
+    window.addEventListener('keydown', onPreciseModifierKeyDown)
+    window.addEventListener('keyup', onPreciseModifierKeyUp)
+    window.addEventListener('blur', onWindowBlurClearsPreciseOrbit)
 
     // A blur (Cmd-Tab, devtools, another window) swallows the keyup that
     // would otherwise release Shift — without this, a tool's Shift-
@@ -8053,6 +8238,8 @@ export default function Viewport({
       // Capture every raw move first (before any early-return) so low-level
       // replay reproduces the whole stack, camera-nav moves included.
       recordPointerInput('pointermove', ev)
+      lastPointerClient.x = ev.clientX
+      lastPointerClient.y = ev.clientY
 
       // Shift-fov drag owns the pointer for its whole gesture — armed at
       // pointerdown by onFovDragPointerDownCapture (camera-playtest2.md §3).
@@ -8201,6 +8388,13 @@ export default function Viewport({
         ;(activeTool as {
           onPointerRawMove(xPx: number, yPx: number, buttons: number, mods: { shift: boolean }): void
         }).onPointerRawMove(rawX, rawY, ev.buttons, { shift: ev.shiftKey })
+      }
+      // The screen coordinate alongside the world move (Tool.onPointerScreenMove)
+      // — only for REAL pointer events: the key router's re-hover after a
+      // captured key replays the cached ray, not a pointer move.
+      if ('onPointerScreenMove' in activeTool) {
+        const [sx, sy] = canvasPoint(ev)
+        ;(activeTool as { onPointerScreenMove(xPx: number, yPx: number): void }).onPointerScreenMove(sx, sy)
       }
       // `suppressAxisLine` (finding 2): Shop Mode shows no world axes, so the
       // dashed guide line CueLayer draws through an on-axis direction is
@@ -8443,6 +8637,12 @@ export default function Viewport({
 
     function onPointerDown(ev: PointerEvent): void {
       recordPointerInput('pointerdown', ev)
+      // Seed the mid-drag switch origin at the press too (a Shift pressed
+      // before the first move must re-seed at the press point, not at
+      // wherever the pointer last hovered). Every button — middle-drag
+      // orbits switch as well.
+      lastPointerClient.x = ev.clientX
+      lastPointerClient.y = ev.clientY
       if (ev.button !== 0) return
       // Adversarial-review finding 4: a second finger's own press must not
       // disturb a readOnly gesture (the tape loupe, or its Select-tool
@@ -8489,9 +8689,17 @@ export default function Viewport({
       const viewportH = el.clientHeight
       const basis = apertureBasis()
 
-      // Record shift state so handleSelect (driven by the tool's onSelect) can
-      // treat this click as additive multi-select.
-      selectAdditiveRef.current = ev.shiftKey
+      // Record the press's modifier matrix so handleSelect (driven by the
+      // tool's onSelect) combines this click with the selection the way the
+      // held keys ask: replace / toggle (Shift) / add (Ctrl/⌘/Option) /
+      // subtract (Shift + those).
+      selectModeRef.current = selectModeFor(ev)
+      // A triple-click on the Select tool widens a line/curve pick to its
+      // whole connected island (SketchUp's "select all connected"). Armed
+      // here, consumed by this press's own handleSelect (deferred to
+      // pointerup at the top level); any press re-arms or clears it, so a
+      // stale flag can never reach a later click.
+      selectIslandOnPick = toolController.activeToolName === 'Select' && clickCount >= 3
 
       if (toolController.activeToolName === 'Select') {
         const [px, py] = canvasPoint(ev)
@@ -8506,7 +8714,7 @@ export default function Viewport({
         // has no chrome for annotation selection anyway (`onSelectAnnotation`
         // is one of the deliberately-unwired callbacks — see ShopApp.tsx's
         // own comment on its `Viewport` usage).
-        if (!ev.shiftKey && !readOnlyRef.current) {
+        if (!isModifiedSelectPress(ev) && !readOnlyRef.current) {
           const annotationId = pickAnnotation(ndcX, ndcY)
           if (annotationId !== null) {
             onSelectAnnotationRef.current?.(annotationId)
@@ -8538,7 +8746,7 @@ export default function Viewport({
         // comment on the same distinction) — so a drag that starts on a
         // part now orbits the camera instead of moving the part, matching
         // what a drag on empty space already does.
-        const pressedNode = ev.shiftKey || pickGuide(ndcX, ndcY) !== null || readOnlyRef.current
+        const pressedNode = isModifiedSelectPress(ev) || pickGuide(ndcX, ndcY) !== null || readOnlyRef.current
           ? null
           : pickTransformableUnderCursor(ray)
         if (pressedNode !== null) {
@@ -8575,7 +8783,7 @@ export default function Viewport({
           if (readOnlyRef.current) {
             deferredTapDrag = { startX: px, startY: py, active: false, pointerId: ev.pointerId }
           } else {
-            marqueeDrag = { startX: px, startY: py, additive: ev.shiftKey, active: false }
+            marqueeDrag = { startX: px, startY: py, mode: selectModeFor(ev), active: false }
           }
           // Track the drag even when it leaves the canvas.
           renderer.domElement.setPointerCapture(ev.pointerId)
@@ -9231,8 +9439,9 @@ export default function Viewport({
       // Drag direction picks the mode: L→R window, R→L crossing (SketchUp).
       const mode: MarqueeMode = px >= drag.startX ? 'window' : 'crossing'
       const refs = computeMarqueeSelection(rect, mode)
-      // An empty marquee clears a non-additive selection, like clicking air.
-      onSelectManyRef.current?.(refs, drag.additive)
+      // An empty plain marquee clears the selection, like clicking air; a
+      // modified one leaves it alone (mergeSelection's per-mode rule).
+      onSelectManyRef.current?.(refs, drag.mode)
       scheduleRender()
     }
     function onPointerCancel(ev: PointerEvent): void {
@@ -9346,6 +9555,10 @@ export default function Viewport({
       if (cameraDragActive) onCameraDragChangeRef.current?.(false)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
+      window.removeEventListener('keydown', onPreciseModifierKeyDown)
+      window.removeEventListener('keyup', onPreciseModifierKeyUp)
+      window.removeEventListener('blur', onWindowBlurClearsPreciseOrbit)
+      renderer.domElement.removeEventListener('pointerdown', onOrbitPressForceBase)
       window.removeEventListener('blur', onWindowBlurClearsShiftLock)
       window.removeEventListener('keydown', onCtrlKeyDown, true)
       window.removeEventListener('keyup', onCtrlKeyUp)

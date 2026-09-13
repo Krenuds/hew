@@ -31,6 +31,7 @@ function makeWasmScene(opts: {
 } = {}): WasmScene {
   let sketchCounter = 41n
   return {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -450,5 +451,152 @@ describe('LineTool — the second point of a face chain decides the face', () =>
     tool.onPointerDown(makeSnap({ x: 0.3, y: 0.8, z: 0.2, kind: 'endpoint' }), ray)
     expect(onToast).not.toHaveBeenCalled()
     expect(constraint(tool)?.constraintPlane?.normal).toEqual([-1, 0, 0])
+  })
+})
+
+// Post-click segment retype (retypeWindow.ts): a length typed straight after
+// the click resizes the segment just placed; once the pointer moves on, a
+// typed length is the next segment (the chained-typing workflow).
+describe('LineTool — retype the segment just placed', () => {
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    let gen = 1n
+    let changed = 0
+    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
+      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
+      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    }
+    return scene as unknown as WasmScene
+  }
+  const key = (tool: LineTool, k: string) => tool.onKey({ key: k } as KeyboardEvent)
+  const typeIn = (tool: LineTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
+  const segs = (scene: WasmScene) =>
+    (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[1], c[2], c[4], c[5]] as number[])
+  /** Click at world (x, y) on the ground, with the pointer parked there on screen. */
+  function clickAt(tool: LineTool, x: number, y: number, px: number, py: number) {
+    tool.onPointerMove(makeSnap({ x, y, z: 0 }), rayThrough(x, y))
+    tool.onPointerScreenMove(px, py)
+    tool.onPointerDown(makeSnap({ x, y, z: 0 }), rayThrough(x, y))
+  }
+
+  it('typing right after the second click resizes THAT segment (one undo, same direction) and the chain continues from the new end', () => {
+    const scene = makeRetypeScene()
+    const { tool, onCommit } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    expect(segs(scene)).toEqual([[0, 0, 1, 0]])
+    expect(tool.statusHint()).toContain('resize the segment')
+    typeIn(tool, '3')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(segs(scene).length).toBe(2)
+    expect(segs(scene)[1]).toEqual([0, 0, 3, 0])
+    expect(onCommit).toHaveBeenCalledTimes(2)
+    // The chain now hangs off (3, 0): a click at (3, 2) draws from there.
+    tool.onPointerScreenMove(240, 60)
+    clickAt(tool, 3, 2, 300, 40)
+    expect(segs(scene)[2]).toEqual([3, 0, 3, 2])
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+  })
+
+  it('moving the pointer a few pixels closes the window: a typed length is then the NEXT segment along the cursor', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    // A resting-hand jitter keeps the window open…
+    tool.onPointerScreenMove(202, 101)
+    expect(tool.statusHint()).toContain('resize the segment')
+    // …a deliberate move to aim the next segment closes it.
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 0 }), rayThrough(1, 1))
+    tool.onPointerScreenMove(200, 40)
+    expect(tool.statusHint()).not.toContain('resize the segment')
+    typeIn(tool, '2')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(segs(scene)).toEqual([[0, 0, 1, 0], [1, 0, 1, 2]])
+  })
+
+  it('a typed (Enter) segment arms the window too, so a second value corrects it', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0))
+    tool.onPointerScreenMove(200, 100)
+    typeIn(tool, '2')
+    expect(segs(scene)).toEqual([[0, 0, 2, 0]])
+    typeIn(tool, '5')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(segs(scene)[1]).toEqual([0, 0, 5, 0])
+  })
+
+  it('a retyped middle segment restores the chain bookkeeping: the following click continues from the new end', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    tool.onPointerScreenMove(200, 40)
+    clickAt(tool, 1, 1, 200, 30)
+    expect(segs(scene)).toEqual([[0, 0, 1, 0], [1, 0, 1, 1]])
+    typeIn(tool, '4')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(segs(scene)[2]).toEqual([1, 0, 1, 4])
+    tool.onPointerScreenMove(300, 30)
+    clickAt(tool, 5, 4, 400, 30)
+    expect(segs(scene)[3]).toEqual([1, 4, 5, 4])
+  })
+
+  it('a negative typed length flips the segment to the other side of its start, like a typed new segment', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    typeIn(tool, '-2')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(segs(scene)[1]).toEqual([0, 0, -2, 0])
+  })
+
+  it('a zero typed length is refused with the same toast as a degenerate click, and the buffer clears', () => {
+    const scene = makeRetypeScene()
+    const { tool, onToast, onMeasurement } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    typeIn(tool, '0')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('same as the last one'))
+    expect(onMeasurement).toHaveBeenLastCalledWith('')
+    expect(segs(scene)).toEqual([[0, 0, 1, 0]])
+  })
+
+  it('an axis lock set after the click aims the NEXT segment: the window closes and the typed length draws along the lock', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    expect(tool.statusHint()).toContain('resize the segment')
+    // Cursor parked (no screen move), arrow → lock Y for the next segment.
+    tool.onPointerMove(makeSnap({ x: 1.2, y: 0.9, z: 0 }), rayThrough(1.2, 0.9))
+    key(tool, 'ArrowLeft')
+    expect(tool.statusHint()).not.toContain('resize the segment')
+    typeIn(tool, '2')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(segs(scene).length).toBe(2)
+    expect(segs(scene)[1][0]).toBeCloseTo(1, 9)
+    expect(segs(scene)[1][1]).toBeCloseTo(0, 9)
+    expect(Math.hypot(segs(scene)[1][2] - 1, segs(scene)[1][3] - 0)).toBeCloseTo(2, 6)
+  })
+
+  it('Escape / ending the chain closes the window', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    key(tool, 'Escape')
+    expect(tool.capturingInput()).toBe(false)
+    expect(tool.statusHint()).not.toContain('resize')
   })
 })

@@ -99,6 +99,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -193,11 +194,31 @@ type FaceStage =
 type ArcChain = { chain: V3[]; curveSegments: number; geom: { center: V3; radius: number } | null }
 
 
+/**
+ * The just-committed arc, kept in a `RetypeWindow` (retypeWindow.ts) so a
+ * bulge typed AFTER the third click redraws it in place — the chord `a`→`b`
+ * stays, `s` is the signed sagitta it was drawn with (its sign fixes which
+ * side the new bulge goes), `completion` the open / pie / segment closure
+ * in force at the commit.
+ */
+type RetypeSpec = {
+  a: V3
+  b: V3
+  s: number
+  completion: ArcCompletion
+} & (
+  | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
+  | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
+)
+
 export class ArcTool implements Tool {
   readonly name = 'Arc'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
+      return 'Type an exact bulge to redraw the arc you just drew — or click the first point of the next one.'
+    }
     const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.planeStage.kind
     if (stage === 'chord') {
       return "Click the arc's second endpoint — or type an exact chord length."
@@ -244,8 +265,15 @@ export class ArcTool implements Tool {
    *  persists across commits (see module doc). */
   private completion: ArcCompletion = 'open'
 
-  /** VCB buffer — raw string being typed by the user (length, in display units). */
+  /** VCB buffer — raw string being typed by the user (length, in display
+   *  units). While IDLE with the retype window open it is the post-click
+   *  bulge being typed for the arc just drawn. */
   private typed: string = ''
+
+  /** The just-committed arc, redrawable by a typed bulge until the next
+   *  pointer action, Escape, tool switch, or any other document mutation
+   *  (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
 
   /** Last live cursor position seen this stage (plane/face — only one is
    *  ever populated at a time, mirroring LineTool's pair of fields). Used
@@ -290,6 +318,7 @@ export class ArcTool implements Tool {
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
     this.sketchCache = sketchCache
+    this.retype = new RetypeWindow(wasmScene)
   }
 
   /** Set the active editing context (entered object), or null for top level. */
@@ -514,6 +543,8 @@ export class ArcTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next arc has begun.
+    this.disarmRetype()
     if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
@@ -539,7 +570,28 @@ export class ArcTool implements Tool {
    * not "capturing input" but IS armed for Escape's purposes.
    */
   hasArmedGesture(): boolean {
-    return this.capturingInput() || this.idlePlaneLock !== null
+    return this.capturingInput() || this.idlePlaneLock !== null || this.typed !== ''
+  }
+
+  /**
+   * Per-key refinement of the capture (see Tool.capturesKey): an armed
+   * gesture keeps the whole keyboard, exactly as before; the IDLE retype
+   * window takes only what a typed bulge needs (`idleRetypeCapturesKey`).
+   */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (!this.capturingInput() && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -547,6 +599,11 @@ export class ArcTool implements Tool {
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
+      if (!this.capturingInput() && this.typed !== '' && this.retype.isOpen) {
+        this.disarmRetype()
+        return
+      }
+      if (!this.capturingInput()) this.retype.close()
       if (!this.capturingInput() && this.idlePlaneLock !== null) {
         this.idlePlaneLock = null
         this._lastIdleHoverPoint = null
@@ -562,6 +619,20 @@ export class ArcTool implements Tool {
     }
 
     if (!this.capturingInput()) {
+      // Idle retype window (see `RetypeSpec`): the keys `capturesKey` admits
+      // edit the buffer; Enter redraws the just-committed arc at that bulge.
+      if (this.retype.isOpen && this.capturesKey(ev.key)) {
+        if (ev.key === 'Enter') {
+          const meters = parseLengthToMeters(this.typed)
+          this.typed = ''
+          this.onMeasurementCb('')
+          if (meters !== null) this._retypeBulge(Math.abs(meters))
+          return
+        }
+        this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+        this.onMeasurementCb(this.typed === '' ? '' : this._typedReadout())
+        return
+      }
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
@@ -669,6 +740,7 @@ export class ArcTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
@@ -738,13 +810,16 @@ export class ArcTool implements Tool {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
-    this._commitPlaneChain(target, chain)
+    const committed = this._commitPlaneChain(target, chain)
     this.planeStage = { kind: 'idle' }
     this.typed = ''
     this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
+    if (committed) {
+      this.retype.arm({ mode: 'plane', plane, target, a, b, s: sign * distance, completion: this.completion })
+    }
   }
 
   /** Chord stage (face): place B at `distance` from A along the live cursor
@@ -783,7 +858,76 @@ export class ArcTool implements Tool {
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
-    this._commitFace(object, face, normal, verts, sign * distance)
+    if (this._commitFace(object, face, normal, verts, sign * distance)) {
+      this.retype.arm({ mode: 'face', object, face, normal, a, b, s: sign * distance, completion: this.completion })
+    }
+  }
+
+  /**
+   * Redraw the just-committed arc with |sagitta| = `d` on the side it was
+   * drawn (the sign of the committed sagitta), same chord, same closure —
+   * through the shared window, so the result is exactly what a third click
+   * at that bulge would have produced.
+   */
+  private _retypeBulge(d: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    if (d < ARC_MIN_SAGITTA_M) {
+      this.onMeasurementCb(FLAT_BULGE_HINT)
+      return
+    }
+    const s = (spec.s < 0 ? -1 : 1) * d
+    // Resolve the new geometry BEFORE touching history — a flat/invalid
+    // bulge is refused up front rather than after an undo.
+    if (this._hotGeometry(spec, s) === null) {
+      this.onMeasurementCb(FLAT_BULGE_HINT)
+      return
+    }
+    const outcome = this.retype.apply(
+      (hot) => this._commitHot(hot, s),
+      (hot) => this._commitHot(hot, hot.s),
+      (hot) => ({ ...hot, s }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('arc'))
+  }
+
+  /** The chain (plane) or polyline (face) for the hot arc at sagitta `s`,
+   *  under the closure it was drawn with; null when flat/invalid. */
+  private _hotGeometry(hot: RetypeSpec, s: number): { chain: ArcChain } | { verts: V3[] } | null {
+    const prev = this.completion
+    this.completion = hot.completion
+    try {
+      if (hot.mode === 'plane') {
+        const chain = this._planeChain(hot.plane, hot.a, hot.b, s)
+        return chain === null ? null : { chain }
+      }
+      const basis = facePlaneBasis(hot.normal)
+      const verts = basis === null ? null : arcPolylineOnPlane(hot.a, hot.b, s, basis.u, basis.v)
+      return verts === null ? null : { verts }
+    } finally {
+      this.completion = prev
+    }
+  }
+
+  /** Lay the hot arc down at sagitta `s` through its own commit path. */
+  private _commitHot(hot: RetypeSpec, s: number): boolean {
+    const geom = this._hotGeometry(hot, s)
+    if (geom === null) return false
+    const prev = this.completion
+    this.completion = hot.completion
+    try {
+      return 'chain' in geom
+        ? this._commitPlaneChain((hot as Extract<RetypeSpec, { mode: 'plane' }>).target, geom.chain)
+        : this._commitFace(
+            (hot as Extract<RetypeSpec, { mode: 'face' }>).object,
+            (hot as Extract<RetypeSpec, { mode: 'face' }>).face,
+            hot.mode === 'face' ? hot.normal : hot.plane.normal,
+            geom.verts,
+            s,
+          )
+    } finally {
+      this.completion = prev
+    }
   }
 
   /**
@@ -826,14 +970,20 @@ export class ArcTool implements Tool {
         this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
       }
       this._clearPreview()
-      if (this.typed === '') this.onMeasurementCb('')
+      // An open retype window owns the readout (its buffer, or the flat-bulge
+      // hint a refused retype just showed): the key router's re-hover after
+      // each captured key must not wipe it.
+      if (this.typed === '' && !this.retype.isOpen) this.onMeasurementCb('')
       return
     }
     const { plane } = this.planeStage
     const cursor = this._planeCursor(snap, ray, plane)
     if (cursor === null) {
       this._clearPreview()
-      if (this.typed === '') this.onMeasurementCb('')
+      // An open retype window owns the readout (its buffer, or the flat-bulge
+      // hint a refused retype just showed): the key router's re-hover after
+      // each captured key must not wipe it.
+      if (this.typed === '' && !this.retype.isOpen) this.onMeasurementCb('')
       return
     }
     this._lastPlaneCursor = cursor
@@ -923,18 +1073,19 @@ export class ArcTool implements Tool {
       ? chordSagitta([a[0], a[1]], [b[0], b[1]], [cursor[0], cursor[1]])
       : this._faceChordSagitta(a, b, plane.normal, cursor)
     const chain = s === null ? null : this._planeChain(plane, a, b, s)
-    if (chain === null) {
+    if (chain === null || s === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
 
-    this._commitPlaneChain(target, chain)
+    const committed = this._commitPlaneChain(target, chain)
     this.planeStage = { kind: 'idle' }
     this.typed = ''
     this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
+    if (committed) this.retype.arm({ mode: 'plane', plane, target, a, b, s, completion: this.completion })
   }
 
   /** Place chord endpoint B (plane mode) — shared by the pointer-click and
@@ -1051,7 +1202,7 @@ export class ArcTool implements Tool {
    *  the true-curves design). Used by plane mode — ground AND any other
    *  plane (sketch mode) — via `runSketchGesture`; real face mode instead
    *  imprints via `split_face`/`split_face_inner` (see `_commitFace`). */
-  private _commitPlaneChain(target: SketchTarget, { chain: verts, curveSegments, geom }: ArcChain): void {
+  private _commitPlaneChain(target: SketchTarget, { chain: verts, curveSegments, geom }: ArcChain): boolean {
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
         let lastRegionsCreated: bigint[] = []
@@ -1111,11 +1262,13 @@ export class ArcTool implements Tool {
 
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
       })
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
@@ -1248,7 +1401,9 @@ export class ArcTool implements Tool {
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
-    this._commitFace(object, face, normal, verts, s)
+    if (this._commitFace(object, face, normal, verts, s)) {
+      this.retype.arm({ mode: 'face', object, face, normal, a, b, s, completion: this.completion })
+    }
   }
 
   /** Place chord endpoint B (face) — shared by the pointer-click and typed
@@ -1271,27 +1426,25 @@ export class ArcTool implements Tool {
    * imprint like CircleTool (`split_face_inner`). A pie whose center is
    * unresolvable (degenerate basis — cannot happen when `verts` built) falls
    * back to the open cut. */
-  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number): void {
+  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number): boolean {
     if (this.completion === 'open') {
-      this._commitFaceChain(object, face, verts)
-      return
+      return this._commitFaceChain(object, face, verts)
     }
     let loop = verts
     if (this.completion === 'pie') {
       const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
       if (center === null) {
-        this._commitFaceChain(object, face, verts)
-        return
+        return this._commitFaceChain(object, face, verts)
       }
       loop = verts.concat([center])
     }
-    this._commitFaceLoop(object, face, loop)
+    return this._commitFaceLoop(object, face, loop)
   }
 
   /** Imprint `verts` on `face` as a closed loop (the loop closes implicitly
    * from the last vertex back to the first — same convention as CircleTool's
    * `split_face_inner` commit). */
-  private _commitFaceLoop(object: bigint, face: bigint, verts: V3[]): void {
+  private _commitFaceLoop(object: bigint, face: bigint, verts: V3[]): boolean {
     const loopPts = new Float64Array(verts.length * 3)
     for (let i = 0; i < verts.length; i++) {
       loopPts[i * 3 + 0] = verts[i][0]
@@ -1309,17 +1462,19 @@ export class ArcTool implements Tool {
         this.wasmScene.split_face_inner(object, face, loopPts)
       }
       this.onFaceImprint(object)
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
   /** Cut `face` along the arc polyline (open, boundary-to-boundary — the
    * same `split_face` call LineTool's face chain commits with). */
-  private _commitFaceChain(object: bigint, face: bigint, verts: V3[]): void {
+  private _commitFaceChain(object: bigint, face: bigint, verts: V3[]): boolean {
     const path = new Float64Array(verts.length * 3)
     for (let i = 0; i < verts.length; i++) {
       path[i * 3 + 0] = verts[i][0]
@@ -1336,11 +1491,13 @@ export class ArcTool implements Tool {
         report.free()
       }
       this.onFaceImprint(object)
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 

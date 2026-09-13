@@ -16,12 +16,23 @@ All three transform tools show a live ghost preview of the result and a live rea
 
 A quick refresher:
 
-- **Click** an object, sketch, or guide to select it. Clicking empty space clears the selection.
-- **Shift-click** adds to or removes from the selection.
+- **Click** an object, sketch, or guide to select it, replacing whatever was selected before. Clicking empty space clears the selection.
+- **Triple-click** a sketch line, or a drawn arc or circle, to select its whole connected shape instead of just the one segment under the cursor.
 - **Drag an object** to move it (see above). `Esc` mid-drag cancels the move and puts everything back.
-- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**. Hold `Shift` to add the result to the current selection (a `Shift`-drag always rubber-bands, even over an object); `Esc` cancels a drag in progress.
-- **Select All** (`⌘A` / `Ctrl+A`, or Edit ▸ Select All) selects every visible object, group, component, and free-standing sketch — the whole model. Inside a group's editing context it selects that group's contents instead.
+- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**.
 - **Double-click** a group, component, or object to enter its editing context (the rest of the scene dims); press `Esc` to step back out.
+
+### Selecting more than one thing
+
+A click or a drag replaces the selection by default. Add a modifier — to a click or a drag alike — to build up a selection instead:
+
+- **`Shift`** toggles: whatever it touches is added if it wasn't selected, removed if it was.
+- **`⌘` or `Option`** (Windows/Linux: `Ctrl` or `Alt`) always adds, never removing anything. On a Mac, `Ctrl`-click is a right-click, so it isn't one of these.
+- **`Shift` + `⌘`/`Option`** (Windows/Linux: `Shift` + `Ctrl`/`Alt`) always subtracts, never adding anything.
+
+The same three combinations work on a rubber-band drag, window or crossing.
+
+Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) selects every visible object, group, component, and free-standing sketch — the whole model (inside a group's editing context, that group's contents instead); **Edit ▸ Select None** (`⇧⌘A` / `Ctrl+Shift+A`) clears the selection; and **Edit ▸ Invert Selection** swaps the two, selecting everything that wasn't selected and deselecting everything that was.
 
 ## Move (`M`)
 
@@ -34,6 +45,8 @@ A quick refresher:
 
 **Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn through the same sticky rules as hand drawing, so if it lands on other lines they split each other exactly as drawn lines would. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have). Tap the same key again to go back to moving.
 
+**Retyping after the commit:** once the destination click lands, type a length and press `Enter` again — the move (or copy) you just made redoes at the new distance along the same direction, positive keeping it and negative flipping it — as many times as you like, until you click a new base point, press `Esc`, or switch tools. One `Undo` afterward removes the whole move, no matter how many times you retyped it.
+
 **Array copy:** right after a copy commits, type a multiplier and press `Enter`:
 
 - `3x` (or `x3`, or `*3` — either order works) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `5x`, and five copies march off at 2 m intervals.
@@ -42,6 +55,8 @@ A quick refresher:
 ![A cedar fence with six evenly spaced posts and two rails, one post shown mid-copy down the line](/docs/transform-array.webp)
 
 The gesture stays live until you start something else, so if `5x` turns out wrong, type `8x` or `4/` instead and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates. Arrays apply to solids, groups, and components — a sketch copy stays a single copy, so the ×N window doesn't open after one.
+
+The retyped-distance window and the array window share one typed buffer: right after a copy commits, a plain length retypes the distance and `3x`/`3/` makes an array — either one applies to that same commit. Once you've typed an array, the gesture stays hot for another array spec (`8x` after `5x`, say), but the plain-distance retype closes; make a fresh copy to retype a distance again.
 
 ## Rotate (`Q`)
 
@@ -54,6 +69,8 @@ Rotate puts a **protractor** — a round dial — under your cursor. The dial li
 **Locking the axis.** Hold `Shift` to lock the dial to the axis it's currently showing — it renders solid, with a short stub along the axis, so the lock is obvious. Or force a world axis outright: `→` X, `←` Y, `↑` Z; `↓` clears the lock and goes back to following faces. Locking with an arrow is how you rotate something that offers no face to aim at — tipping a **cylinder** onto its side, say: hover it, press `←` or `→` to lock a horizontal axis, then pick your two points. Once locked, your reference click and the live sweep are held to that plane, so you can snap exactly onto a point in it — a corner, an edge — instead of the nearest point in full 3D, which could read differently than the flat angle you're actually setting.
 
 The live angle snaps to 15° increments as you sweep. For any other angle, type degrees (e.g. `22.5`, negative allowed) and press `Enter`.
+
+Type degrees again right after the commit and Hew redoes the rotation about that same pivot and axis — positive keeps the direction you just rotated, negative flips it — repeatable until you click to start a new rotation, press `Esc`, or switch tools; one `Undo` removes the whole rotation. Rotate's copy toggle and its ×N/`÷N` array window work exactly like Move's (above), sharing the same typed buffer.
 
 ## Scale (`S`)
 
@@ -70,6 +87,8 @@ Scale draws a **grip gizmo** on the selection's bounding box: a grip at the cent
 By default the grip **opposite** the one you grabbed stays anchored — grab the top face and the bottom stays put, so the object grows upward from there. Tap `Control` to durably anchor at the box's **center** instead, so both sides move symmetrically; tap it again to go back to the opposite-grip anchor. Dragging a grip past its anchor never flips the object inside out — it clamps at a tiny minimum size instead (mirroring is a separate tool).
 
 **Exact values:** type a plain number (`0.5`, `2.54`) and press `Enter` for a factor on the driven axis or axes — a corner grip's one typed value drives all three. Type a length instead (`50mm`, `8"`) and Hew reads it as a **target dimension**: the driven axis scales to land at exactly that size, computed against the box's current extent.
+
+**Retyping after the commit:** once a grip-drag click commits, type another factor or dimension and press `Enter` — the scale redoes about the same pivot and the same driven axis or axes, measuring a typed dimension against the box's size *before* that first scale, so `50mm` means exactly what it would have meant mid-drag. Repeat as many times as you like, until you drag a different grip, press `Esc`, or switch tools; one `Undo` removes the whole scale.
 
 Scaling a component instance scales that instance alone — the shared definition and every sibling instance are untouched, even for a non-uniform stretch.
 

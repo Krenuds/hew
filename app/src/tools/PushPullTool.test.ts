@@ -63,6 +63,7 @@ function makeWasmScene(opts: {
   const facePlane = opts.facePlane ?? [0, 0, 0, ...faceNormal]
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
+    history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
     // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
     // its `_in_instance` sibling instead while inside an instance context, so
@@ -467,6 +468,10 @@ describe('PushPullTool — status hint', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
     expect(tool.statusHint()).toContain('click to commit')
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    // Committed: the retype window offers to redo the push/pull at a typed
+    // distance; Escape closes it and the pick guidance returns.
+    expect(tool.statusHint()).toContain('redo the push/pull')
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
     expect(tool.statusHint()).toContain('Click a face')
   })
 })
@@ -1014,5 +1019,105 @@ describe('PushPullTool — snapConstraint (design v1.1 Lane E "Push/Pull face-fi
 
     expect(scene.pick_sketch_region).toHaveBeenCalledTimes(1)
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+// Post-commit distance retype (retypeWindow.ts): type a distance after the
+// commit click and the push/pull just made is redone at that distance.
+describe('PushPullTool — retype the distance after the commit', () => {
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    let gen = 1n
+    const basePush = base.push_pull as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      push_pull: vi.fn((...args: unknown[]) => { const r = basePush(...args); gen += 1n; return r }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    }
+    return scene as unknown as WasmScene
+  }
+  const key = (tool: PushPullTool, k: string) => tool.onKey({ key: k } as KeyboardEvent)
+  const typeIn = (tool: PushPullTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
+  const pushDistances = (scene: WasmScene) => (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as number)
+
+  it('click-drag-click, then a typed distance: one undo and the same face pushed at the new distance', () => {
+    const scene = makeRetypeScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onCommit } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(pushDistances(scene)).toEqual([2])
+    expect(tool.statusHint()).toContain('redo the push/pull')
+    expect(tool.capturesKey('3')).toBe(true)
+    expect(tool.capturesKey('p')).toBe(false) // shortcuts still work with an empty buffer
+    typeIn(tool, '3')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(pushDistances(scene)).toEqual([2, 3])
+    const call = (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(call[0]).toBe(3n)
+    expect(call[1]).toBe(4n)
+    expect(onCommit).toHaveBeenCalledTimes(2)
+    // A negative value flips the direction; the window stays open.
+    typeIn(tool, '-1')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(pushDistances(scene)).toEqual([2, 3, -1])
+  })
+
+  it('a typed (Enter) commit arms the window too, and Escape closes it', () => {
+    const scene = makeRetypeScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeIn(tool, '1')
+    expect(pushDistances(scene)).toEqual([1])
+    typeIn(tool, '2')
+    expect(pushDistances(scene)).toEqual([1, 2])
+    key(tool, '5')
+    key(tool, 'Escape')
+    expect(tool.capturesKey('5')).toBe(false)
+    key(tool, '5'); key(tool, 'Enter')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+  })
+
+  it('a zero typed distance is refused with the usual toast and nothing is undone', () => {
+    const scene = makeRetypeScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    typeIn(tool, '0')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledWith('Move more before committing push/pull')
+  })
+})
+
+describe('PushPullTool — retype after extruding a sketch REGION re-picks the region', () => {
+  it('the undo re-mints the region handle; the re-commit extrudes the freshly picked one at the typed distance', () => {
+    const base = makeWasmScene({ regionPick: makeRegionPick(9n, 7n) }) as unknown as Record<string, unknown>
+    let gen = 1n
+    const baseExtrude = base.extrude_region as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      extrude_region: vi.fn((...args: unknown[]) => { const r = baseExtrude(...args); gen += 1n; return r }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    } as unknown as WasmScene
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'region' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    const extrude = scene.extrude_region as ReturnType<typeof vi.fn>
+    expect(extrude).toHaveBeenCalledTimes(1)
+    expect(extrude.mock.calls[0].slice(0, 3)).toEqual([9n, 7n, 2])
+
+    // After the undo the same spot holds region 7n's successor, 12n.
+    ;(scene.pick_sketch_region as ReturnType<typeof vi.fn>).mockImplementation(() => makeRegionPick(9n, 12n))
+    for (const ch of '3') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(extrude).toHaveBeenCalledTimes(2)
+    expect(extrude.mock.calls[1].slice(0, 3)).toEqual([9n, 12n, 3])
+    // The pick was dropped onto the plane at the click point, along −normal.
+    const pickCall = (scene.pick_sketch_region as ReturnType<typeof vi.fn>).mock.calls.at(-1)!
+    expect(pickCall[5]).toBeCloseTo(-1, 9)
   })
 })

@@ -731,6 +731,7 @@ function makeSnapSel(overrides: Partial<Snap> = {}): Snap {
 /** Minimal WasmScene stub — only the members MoveTool calls in these paths. */
 function makeWasmSceneSel() {
   return {
+    history_generation: vi.fn(() => 1n),
     transform_selection: vi.fn(),
   }
 }
@@ -864,5 +865,158 @@ describe('MoveTool — setEditContext aborts an armed gesture on a genuine chang
     t.tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
 
     expect(t.tool.capturingInput()).toBe(true)
+  })
+})
+
+// Post-commit distance retype (retypeWindow.ts): type a distance after a
+// move or copy commits and it is redone at that distance along the same
+// direction. Shares the idle buffer with the ×N / /N array window.
+describe('MoveTool — retype the distance after the commit', () => {
+  const lastTranslation = (t: ReturnType<typeof makeTool>) => {
+    const calls = t.scene.transform_selection.mock.calls
+    return translationOf(calls[calls.length - 1][3] as Float64Array)
+  }
+
+  it('a plain move redone at a typed distance: one undo, the same nodes moved the new distance along X', () => {
+    const t = makeTool()
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(lastTranslation(t)).toEqual([2, 0, 0])
+    expect(t.tool.statusHint()).toContain('redo the move')
+    expect(t.tool.capturesKey('3')).toBe(true)
+    expect(t.tool.capturesKey('m')).toBe(false) // shortcuts still work with an empty buffer
+    expect(t.tool.capturesKey(' ')).toBe(false)
+
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(2)
+    expect(lastTranslation(t)).toEqual([3, 0, 0])
+    expect(t.onCommit).toHaveBeenCalledTimes(2)
+
+    // Negative flips; Space is never captured even with a buffer open.
+    typeKeys(t.tool, '-1')
+    expect(t.tool.capturesKey(' ')).toBe(false)
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const tr = lastTranslation(t)
+    expect(tr[0]).toBeCloseTo(-1, 9)
+    expect(tr[1]).toBeCloseTo(0, 9)
+    expect(tr[2]).toBeCloseTo(0, 9)
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+  })
+
+  it('a copy redone at a typed distance re-duplicates from the originals; 3x afterwards still arrays', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt')) // copy on
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.tool.statusHint()).toContain('redo the copy')
+
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    const dupCalls = t.scene.duplicate_selection_array.mock.calls
+    const affine = dupCalls[1][2] as Float64Array
+    expect(translationOf(affine)).toEqual([3, 0, 0])
+
+    // The array window rides along: 3x now makes three copies at 3 m spacing.
+    typeKeys(t.tool, '3x')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(3)
+    expect(dupCalls[2][3]).toBe(3)
+  })
+
+  it('Escape closes the window; a stale generation is reported', () => {
+    const t = makeTool()
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Escape'))
+    expect(t.tool.capturesKey('4')).toBe(false)
+
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    t.state.gen++ // something else recorded
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.onToast).toHaveBeenCalledWith(expect.stringContaining('move'))
+  })
+})
+
+describe('MoveTool — retype window edge cases', () => {
+  it('a half-typed post-commit value does not leak into the next gesture', () => {
+    const t = makeTool()
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, '7') // starts a retype, never finished
+    beginGestureLockedX(t.tool) // new gesture
+    typeKeys(t.tool, '1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const calls = t.scene.transform_selection.mock.calls
+    expect(translationOf(calls[calls.length - 1][3] as Float64Array)[0]).toBeCloseTo(1, 9) // not 71
+  })
+
+  it('after a PLAIN move, a slash is an imperial fraction bar, not an array token', () => {
+    const t = makeTool()
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, '1/2"')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    const calls = t.scene.transform_selection.mock.calls
+    expect(translationOf(calls[calls.length - 1][3] as Float64Array)[0]).toBeCloseTo(0.0127, 6)
+  })
+})
+
+describe('MoveTool — a typed distance after an array re-spaces the array', () => {
+  it('copy 2, then 3x, then 3 → three copies at 3 m; then 5x → five at 3 m; then 1.5 → five at 1.5 m', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2'); t.tool.onKey(makeKeyEvent('Enter'))
+    const dup = t.scene.duplicate_selection_array.mock.calls
+    typeKeys(t.tool, '3x'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup.length).toBe(2)
+    expect(dup[1][3]).toBe(3)
+    expect(translationOf(dup[1][2] as Float64Array)[0]).toBeCloseTo(2, 9)
+
+    typeKeys(t.tool, '3'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup.length).toBe(3)
+    expect(dup[2][3]).toBe(3)
+    expect(translationOf(dup[2][2] as Float64Array)[0]).toBeCloseTo(3, 9)
+
+    typeKeys(t.tool, '5x'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup.length).toBe(4)
+    expect(dup[3][3]).toBe(5)
+    expect(translationOf(dup[3][2] as Float64Array)[0]).toBeCloseTo(3, 9)
+
+    typeKeys(t.tool, '1.5'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup.length).toBe(5)
+    expect(dup[4][3]).toBe(5)
+    expect(translationOf(dup[4][2] as Float64Array)[0]).toBeCloseTo(1.5, 9)
+    // Every re-space retracted exactly the previous array (one step each).
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(4)
+  })
+
+  it('a divide array re-spaced keeps dividing the NEW distance', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2'); t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, '4/'); t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, '8'); t.tool.onKey(makeKeyEvent('Enter'))
+    const dup = t.scene.duplicate_selection_array.mock.calls
+    expect(dup[dup.length - 1][3]).toBe(4)
+    expect(translationOf(dup[dup.length - 1][2] as Float64Array)[0]).toBeCloseTo(2, 9) // 8 / 4
   })
 })

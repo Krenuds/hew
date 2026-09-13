@@ -73,6 +73,7 @@ function makeWasmScene(opts: { frame?: number[]; sketchPick?: bigint } = {}) {
 
   const scene = {
     axes: vi.fn(() => new Float64Array(opts.frame ?? WORLD_FRAME_FLAT)),
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       planes.set(sketchCounter, new Float64Array([0, 0, 0, 0, 0, 1]))

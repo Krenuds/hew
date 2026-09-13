@@ -869,6 +869,15 @@ export function MenuBar({
               shortcut={`${mod}A`}
               onClick={withClose(() => onEditAction?.('edit-select-all'))}
             />
+            <MenuItem
+              label="Select None"
+              shortcut={`⇧${mod}A`}
+              onClick={withClose(() => onEditAction?.('edit-select-none'))}
+            />
+            <MenuItem
+              label="Invert Selection"
+              onClick={withClose(() => onEditAction?.('edit-invert-selection'))}
+            />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label="Delete Guide Lines"

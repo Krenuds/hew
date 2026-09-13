@@ -609,27 +609,81 @@ export function canUngroup(selected: NodeRef[]): boolean {
 }
 
 /**
+ * How a pick combines with the current selection — SketchUp's Select-tool
+ * modifier matrix (`selectModeFor` in viewport/selectModifiers.ts maps the
+ * pointer event's modifiers onto it):
+ *
+ * - `'replace'` — a plain click / marquee: the pick becomes the selection.
+ * - `'toggle'`  — Shift: each picked node flips (in ↔ out).
+ * - `'add'`     — Ctrl/⌘/Option: picked nodes join; nothing ever leaves.
+ * - `'subtract'`— Shift+Ctrl/⌘/Option: picked nodes leave; nothing joins.
+ */
+export type SelectMode = 'replace' | 'toggle' | 'add' | 'subtract'
+
+/**
  * Next selection after a click. Selection is an **ordered** list (index 0 is
  * the primary pick); order matters for booleans (Subtract = first − second).
  *
- * - `node === null` (empty click) → clear.
- * - `additive` (shift-click) → toggle: append if absent, remove if present,
- *   preserving the order of the survivors.
- * - otherwise → replace with `[node]`.
+ * - `node === null` (empty click) → clear under `'replace'`; every other
+ *   mode leaves the selection alone (a Shift-click on air is not a
+ *   "deselect everything" — SketchUp keeps the selection too).
+ * - `'toggle'` → append if absent, remove if present, preserving the order
+ *   of the survivors.
+ * - `'add'` → append if absent, else unchanged.
+ * - `'subtract'` → remove if present, else unchanged.
+ * - `'replace'` → `[node]`.
  */
 export function nextSelection(
   current: NodeRef[],
   node: NodeRef | null,
-  additive: boolean,
+  mode: SelectMode,
 ): NodeRef[] {
   if (node === null) {
-    return []
+    return mode === 'replace' ? [] : current
   }
-  if (!additive) {
+  if (mode === 'replace') {
     return [node]
   }
   const exists = current.some((n) => nodeEq(n, node))
+  if (mode === 'add') return exists ? current : [...current, node]
+  if (mode === 'subtract') return exists ? current.filter((n) => !nodeEq(n, node)) : current
   return exists ? current.filter((n) => !nodeEq(n, node)) : [...current, node]
+}
+
+/**
+ * Next selection after a MULTI-node pick (a marquee, Select All, Invert
+ * Selection). The same four modes as `nextSelection`, applied per node:
+ *
+ * - `'replace'` → `nodes` (an empty marquee clears, like clicking air).
+ * - `'toggle'` → every picked node flips: the ones already selected leave,
+ *   the rest join (SketchUp's Shift-marquee).
+ * - `'add'` → the ones not yet selected join, in pick order, no duplicates.
+ * - `'subtract'` → the picked ones leave.
+ *
+ * Survivors keep their order (index 0 stays the primary pick). Returns the
+ * ORIGINAL array when nothing changes, so a state setter can hand it back
+ * without a render churn.
+ */
+export function mergeSelection(
+  current: NodeRef[],
+  nodes: NodeRef[],
+  mode: SelectMode,
+): NodeRef[] {
+  if (mode === 'replace') return nodes
+  const picked = new Set(nodes.map(nodeKey))
+  const have = new Set(current.map(nodeKey))
+  if (mode === 'add') {
+    const fresh = nodes.filter((n) => !have.has(nodeKey(n)))
+    return fresh.length === 0 ? current : [...current, ...fresh]
+  }
+  if (mode === 'subtract') {
+    const kept = current.filter((n) => !picked.has(nodeKey(n)))
+    return kept.length === current.length ? current : kept
+  }
+  const kept = current.filter((n) => !picked.has(nodeKey(n)))
+  const fresh = nodes.filter((n) => !have.has(nodeKey(n)))
+  if (fresh.length === 0 && kept.length === current.length) return current
+  return [...kept, ...fresh]
 }
 
 /** The slice of the wasm `Scene` that `pruneDeadSelection` reads. Sub-entity

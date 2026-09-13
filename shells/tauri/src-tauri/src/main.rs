@@ -2795,6 +2795,18 @@ fn main() {
                 None,
             )
             .build(handle)?;
+            let edit_select_none = accel(
+                MenuItemBuilder::with_id("edit-select-none", "Select None"),
+                Some("Shift+CmdOrCtrl+A"),
+                None,
+            )
+            .build(handle)?;
+            // No accelerator on any platform: SketchUp's own Shift+Cmd+I /
+            // Ctrl+Shift+I is already claimed by Hew's Outliner toggle, so
+            // Invert Selection is menu- and palette-only.
+            let edit_invert_selection =
+                MenuItemBuilder::with_id("edit-invert-selection", "Invert Selection")
+                    .build(handle)?;
             let edit_delete_guides =
                 MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
                     .build(handle)?;
@@ -2883,6 +2895,8 @@ fn main() {
                 .separator()
                 .item(&edit_delete)
                 .item(&edit_select_all)
+                .item(&edit_select_none)
+                .item(&edit_invert_selection)
                 .separator()
                 .item(&edit_delete_guides)
                 .build()?;
@@ -3818,6 +3832,8 @@ fn main() {
                 "edit-delete" => "edit-delete",
                 "edit-delete-guides" => "edit-delete-guides",
                 "edit-select-all" => "edit-select-all",
+                "edit-select-none" => "edit-select-none",
+                "edit-invert-selection" => "edit-invert-selection",
                 "edit-group" => "edit-group",
                 "edit-ungroup" => "edit-ungroup",
                 "edit-make-component" => "edit-make-component",

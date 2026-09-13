@@ -63,6 +63,7 @@ function makeWasmScene(opts: {
   const innerLoops: Float64Array[] = []
   let sketchCounter = 41n
   const scene = {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -805,6 +806,86 @@ describe('ArcTool — status hint', () => {
     expect(tool.statusHint()).toContain('Alt cycles')
     tool.onPointerMove(makeSnap({ x: 1, y: 0.5 }), RAY)
     tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY) // commit
+    // Committed: the retype window offers to redraw the arc at a typed
+    // bulge; Escape closes it and the idle hint returns.
+    expect(tool.statusHint()).toContain('redraw the arc')
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
     expect(tool.statusHint()).toContain('first endpoint')
+  })
+})
+
+// Post-click bulge retype (retypeWindow.ts): a length typed after the third
+// click redraws the arc at that sagitta, same chord, same side.
+describe('ArcTool — retype the bulge after the third click', () => {
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts).scene as unknown as Record<string, unknown>
+    let gen = 1n
+    let changed = 0
+    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
+      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
+      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    }
+    return scene as unknown as WasmScene
+  }
+  const key = (tool: ArcTool, k: string) => tool.onKey(makeKeyEvent(k))
+  const typeIn = (tool: ArcTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
+  const addCalls = (scene: WasmScene) => (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+  /** Extreme y among the segment endpoints committed since `from` — the apex of a chord on y=0. */
+  const apexY = (scene: WasmScene, from: number, sign: 1 | -1) => {
+    const ys = addCalls(scene).slice(from).flatMap((k) => [k[2] as number, k[5] as number])
+    return sign > 0 ? Math.max(...ys) : Math.min(...ys)
+  }
+
+  it('typing a bulge after the commit redraws the arc at that sagitta on the same side', () => {
+    const scene = makeRetypeScene()
+    const { tool, onCommit } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY) // A
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY) // B
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY) // commit, bulge toward +y
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(apexY(scene, 0, 1)).toBeCloseTo(0.5, 2)
+    expect(tool.capturesKey('1')).toBe(true)
+    const from = addCalls(scene).length
+    typeIn(tool, '1')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledTimes(2)
+    // Apex now ~1 above the chord, still on +y; chord endpoints unchanged.
+    expect(apexY(scene, from, 1)).toBeCloseTo(1, 2)
+    expect(apexY(scene, from, -1)).toBeCloseTo(0, 6)
+    const xs = addCalls(scene).slice(from).flatMap((k) => [k[1] as number, k[4] as number])
+    expect(Math.min(...xs)).toBeCloseTo(0, 6)
+    expect(Math.max(...xs)).toBeCloseTo(2, 6)
+  })
+
+  it('an arc drawn to the −y side retypes to the −y side', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: -0.5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: -0.5 }), RAY)
+    const from = addCalls(scene).length
+    typeIn(tool, '0.8')
+    expect(apexY(scene, from, -1)).toBeCloseTo(-0.8, 2)
+    expect(apexY(scene, from, 1)).toBeCloseTo(0, 6)
+  })
+
+  it('a flat typed bulge is refused up front — nothing undone, the hint shows', () => {
+    const scene = makeRetypeScene()
+    const { tool, onMeasurement } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY)
+    typeIn(tool, '0')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(onMeasurement).toHaveBeenLastCalledWith(expect.stringContaining('bulge'))
   })
 })

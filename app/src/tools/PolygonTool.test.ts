@@ -43,6 +43,7 @@ function makeWasmScene(opts: {
 } = {}): WasmScene {
   let sketchCounter = 41n
   return {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -609,5 +610,82 @@ describe('PolygonTool — instance editing context (component-edit-parity.md pha
     expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
     expect(scene.sketch_begin_polygon_with).toHaveBeenCalledWith(expect.any(BigInt), 1, 1, 0, expect.closeTo(3, 6))
+  })
+})
+
+// Post-click retype (retypeWindow.ts): a radius or `Ns` typed after the rim
+// click redraws the polygon just drawn.
+describe('PolygonTool — retype radius / side count after the rim click', () => {
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    let gen = 1n
+    let changed = 0
+    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
+      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
+      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    }
+    return scene as unknown as WasmScene
+  }
+  const key = (tool: PolygonTool, k: string) => tool.onKey(makeKeyEvent(k))
+  const typeIn = (tool: PolygonTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
+  const addCalls = (scene: WasmScene) => (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+  const radiusSince = (scene: WasmScene, from: number, c: [number, number]) =>
+    Math.max(...addCalls(scene).slice(from).map((k) => Math.hypot((k[1] as number) - c[0], (k[2] as number) - c[1])))
+
+  it('a typed radius redraws the hexagon at that circumradius, same centre and rim direction', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 1 }), RAY)
+    expect(addCalls(scene).length).toBe(6)
+    expect(tool.statusHint()).toContain('redraw the polygon')
+    const from = addCalls(scene).length
+    typeIn(tool, '3')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(addCalls(scene).length).toBe(12)
+    expect(radiusSince(scene, from, [1, 1])).toBeCloseTo(3, 6)
+    const v0 = addCalls(scene)[from]
+    expect(v0[1]).toBeCloseTo(4, 6)
+    expect(v0[2]).toBeCloseTo(1, 6)
+  })
+
+  it('a typed Ns redraws with N sides at the same radius, and N becomes the session default', () => {
+    const scene = makeRetypeScene()
+    const { tool, onSideCountChange } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)
+    const from = addCalls(scene).length
+    typeIn(tool, '8s')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(addCalls(scene).length - from).toBe(8)
+    expect(radiusSince(scene, from, [0, 0])).toBeCloseTo(2, 6)
+    expect(tool.sideCount).toBe(8)
+    expect(onSideCountChange).toHaveBeenLastCalledWith(8)
+    // And a radius afterwards keeps the 8 sides.
+    const from2 = addCalls(scene).length
+    typeIn(tool, '1')
+    expect(addCalls(scene).length - from2).toBe(8)
+    expect(radiusSince(scene, from2, [0, 0])).toBeCloseTo(1, 6)
+  })
+
+  it('letters keep their shortcuts with an empty buffer; a digit opens the entry and then `s` is taken', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0 }), RAY)
+    expect(tool.capturesKey('s')).toBe(false)
+    expect(tool.capturesKey('m')).toBe(false)
+    expect(tool.capturesKey('7')).toBe(true)
+    key(tool, '7')
+    expect(tool.capturesKey('s')).toBe(true)
+    expect(tool.capturesKey('Enter')).toBe(true)
+    key(tool, 'Escape')
+    expect(tool.capturesKey('7')).toBe(false)
   })
 })

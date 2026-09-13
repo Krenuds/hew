@@ -55,6 +55,7 @@ function makeWasmScene(opts: { sketchPick?: bigint } = {}) {
     // exercises a moved frame; see drawPlane.test.ts/AxesTool.test.ts for
     // the movable-frame coverage.
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       planes.set(sketchCounter, new Float64Array([0, 0, 0, 0, 0, 1]))

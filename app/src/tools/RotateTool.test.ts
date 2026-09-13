@@ -1213,3 +1213,66 @@ describe('RotateTool — ×N / /N array copy', () => {
     expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
   })
 })
+
+// Post-commit angle retype (retypeWindow.ts): type degrees after a rotation
+// commits and it is redone about the same pivot and axis.
+describe('RotateTool — retype the angle after the commit', () => {
+  const lastTheta = (t: ReturnType<typeof makeTool>) => {
+    const calls = (t.wasmScene.transform_selection as ReturnType<typeof vi.fn>).mock.calls
+    return thetaOfZAffine(calls[calls.length - 1][3] as Float64Array)
+  }
+
+  it('a 90° rotation redone at 45° (one undo), then flipped with -30°', () => {
+    const t = makeTool()
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(lastTheta(t)).toBeCloseTo(Math.PI / 2, 6)
+    expect(t.tool.statusHint()).toContain('redo the rotation')
+    expect(t.tool.capturesKey('4')).toBe(true)
+    expect(t.tool.capturesKey('q')).toBe(false)
+
+    typeKeys(t.tool, '45')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(2)
+    expect(lastTheta(t)).toBeCloseTo(Math.PI / 4, 6)
+
+    typeKeys(t.tool, '-30')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(lastTheta(t)).toBeCloseTo(-Math.PI / 6, 6)
+  })
+
+  it('Escape closes the window and a new pivot click starts fresh', () => {
+    const t = makeTool()
+    runNinetyDegreeGesture(t.tool)
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Escape'))
+    expect(t.tool.capturesKey('4')).toBe(false)
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    expect(t.tool.capturingInput()).toBe(true)
+  })
+})
+
+describe('RotateTool — a typed angle after an array re-fans the array', () => {
+  it('copy 90°, then 3x, then 45 → three copies fanned by 45°', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    const dup = t.wasmScene.duplicate_selection_array as ReturnType<typeof vi.fn>
+    expect(dup).toHaveBeenCalledTimes(1)
+    typeKeys(t.tool, '3x'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup).toHaveBeenCalledTimes(2)
+    expect(dup.mock.calls[1][3]).toBe(3)
+    expect(thetaOfZAffine(dup.mock.calls[1][2] as Float64Array)).toBeCloseTo(Math.PI / 2, 6)
+
+    typeKeys(t.tool, '45'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup).toHaveBeenCalledTimes(3)
+    expect(dup.mock.calls[2][3]).toBe(3)
+    expect(thetaOfZAffine(dup.mock.calls[2][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+
+    typeKeys(t.tool, '2x'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(dup.mock.calls[3][3]).toBe(2)
+    expect(thetaOfZAffine(dup.mock.calls[3][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+  })
+})

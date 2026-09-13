@@ -38,6 +38,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { rayPlaneIntersect, type V3 } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs, boundaryContainsEdge } from './offsetMath'
@@ -88,11 +89,22 @@ type Stage =
       lastValidDistance: number | null
     }
 
+/**
+ * The offset just committed, kept in a `RetypeWindow` (retypeWindow.ts) so
+ * a distance typed AFTER the commit click redoes it at that distance — a
+ * positive value keeps the committed inward/outward direction, a negative
+ * one flips it.
+ */
+type RetypeSpec = { target: OffsetTarget; distance: number }
+
 export class OffsetTool implements Tool {
   readonly name = 'Offset'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    if (this.stage.kind === 'idle' && this.retype.isOpen) {
+      return 'Type an exact distance to redo the offset you just made — or click another face or profile.'
+    }
     return this.stage.kind === 'idle'
       ? 'Click a face or a closed profile to offset its boundary.'
       : 'Drag inward or outward, click to commit — or type an exact distance.'
@@ -108,6 +120,11 @@ export class OffsetTool implements Tool {
 
   /** VCB buffer — raw string being typed by the user. */
   private typed: string = ''
+
+  /** The offset just committed, redoable at a typed distance until the next
+   *  pointer action, Escape, tool switch, or other document mutation (see
+   *  `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
 
   /** The snap last seen on hover (CueLayer reads it). */
   lastSnap: Snap | null = null
@@ -126,9 +143,35 @@ export class OffsetTool implements Tool {
     this.onToast = onToast
     this.onFaceImprint = onFaceImprint
     this.onMeasurementCb = onMeasurement
+    this.retype = new RetypeWindow(wasmScene)
   }
 
   // ── Optional Tool interface extensions ────────────────────────────────────
+
+  /** Armed for Escape's purposes while dragging or while a post-commit
+   *  distance is being typed (see `toolHasArmedGesture` in tools/types.ts). */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.typed !== ''
+  }
+
+  /** Per-key capture (see Tool.capturesKey): a drag keeps the whole
+   *  keyboard as before; the IDLE retype window takes only what a typed
+   *  distance needs (`idleRetypeCapturesKey`). */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.stage.kind === 'idle' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
+  }
 
   capturingInput(): boolean {
     return this.stage.kind === 'dragging'
@@ -202,6 +245,8 @@ export class OffsetTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next offset begins.
+    this.disarmRetype()
     if (this.stage.kind === 'idle') {
       this._pickTarget(ray)
       return
@@ -220,6 +265,20 @@ export class OffsetTool implements Tool {
       this.cancel()
       return
     }
+    // Idle retype window (see `RetypeSpec`).
+    if (this.stage.kind === 'idle' && this.retype.isOpen && this.capturesKey(ev.key)) {
+      if (ev.key === 'Enter') {
+        const meters = parseLengthToMeters(this.typed)
+        this.typed = ''
+        this.onMeasurementCb('')
+        if (meters !== null) this._retypeDistance(meters)
+        return
+      }
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+      this.onMeasurementCb(this.typed === '' ? '' : typedReadout(this.typed))
+      return
+    }
+
     if (this.stage.kind !== 'dragging') return
 
     if (ev.key === 'Enter') {
@@ -236,6 +295,7 @@ export class OffsetTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     this.stage = { kind: 'idle' }
     this.typed = ''
     this._clearPreview()
@@ -575,11 +635,39 @@ export class OffsetTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
 
+    const genBefore = this.wasmScene.history_generation()
+    if (this._commitTarget(target, distance)) {
+      this.retype.armFrom({ target, distance }, genBefore)
+    }
+  }
+
+  /**
+   * Redo the offset just committed at |`d`| — the committed direction for a
+   * positive value, the opposite for a negative one — through the shared
+   * window (undo the commit, re-commit, roll back on refusal).
+   */
+  private _retypeDistance(d: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    if (Math.abs(d) < 1e-6) {
+      this.onToast('Move more before committing the offset')
+      return
+    }
+    const signed = (spec.distance < 0 ? -1 : 1) * d
+    const outcome = this.retype.apply(
+      (hot) => this._commitTarget(hot.target, signed),
+      (hot) => this._commitTarget(hot.target, hot.distance),
+      (hot) => ({ ...hot, distance: signed }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('offset'))
+  }
+
+  /** The kernel commit for `target` at `distance` — a region offset as one
+   *  sketch gesture, a face offset as one op. True when accepted (false =
+   *  refused, toasted). */
+  private _commitTarget(target: OffsetTarget, distance: number): boolean {
     try {
       if (target.kind === 'region') {
-        // One undo step: gesture-bracket the single offset mutation. A
-        // failed offset leaves the gesture unchanged, so ending it records
-        // nothing.
         this.wasmScene.sketch_begin_gesture(target.sketchHandle)
         try {
           const report = this.wasmScene.sketch_offset_region(
@@ -596,13 +684,16 @@ export class OffsetTool implements Tool {
         this.wasmScene.offset_face(target.objectHandle, target.faceHandle, distance)
         this.onFaceImprint(target.objectHandle)
       }
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
+
 
   /** Live measurement: the typed buffer once the user starts typing,
    * otherwise the signed live distance (inward reads negative). */

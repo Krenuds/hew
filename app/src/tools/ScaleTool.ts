@@ -71,6 +71,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { rayPlaneIntersect } from '../viewport/geoHelpers'
 import { axisColorsForTheme } from '../viewport/axisColors'
@@ -234,6 +235,22 @@ type Stage =
       lastCursor: Vec3
     }
 
+/**
+ * The scale just committed, kept in a `RetypeWindow` (retypeWindow.ts) so a
+ * factor or target dimension typed AFTER the commit click redoes it — the
+ * same pivot, the same grip axes (`axisIndex`/`axisIndex2`, null = corner),
+ * and the same pre-scale box extent the typed dimension divides against, so
+ * "type 50mm" after the fact means exactly what it meant mid-drag.
+ */
+type RetypeSpec = {
+  nodes: NodeRef[]
+  pivot: Vec3
+  factors: Vec3
+  axisIndex: 0 | 1 | 2 | null
+  axisIndex2: 0 | 1 | 2 | null
+  boxExtent: Vec3
+}
+
 export class ScaleTool implements Tool {
   readonly name = 'Scale'
 
@@ -241,6 +258,9 @@ export class ScaleTool implements Tool {
   statusHint(): string {
     if (this.stage.kind === 'dragging') {
       return 'Move to scale, click to commit, or type an exact factor/dimension — Ctrl anchors at the center.'
+    }
+    if (this.retype.isOpen) {
+      return 'Type an exact factor or dimension to redo the scale you just made — or drag a grip.'
     }
     if (this.selection.length === 0) {
       return 'Click the object you want to scale.'
@@ -260,6 +280,11 @@ export class ScaleTool implements Tool {
   /** VCB buffer — raw string being typed by the user (bare factor OR a
    * length-with-units target dimension; see `_isBareFactor`). */
   private typed: string = ''
+
+  /** The scale just committed, redoable at a typed factor/dimension until
+   *  the next pointer action, Escape, tool switch, or other document
+   *  mutation (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
   /** Ctrl's durable anchor-at-center toggle (tap, not hold — matches Move's
    * copy toggle). Off = anchor at the grabbed grip's opposite. */
   private anchorAtCenter: boolean = false
@@ -330,6 +355,7 @@ export class ScaleTool implements Tool {
     this.onToast = onToast
     this.instanceGroupGetter = instanceGroupGetter
     this.onMeasurementCb = onMeasurement
+    this.retype = new RetypeWindow(wasmScene)
 
   }
 
@@ -365,6 +391,8 @@ export class ScaleTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next scale begins.
+    this.disarmRetype()
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
@@ -420,7 +448,7 @@ export class ScaleTool implements Tool {
       // constraint the drag uses; a parallel-ray null keeps the last cursor.
       const cursor = this._resolveCursor(snap, ray)
       if (cursor !== null) this.stage.lastCursor = cursor
-      const { nodes } = this.stage
+      const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
       const factors = this._currentFactors()
       const pivot = this._pivot()
 
@@ -428,7 +456,32 @@ export class ScaleTool implements Tool {
       this.typed = ''
       clearPreview(this.preview)
       this.onMeasurementCb('')
-      this._commit(nodes, pivot, factors)
+      this._commitAndArm({ nodes, pivot, factors, axisIndex, axisIndex2, boxExtent })
+    }
+  }
+
+  /** Armed for Escape's purposes while dragging or while a post-commit
+   *  value is being typed (see `toolHasArmedGesture` in tools/types.ts). */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.typed !== ''
+  }
+
+  /** Per-key capture (see Tool.capturesKey): a drag keeps the whole
+   *  keyboard as before; the IDLE retype window takes only what a typed
+   *  factor or dimension needs (`idleRetypeCapturesKey`). */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.stage.kind === 'idle' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
     }
   }
 
@@ -486,6 +539,21 @@ export class ScaleTool implements Tool {
     // (gated on `!isMod`) never routes it to a tool's onKey. It arrives via
     // `toggleCenterAnchor()`, driven by a dedicated Ctrl listener in the
     // Viewport (the same reason Shift has its own listener).
+    // Idle retype window (see `RetypeSpec`).
+    if (this.stage.kind === 'idle' && this.retype.isOpen && this.capturesKey(ev.key)) {
+      if (ev.key === 'Enter') {
+        const buf = this.typed
+        this.typed = ''
+        this.onMeasurementCb('')
+        this._retypeFrom(buf)
+        return
+      }
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+      if (this.typed === '') this.onMeasurementCb('')
+      else this._reportTyped()
+      return
+    }
+
     if (this.stage.kind !== 'dragging') return
 
     if (ev.key === 'Enter') {
@@ -513,6 +581,7 @@ export class ScaleTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     // Reset to idle and clear EVERYTHING in the shared preview group — the
     // drag ghost AND the idle gizmo (both live there). Crucially does NOT
     // redraw the gizmo: cancel() is also the hook ToolController.setTool()
@@ -1070,17 +1139,73 @@ export class ScaleTool implements Tool {
     if (this.stage.kind !== 'dragging') return
     const factors = this._parseTypedFactors()
     if (factors === null) return
-    const { nodes } = this.stage
+    const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
     const pivot = this._pivot()
 
     this.stage = { kind: 'idle' }
     this.typed = ''
     clearPreview(this.preview)
     this.onMeasurementCb('')
-    this._commit(nodes, pivot, factors)
+    this._commitAndArm({ nodes, pivot, factors, axisIndex, axisIndex2, boxExtent })
   }
 
-  private _commit(nodes: NodeRef[], pivot: Vec3, factors: Vec3): void {
+  /** Commit, then open the retype window on the result (an identity scale
+   *  records nothing and opens nothing). */
+  private _commitAndArm(spec: RetypeSpec): void {
+    const genBefore = this.wasmScene.history_generation()
+    if (this._commit(spec.nodes, spec.pivot, spec.factors)) this.retype.armFrom(spec, genBefore)
+  }
+
+  /**
+   * Redo the scale just committed from a typed buffer — a bare number is a
+   * factor, a length is the target dimension along the committed grip's
+   * axes (`_parseTypedFactors`' rules, evaluated against the PRE-scale box
+   * extent the commit measured) — through the shared window.
+   */
+  private _retypeFrom(buf: string): void {
+    const spec = this.retype.spec
+    if (spec === null || buf === '') return
+    const factors = this._factorsFor(buf, spec.axisIndex, spec.axisIndex2, spec.boxExtent)
+    if (factors === null) return
+    // A factor of 1 (or the original dimension) asks for NO scale: retract
+    // the commit outright rather than re-committing an identity — `_commit`
+    // treats identity as "nothing to record", which the window's rollback
+    // would otherwise misread as a refusal and redo the old scale.
+    if (factors.every((f) => Math.abs(f - 1) < 1e-9)) {
+      const outcome = this.retype.retract()
+      if (outcome === 'stale') this.onToast(retypeStaleMessage('scale'))
+      if (outcome === 'ok') {
+        this.onCommit(spec.nodes)
+        if (spec.nodes.length > 0) this._showGizmo(spec.nodes)
+      }
+      return
+    }
+    const outcome = this.retype.apply(
+      (hot) => this._commit(hot.nodes, hot.pivot, factors),
+      (hot) => this._commit(hot.nodes, hot.pivot, hot.factors),
+      (hot) => ({ ...hot, factors }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('scale'))
+  }
+
+  /** `_parseTypedFactors` over explicit grip axes and box extent instead of
+   *  the live stage. */
+  private _factorsFor(buf: string, axisIndex: 0 | 1 | 2 | null, axisIndex2: 0 | 1 | 2 | null, boxExtent: Vec3): Vec3 | null {
+    if (this._isBareFactor(buf)) {
+      const n = parseDistance(buf)
+      if (n === null || n <= 0) return null
+      return this._factorsForScalar(axisIndex, axisIndex2, Math.max(n, MIN_SCALE))
+    }
+    const meters = parseLengthToMeters(buf, getLengthUnit())
+    if (meters === null || meters <= 0) return null
+    const extent = this._referenceExtent(axisIndex, axisIndex2, boxExtent)
+    if (extent < 1e-9) return null
+    return this._factorsForScalar(axisIndex, axisIndex2, Math.max(meters / extent, MIN_SCALE))
+  }
+
+  /** True when a non-identity scale reached the kernel (false = identity, or
+   *  refused and toasted). */
+  private _commit(nodes: NodeRef[], pivot: Vec3, factors: Vec3): boolean {
     const isIdentity =
       Math.abs(factors[0] - 1) < 1e-9 && Math.abs(factors[1] - 1) < 1e-9 && Math.abs(factors[2] - 1) < 1e-9
     if (!isIdentity) {
@@ -1093,7 +1218,7 @@ export class ScaleTool implements Tool {
         const rawMsg = err instanceof Error ? err.message : String(err)
         this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         if (nodes.length > 0) this._showGizmo(nodes)
-        return
+        return false
       }
     }
     this.onCommit(nodes)
@@ -1101,5 +1226,7 @@ export class ScaleTool implements Tool {
     // grabbed right away — handles stay stable through a transform (kernel
     // strong guarantee), so `nodes` is still valid.
     if (nodes.length > 0) this._showGizmo(nodes)
+    return !isIdentity
   }
+
 }

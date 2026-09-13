@@ -36,7 +36,7 @@ import { SnapDot } from '../viewport/SnapDot'
 import { InferenceTooltip } from '../viewport/InferenceTooltip'
 import { MeasurementBox } from '../viewport/MeasurementBox'
 import { CAMERA_HANDOFF_TOOL_NAMES } from '../panels/cameraHandoffTools'
-import { nodeKey, type NodeRef } from '../panels/treeModel'
+import { nodeKey, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
 import { makeFileHost, type OpenPick } from '../io/fileHost'
 import { anchorDownload, anchorDownloadAs } from '../io/webFileHost'
@@ -1249,7 +1249,7 @@ export function ShopApp() {
   }, [sceneEntries])
 
   // ---------------------------------------------------------------- selection / tap-to-inspect
-  const handleSelect = useCallback((node: NodeRef | null, _additive: boolean) => {
+  const handleSelect = useCallback((node: NodeRef | null, _mode: SelectMode) => {
     lastTapNodeRef.current = node
     setSelectedIds(node === null ? [] : [node])
     const scn = sceneRef.current

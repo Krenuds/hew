@@ -137,10 +137,11 @@ describe('FollowMeTool — path from preselection', () => {
     expect(tool.statusHint()).toContain('path') // reset after commit
   })
 
-  it('expands a single preselected edge to its whole connected island (the one-click promise)', () => {
+  it('sweeps a single preselected edge alone — the selection is the path, not its island', () => {
     const regionPick = makeRegionPick(20n, 21n)
     const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n] })
-    // A Select click on one line of an L yields exactly this selection.
+    // A Select click on one line of an L yields exactly this selection; a
+    // triple-click would have selected the island instead.
     const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
     const { tool, onCommit } = makeTool(scene, selection)
 
@@ -149,8 +150,9 @@ describe('FollowMeTool — path from preselection', () => {
 
     const call = (scene.follow_me_along_edges as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(call[2]).toBe(9n)
-    // BOTH island edges swept, not just the selected one.
-    expect(Array.from(call[3] as BigUint64Array)).toEqual([1n, 2n])
+    // ONLY the selected segment is swept; the island is never consulted.
+    expect(Array.from(call[3] as BigUint64Array)).toEqual([1n])
+    expect(scene.sketch_edge_island).not.toHaveBeenCalled()
     expect(onCommit).toHaveBeenCalledWith(77n)
   })
 

@@ -31,6 +31,7 @@ function makeWasmScene(opts: {
 } = {}): WasmScene {
   let sketchCounter = 41n
   return {
+    history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -232,5 +233,292 @@ describe('RectangleTool — instance editing context (component-edit-parity.md p
     // Every corner lies in the posed Y=5 plane — proof the normal was
     // actually mapped through the pose, not left at the raw local (0,0,1).
     for (const y of ys) expect(y).toBeCloseTo(5, 9)
+  })
+})
+
+// Post-commit dimension retype (SketchUp: click both corners, then type
+// `W,D` + Enter and the rectangle you just drew redraws to that size).
+describe('RectangleTool — retype dimensions after the second click', () => {
+  /** The base stub plus the history surface the retype window uses: a
+   *  generation that moves on every recorded action, undo, and redo, like
+   *  the kernel's. `sketch_add_segment` bumps it once per gesture is more
+   *  than the tool needs — one bump per commit is what matters. */
+  function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    let gen = 1n
+    // Like the kernel: a gesture records a step (and moves the generation)
+    // only if it changed something — an all-refused gesture records nothing.
+    let changedInGesture = 0
+    let addCalls = 0
+    let failAddAt = -1
+    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      sketch_begin_gesture: vi.fn(() => { changedInGesture = 0 }),
+      sketch_add_segment: vi.fn((...args: unknown[]) => {
+        addCalls += 1
+        if (addCalls === failAddAt) throw new Error('PointOffPlane: nope')
+        const r = baseAdd(...args)
+        changedInGesture += 1
+        return r
+      }),
+      /** Test hook: the Nth `sketch_add_segment` call overall is refused. */
+      __failAddAt: (n: number) => { failAddAt = n },
+      sketch_end_gesture: vi.fn(() => { if (changedInGesture > 0) gen += 1n }),
+      split_face_inner: vi.fn(() => { gen += 1n; return 99n }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      /** Test hook: an unrelated recorded action. */
+      __bump: () => { gen += 1n },
+    }
+    return scene as unknown as WasmScene & { __bump(): void; __failAddAt(n: number): void }
+  }
+
+  function key(tool: RectangleTool, k: string) {
+    tool.onKey({ key: k } as KeyboardEvent)
+  }
+
+  function typeDims(tool: RectangleTool, text: string) {
+    for (const ch of text) key(tool, ch)
+    key(tool, 'Enter')
+  }
+
+  /** The (x, y) corners of the last four `sketch_add_segment` calls. */
+  function lastRectangle(scene: WasmScene): [number, number][] {
+    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    return calls.slice(-4).map((c) => [c[1] as number, c[2] as number])
+  }
+
+  function drawGround(tool: RectangleTool, a: [number, number], b: [number, number]) {
+    tool.onPointerDown(makeSnap({ x: a[0], y: a[1], z: 0 }), rayThrough(a[0], a[1]))
+    tool.onPointerDown(makeSnap({ x: b[0], y: b[1], z: 0 }), rayThrough(b[0], b[1]))
+  }
+
+  it('is closed before any rectangle exists — digits are not captured', () => {
+    const { tool } = makeTool(makeRetypeScene())
+    expect(tool.capturesKey('5')).toBe(false)
+    expect(tool.hasArmedGesture()).toBe(false)
+  })
+
+  it('after a two-click ground rectangle, typing W,D + Enter undoes it once and redraws it at that size, growing the same way', () => {
+    const scene = makeRetypeScene()
+    const { tool, onCommit, onMeasurement } = makeTool(scene)
+    // Second corner toward −x, −y: the retyped rectangle must grow that way too.
+    drawGround(tool, [1, 1], [0, -1])
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(tool.statusHint()).toContain('resize')
+
+    // A digit opens the window; the readout shows the buffer.
+    expect(tool.capturesKey('2')).toBe(true)
+    typeDims(tool, '2,3')
+    expect(onMeasurement).toHaveBeenCalledWith(expect.stringContaining('2'))
+
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.scene_redo).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(8)
+    // Anchor (1,1), far corner (1−2, 1−3) = (−1, −2).
+    const xs = lastRectangle(scene).map((c) => c[0])
+    const ys = lastRectangle(scene).map((c) => c[1])
+    expect(Math.min(...xs)).toBeCloseTo(-1, 9)
+    expect(Math.max(...xs)).toBeCloseTo(1, 9)
+    expect(Math.min(...ys)).toBeCloseTo(-2, 9)
+    expect(Math.max(...ys)).toBeCloseTo(1, 9)
+    expect(onCommit).toHaveBeenCalledTimes(2)
+    // Readout cleared after the commit.
+    expect(onMeasurement).toHaveBeenLastCalledWith('')
+  })
+
+  it('a single value makes a square; the window stays open so a second size can be typed', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 2])
+    typeDims(tool, '5')
+    let xs = lastRectangle(scene).map((c) => c[0])
+    let ys = lastRectangle(scene).map((c) => c[1])
+    expect(Math.max(...xs)).toBeCloseTo(5, 9)
+    expect(Math.max(...ys)).toBeCloseTo(5, 9)
+
+    typeDims(tool, '1,4')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(2)
+    xs = lastRectangle(scene).map((c) => c[0])
+    ys = lastRectangle(scene).map((c) => c[1])
+    expect(Math.max(...xs)).toBeCloseTo(1, 9)
+    expect(Math.max(...ys)).toBeCloseTo(4, 9)
+  })
+
+  it('with an empty buffer, letters and Space keep their global meaning; once a digit is in, the dimension grammar is captured', () => {
+    const { tool } = makeTool(makeRetypeScene())
+    drawGround(tool, [0, 0], [1, 1])
+    for (const k of ['m', 'c', 'p', 'f', ' ', 'Enter', 'Backspace', ',']) {
+      expect(tool.capturesKey(k)).toBe(false)
+    }
+    key(tool, '2')
+    for (const k of ['m', ',', 'x', "'", '"', '/', 'Backspace', 'Enter', '5']) {
+      expect(tool.capturesKey(k)).toBe(true)
+    }
+    // Space is the global reset-to-Select even with a buffer open.
+    expect(tool.capturesKey(' ')).toBe(false)
+    // Still not a tool-switch-blocking letter for keys outside the grammar.
+    expect(tool.capturesKey('p')).toBe(false)
+    expect(tool.capturesKey('q')).toBe(false)
+    // An open buffer is an armed gesture for Escape's purposes.
+    expect(tool.hasArmedGesture()).toBe(true)
+  })
+
+  it('the idle hover re-run after each captured key keeps the typed readout (the key router re-hovers)', () => {
+    const scene = makeRetypeScene()
+    const { tool, onMeasurement } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    key(tool, '3')
+    onMeasurement.mockClear()
+    tool.onPointerMove(makeSnap({ x: 2, y: 2, z: 0 }), rayThrough(2, 2))
+    expect(onMeasurement).not.toHaveBeenCalledWith('')
+    // Face-mode idle hover too.
+    const faceScene = makeRetypeScene({ pick: () => makePick(7n, 3n) })
+    const f = makeTool(faceScene)
+    f.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), rayThrough(0, 0))
+    f.tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 1, kind: 'face' }), rayThrough(1, 2))
+    key(f.tool, '3')
+    f.onMeasurement.mockClear()
+    f.tool.onPointerMove(makeSnap({ x: 0.5, y: 0.5, z: 1, kind: 'face' }), rayThrough(0.5, 0.5))
+    expect(f.onMeasurement).not.toHaveBeenCalledWith('')
+  })
+
+  it('Escape closes the window without touching the rectangle', () => {
+    const scene = makeRetypeScene()
+    const { tool, onMeasurement } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    key(tool, '3')
+    key(tool, 'Escape')
+    expect(onMeasurement).toHaveBeenLastCalledWith('')
+    expect(tool.capturesKey('5')).toBe(false)
+    expect(tool.hasArmedGesture()).toBe(false)
+    // A stray Enter now does nothing.
+    key(tool, 'Enter')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+  })
+
+  it('a new first click closes the window; the digits then belong to the new rectangle', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    key(tool, '3')
+    tool.onPointerDown(makeSnap({ x: 5, y: 5, z: 0 }), rayThrough(5, 5))
+    expect(tool.capturingInput()).toBe(true) // anchored on the next rectangle
+    typeDims(tool, '1,1')
+    // The typed commit is a fresh rectangle from (5,5), not a retype.
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(8)
+    expect(Math.min(...lastRectangle(scene).map((c) => c[0]))).toBeCloseTo(5, 9)
+  })
+
+  it('disarmRetype (the host\'s explicit undo/redo/delete hook) closes the window quietly', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    tool.disarmRetype()
+    expect(tool.capturesKey('5')).toBe(false)
+  })
+
+  it('refuses the retype when the history generation moved (an intervening action) and says so', () => {
+    const scene = makeRetypeScene()
+    const { tool, onToast } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    scene.__bump() // something else was recorded meanwhile
+    typeDims(tool, '2,2')
+    expect(scene.scene_undo).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('model changed'))
+    // The window is gone.
+    expect(tool.capturesKey('5')).toBe(false)
+  })
+
+  it('a refused re-commit is rolled forward with a redo, so the original rectangle survives', () => {
+    const scene = makeRetypeScene()
+    const { tool, onToast } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    const add = scene.sketch_add_segment as ReturnType<typeof vi.fn>
+    add.mockImplementationOnce(() => { throw new Error('PointOffPlane: nope') })
+    typeDims(tool, '2,2')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.scene_redo).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    // Still open, re-stamped: a second attempt goes through.
+    typeDims(tool, '2,2')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(Math.max(...lastRectangle(scene).map((c) => c[0]))).toBeCloseTo(2, 9)
+  })
+
+  it('a PARTIALLY applied re-commit (a later segment refused) is undone and the original redrawn — never a redo of a cleared stack', () => {
+    const scene = makeRetypeScene()
+    const { tool, onToast } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    // First segment of the retry lands, the second (6th call overall, after
+    // the 4 of the original draw) is refused: the gesture bracket still
+    // closes (runSketchGesture's finally) and records a step.
+    scene.__failAddAt(6)
+    typeDims(tool, '2,2')
+    expect(onToast).toHaveBeenCalledTimes(1)
+    // Retract the rectangle, then retract the partial step: two undos, no redo.
+    expect(scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(scene.scene_redo).not.toHaveBeenCalled()
+    // The original 1×1 was redrawn as a fresh commit.
+    const rect = lastRectangle(scene)
+    expect(Math.max(...rect.map((c) => c[0]))).toBeCloseTo(1, 9)
+    expect(Math.max(...rect.map((c) => c[1]))).toBeCloseTo(1, 9)
+    // Still open: a good retype now goes through.
+    typeDims(tool, '3,3')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(3)
+    expect(Math.max(...lastRectangle(scene).map((c) => c[0]))).toBeCloseTo(3, 9)
+  })
+
+  it('Escape with an open but untyped window is not armed: it closes the window quietly and is not consumed', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    drawGround(tool, [0, 0], [1, 1])
+    expect(tool.hasArmedGesture()).toBe(false)
+    key(tool, 'Escape')
+    expect(tool.capturesKey('5')).toBe(false)
+  })
+
+  it('a face rectangle retypes through split_face_inner with the loop rebuilt on the face plane', () => {
+    const scene = makeRetypeScene({ pick: () => makePick(7n, 3n) })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 1, kind: 'face' }), rayThrough(1, 2))
+    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
+
+    typeDims(tool, '3,4')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.split_face_inner).toHaveBeenCalledTimes(2)
+    const [object, face, loopPts] = (scene.split_face_inner as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(object).toBe(7n)
+    expect(face).toBe(3n)
+    const pts = loopPts as Float64Array
+    const xs = [pts[0], pts[3], pts[6], pts[9]]
+    const ys = [pts[1], pts[4], pts[7], pts[10]]
+    const zs = [pts[2], pts[5], pts[8], pts[11]]
+    expect(Math.min(...xs)).toBeCloseTo(0, 9)
+    expect(Math.min(...ys)).toBeCloseTo(0, 9)
+    // 3 × 4 on the +Z face: one extent is 3 and the other 4 (the face basis
+    // fixes which axis is which; the growth direction is preserved either way).
+    const extents = [Math.max(...xs), Math.max(...ys)].sort((a, b) => a - b)
+    expect(extents[0]).toBeCloseTo(3, 9)
+    expect(extents[1]).toBeCloseTo(4, 9)
+    for (const z of zs) expect(z).toBeCloseTo(1, 9)
+    expect(onFaceImprint).toHaveBeenCalledTimes(2)
+  })
+
+  it('a typed (Enter) commit arms the window too', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    typeDims(tool, '1,1')
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+    typeDims(tool, '2,2')
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(Math.max(...lastRectangle(scene).map((c) => c[0]))).toBeCloseTo(2, 9)
   })
 })

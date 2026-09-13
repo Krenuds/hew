@@ -1,6 +1,13 @@
 /**
  * RectangleTool — two-click rectangle sketching.
  *
+ * Typed dimensions work at two moments: after the FIRST click (the classic
+ * VCB — `W,D` + Enter commits the rectangle at that size) and after the
+ * SECOND click (the retype window — `W,D` + Enter RESIZES the rectangle just
+ * committed, in place, as often as wanted, until the next click, Escape,
+ * tool switch, or any other change to the document; see `RetypeHot`). The
+ * second is SketchUp's idiom of "draw roughly, then type the size".
+ *
  * Two modes:
  *
  * Plane mode (activeContext === null, no eligible face): the drawing plane
@@ -53,6 +60,7 @@ import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type Ske
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 
 /** Smallest side, in metres, a ground rectangle may commit with. See the
  *  degeneracy check in `onPointerDown` for why this is per-axis and why it
@@ -98,6 +106,42 @@ type FaceStage =
       anchor: V3
     }
 
+/**
+ * The just-committed rectangle, kept in a `RetypeWindow` so typed
+ * dimensions can resize it after the fact — SketchUp's idiom: click both
+ * corners, then type `W,D` + Enter and the rectangle redraws to those
+ * dimensions, as often as you like, until the next action. `anchor` and
+ * `far` are the two corners the commit used (`far` fixes which way each
+ * dimension grows). The undo/re-commit cycle and its history-generation
+ * guard live in retypeWindow.ts.
+ */
+type RetypeSpec = {
+  anchor: V3
+  far: V3
+} & (
+  | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
+  | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
+)
+
+/** The keys the idle retype buffer can accept, once it holds something —
+ *  the same character set the anchored-stage VCB feeds `editDimsBuffer`. */
+function isDimsBufferKey(key: string): boolean {
+  return (
+    (key >= '0' && key <= '9') ||
+    key === '.' ||
+    key === ',' ||
+    key === 'x' ||
+    key === 'X' ||
+    key === ' ' ||
+    key === 'Backspace' ||
+    key === "'" ||
+    key === '"' ||
+    key === '/' ||
+    key === '-' ||
+    /^[mckftinMCKFTIN]$/.test(key)
+  )
+}
+
 export class RectangleTool implements Tool {
   readonly name = 'Rectangle'
 
@@ -108,6 +152,9 @@ export class RectangleTool implements Tool {
     }
     if (this.idlePlaneLock !== null) {
       return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+    }
+    if (this.retype.isOpen) {
+      return 'Type exact dimensions to resize the rectangle you just drew — or click the first corner of the next one.'
     }
     return 'Click the first corner — on the ground plane or any face or sketch.'
   }
@@ -145,6 +192,15 @@ export class RectangleTool implements Tool {
   /** VCB buffer — raw string being typed by the user (W,D in display units) */
   private typed: string = ''
 
+  /** The just-committed rectangle, resizable by typed dimensions until the
+   *  next pointer action, Escape, tool switch, or any other document
+   *  mutation (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
+  /** The retype buffer — `W,D` being typed while IDLE with the window open.
+   *  Separate from `typed` (the anchored-stage buffer) so the two windows
+   *  can never bleed into each other. */
+  private retypeTyped: string = ''
+
   /** Last rubber-band cursor positions, tracked for typed-entry sign/direction */
   private _lastPlaneCursor: V3 | null = null
   private _lastFaceCursor: V3 | null = null
@@ -180,6 +236,7 @@ export class RectangleTool implements Tool {
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
     this.sketchCache = sketchCache
+    this.retype = new RetypeWindow(wasmScene)
   }
 
   /** The single editing-context channel (component-edit-parity.md phase A1;
@@ -405,7 +462,10 @@ export class RectangleTool implements Tool {
       // Face mode
       if (this.faceStage.kind !== 'anchored') {
         this._clearPreview()
-        this.onMeasurementCb('')
+        // An open retype buffer owns the readout: the key router re-runs
+        // this hover after every captured key, which must not wipe the
+        // dimensions being typed.
+        if (this.retypeTyped === '') this.onMeasurementCb('')
         return
       }
       const { anchor, normal, planePoint } = this.faceStage
@@ -434,7 +494,7 @@ export class RectangleTool implements Tool {
           this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
         }
         this._clearPreview()
-        this.onMeasurementCb('')
+        if (this.retypeTyped === '') this.onMeasurementCb('') // see the face-mode note
         return
       }
       const { plane, anchor } = this.planeStage
@@ -464,6 +524,9 @@ export class RectangleTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next rectangle has
+    // begun, and typed dimensions now belong to it.
+    this.disarmRetype()
     if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
@@ -482,19 +545,64 @@ export class RectangleTool implements Tool {
   }
 
   /**
-   * True while a gesture is anchored OR an idle plane lock is armed — Escape
-   * has tool-local work to do (clear the lock, or step the gesture back)
-   * before a context-pop is appropriate (component-edit-parity.md phase A2;
-   * see `toolHasArmedGesture` in tools/types.ts). `capturingInput()` alone
-   * misses the idle-locked case: locked-but-idle is not "capturing input"
-   * but IS armed for Escape's purposes.
+   * Per-key refinement of the capture (see Tool.capturesKey). An anchored
+   * gesture keeps the whole keyboard, exactly as before. The IDLE retype
+   * window (a rectangle just committed, `retypeHot` set) takes only what
+   * its buffer needs: a digit always opens it — the SketchUp reflex is to
+   * type the dimensions straight after the second click — and once
+   * something is in the buffer, the rest of the dimension grammar (unit
+   * letters, separators, Backspace, Enter) follows. With the buffer EMPTY
+   * every letter keeps its global meaning, so `m`/`c`/`f`/`p` still switch
+   * tools right after a rectangle, and Space still resets to Select.
+   */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.retypeTyped, isDimsBufferKey)
+  }
+
+  /**
+   * True while a gesture is anchored OR an idle plane lock is armed OR a
+   * retype buffer is open — Escape has tool-local work to do (clear the
+   * lock, drop the buffer, or step the gesture back) before a context-pop
+   * is appropriate (component-edit-parity.md phase A2; see
+   * `toolHasArmedGesture` in tools/types.ts). `capturingInput()` alone
+   * misses the idle cases: locked-but-idle or typing-a-resize is not
+   * "capturing input" but IS armed for Escape's purposes.
    */
   hasArmedGesture(): boolean {
-    return this.capturingInput() || this.idlePlaneLock !== null
+    return this.capturingInput() || this.idlePlaneLock !== null || this.retypeTyped !== ''
+  }
+
+  /**
+   * Quietly close the retype window — the Viewport calls this before an
+   * explicit undo/redo/delete executes (`disarmActivePostCommitWindow`), so
+   * a later Enter can never fire a wrong-action undo against a document the
+   * user has since changed on purpose. Any pointer action, Escape, and
+   * `cancel()` close it the same way.
+   */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.retypeTyped !== '') {
+      this.retypeTyped = ''
+      this.onMeasurementCb('')
+    }
   }
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // Idle with a retype BUFFER open: Escape drops it and stops there
+      // ("never mind, the rectangle stays as drawn") — the same "armed"
+      // verdict `hasArmedGesture()` gives the Viewport, so the two agree on
+      // which Escape the tool consumes. An open-but-untyped window is NOT
+      // armed: it closes quietly and Escape goes on to its usual meaning
+      // (plane lock, then the host's context pop), so a rectangle just
+      // drawn never costs an extra Escape.
+      if (!this.capturingInput() && this.retypeTyped !== '') {
+        this.disarmRetype()
+        return
+      }
+      if (!this.capturingInput()) this.disarmRetype()
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
@@ -513,6 +621,18 @@ export class RectangleTool implements Tool {
     }
 
     if (!this.capturingInput()) {
+      // Idle retype window (see `RetypeHot`): the keys `capturesKey` admits
+      // edit the buffer; Enter resizes the just-committed rectangle.
+      if (this.retype.isOpen && this.capturesKey(ev.key)) {
+        if (ev.key === 'Enter') {
+          const dims = parseDimensionsToMeters(this.retypeTyped)
+          if (dims !== null) this._retypeCommit(dims[0], dims[1])
+          return
+        }
+        this.retypeTyped = editDimsBuffer(this.retypeTyped, ev.key)
+        this.onMeasurementCb(this.retypeTyped === '' ? '' : typedReadout(this.retypeTyped))
+        return
+      }
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
@@ -582,6 +702,8 @@ export class RectangleTool implements Tool {
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
+    this.retype.close()
+    this.retypeTyped = ''
     this._lastPlaneCursor = null
     this._lastFaceCursor = null
     this.idlePlaneLock = null
@@ -659,7 +781,9 @@ export class RectangleTool implements Tool {
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      this._commitPlaneRectangle(target, corners)
+      if (this._commitPlaneRectangle(target, corners)) {
+        this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2] })
+      }
     } else if (this.faceStage.kind === 'anchored') {
       const { object, face, normal, anchor } = this.faceStage
       const basis = facePlaneBasis(normal)
@@ -687,8 +811,99 @@ export class RectangleTool implements Tool {
       this._lastFaceCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      this._commitFaceCorners(object, face, corners)
+      if (this._commitFaceCorners(object, face, corners)) {
+        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2] })
+      }
     }
+  }
+
+  /** Open the retype window on a rectangle that just committed successfully. */
+  private _armRetype(spec: RetypeSpec): void {
+    this.retypeTyped = ''
+    this.retype.arm(spec)
+  }
+
+  /**
+   * The corners a retype of the hot rectangle to `w × d` produces: the same
+   * anchor, each dimension growing the way the committed rectangle did
+   * (the sign of `far − anchor` along each plane axis), built by the very
+   * helper a second click uses, so a retyped rectangle is indistinguishable
+   * from one clicked at that far corner. Null for a degenerate size.
+   */
+  private _retypeCorners(hot: RetypeSpec, w: number, d: number): [V3, V3, V3, V3] | null {
+    const { anchor, far } = hot
+    if (hot.mode === 'plane' && hot.plane.ground) {
+      const signX = far[0] - anchor[0] < 0 ? -1 : 1
+      const signY = far[1] - anchor[1] < 0 ? -1 : 1
+      if (w < RECTANGLE_MIN_SIDE || d < RECTANGLE_MIN_SIDE) return null
+      return rectangleCorners([anchor[0], anchor[1]], [anchor[0] + signX * w, anchor[1] + signY * d])
+    }
+    const normal = hot.mode === 'plane' ? hot.plane.normal : hot.normal
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return null
+    const { u, v } = basis
+    const dx = far[0] - anchor[0]
+    const dy = far[1] - anchor[1]
+    const dz = far[2] - anchor[2]
+    const signU = dx * u[0] + dy * u[1] + dz * u[2] < 0 ? -1 : 1
+    const signV = dx * v[0] + dy * v[1] + dz * v[2] < 0 ? -1 : 1
+    const newFar: V3 = [
+      anchor[0] + u[0] * signU * w + v[0] * signV * d,
+      anchor[1] + u[1] * signU * w + v[1] * signV * d,
+      anchor[2] + u[2] * signU * w + v[2] * signV * d,
+    ]
+    return faceRectangleCorners(anchor, newFar, normal)
+  }
+
+  /**
+   * Resize the just-committed rectangle to the typed `w × d` through the
+   * shared window (retypeWindow.ts): one guarded scene undo, then the same
+   * commit path with corners rebuilt at the new far corner — ONE undo step
+   * for the final rectangle, as if it had been drawn that size. The window
+   * stays open afterwards so another size can be typed.
+   */
+  private _retypeCommit(w: number, d: number): void {
+    const spec = this.retype.spec
+    this.retypeTyped = ''
+    this.onMeasurementCb('')
+    if (spec === null) return
+    const corners = this._retypeCorners(spec, w, d)
+    if (corners === null) return
+    const outcome = this.retype.apply(
+      (hot) => this._commitHot(hot, corners),
+      (hot) => {
+        const original = this._retypeCorners(hot, ...this._retypeDims(hot))
+        return original !== null && this._commitHot(hot, original)
+      },
+      (hot) => ({ ...hot, far: corners[2] }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('rectangle'))
+  }
+
+  /** Lay `corners` down through the hot record's own commit path. */
+  private _commitHot(hot: RetypeSpec, corners: [V3, V3, V3, V3]): boolean {
+    return hot.mode === 'plane'
+      ? this._commitPlaneRectangle(hot.target, corners)
+      : this._commitFaceCorners(hot.object, hot.face, corners)
+  }
+
+  /** The committed rectangle's own `w × d` (from anchor → far), for
+   *  redrawing it as-was after a refused retype. */
+  private _retypeDims(hot: RetypeSpec): [number, number] {
+    const { anchor, far } = hot
+    if (hot.mode === 'plane' && hot.plane.ground) {
+      return [Math.abs(far[0] - anchor[0]), Math.abs(far[1] - anchor[1])]
+    }
+    const normal = hot.mode === 'plane' ? hot.plane.normal : hot.normal
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return [0, 0]
+    const dx = far[0] - anchor[0]
+    const dy = far[1] - anchor[1]
+    const dz = far[2] - anchor[2]
+    return [
+      Math.abs(dx * basis.u[0] + dy * basis.u[1] + dz * basis.u[2]),
+      Math.abs(dx * basis.v[0] + dy * basis.v[1] + dz * basis.v[2]),
+    ]
   }
 
   // ------------------------------------------------------------------ plane mode
@@ -745,7 +960,10 @@ export class RectangleTool implements Tool {
         this._lastPlaneCursor = null
         this._clearPreview()
         this.onMeasurementCb('')
-        this._commitPlaneRectangle(target, rectangleCorners([anchor[0], anchor[1]], [cursor[0], cursor[1]]))
+        const corners = rectangleCorners([anchor[0], anchor[1]], [cursor[0], cursor[1]])
+        if (this._commitPlaneRectangle(target, corners)) {
+          this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2] })
+        }
       } else {
         const corners = faceRectangleCorners(anchor, cursor, plane.normal)
         if (corners === null) return // degenerate — ignore
@@ -754,7 +972,9 @@ export class RectangleTool implements Tool {
         this._lastPlaneCursor = null
         this._clearPreview()
         this.onMeasurementCb('')
-        this._commitPlaneRectangle(target, corners)
+        if (this._commitPlaneRectangle(target, corners)) {
+          this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2] })
+        }
       }
     }
   }
@@ -763,7 +983,7 @@ export class RectangleTool implements Tool {
    *  `target`'s sketch — used by both ground and non-ground plane/sketch
    *  mode (real face mode instead imprints via `split_face_inner`, see
    *  `_commitFaceCorners`). */
-  private _commitPlaneRectangle(target: SketchTarget, corners: [V3, V3, V3, V3]): void {
+  private _commitPlaneRectangle(target: SketchTarget, corners: [V3, V3, V3, V3]): boolean {
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
         // Four edges: 0→1, 1→2, 2→3, 3→0
@@ -796,11 +1016,13 @@ export class RectangleTool implements Tool {
 
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
       })
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
@@ -844,12 +1066,15 @@ export class RectangleTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
 
-      this._commitFaceCorners(object, face, corners)
+      if (this._commitFaceCorners(object, face, corners)) {
+        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2] })
+      }
     }
   }
 
-  /** Split the given face with a rectangle loop defined by 4 explicit world-space corners. */
-  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3]): void {
+  /** Split the given face with a rectangle loop defined by 4 explicit world-space
+   *  corners. True when the kernel accepted it (false = refused, toasted). */
+  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3]): boolean {
     // Flatten the 4 corners into a Float64Array of xyz triples
     const loopPts = new Float64Array(4 * 3)
     for (let i = 0; i < 4; i++) {
@@ -870,11 +1095,13 @@ export class RectangleTool implements Tool {
         this.wasmScene.split_face_inner(object, face, loopPts)
       }
       this.onFaceImprint(object)
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 

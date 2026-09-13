@@ -20,6 +20,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { projectRayOntoAxis, applyAffine3x4, transformNormalThroughPose } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
 import { defaultFaceEligible, worldFaceNormal, FacePickCache, type FaceEligible } from './faceDraw'
@@ -94,12 +95,35 @@ type Stage =
       distance: number
     }
 
+/**
+ * The push/pull just committed, kept in a `RetypeWindow` (retypeWindow.ts)
+ * so a distance typed AFTER the commit click redoes it at that distance —
+ * SketchUp's "pull roughly, then type the exact depth". A positive value
+ * keeps the committed direction, a negative one flips it. `extrudeAsNew`
+ * is the Ctrl mode in force at the commit, re-applied for the redo. A
+ * REGION target's handle does not survive the redo's undo — extruding a
+ * region consumes it, and the kernel's undo re-mints the sketch's edges
+ * with fresh handles (`restore_edges`: "callers re-query") — so the region
+ * is re-picked at the remembered click point before every re-commit.
+ */
+type RetypeSpec = {
+  target: PushPullTarget
+  distance: number
+  extrudeAsNew: boolean
+  /** The first click's point on the face/region — where a REGION target is
+   *  re-picked after the retype's undo (see `_commitHot`). */
+  anchor: [number, number, number]
+}
+
 export class PushPullTool implements Tool {
   readonly name = 'Push/Pull'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
+      if (this.retype.isOpen) {
+        return 'Type an exact distance to redo the push/pull you just made — or click another face; double-click repeats the last distance.'
+      }
       const base = 'Click a face to push or pull it — double-click repeats the last distance.'
       return this.extrudeAsNewMode ? `${base} Ctrl is on — extrudes a new object.` : base
     }
@@ -115,8 +139,14 @@ export class PushPullTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** VCB buffer — raw string being typed by the user */
+  /** VCB buffer — raw string being typed by the user. While IDLE with the
+   *  retype window open it is the post-commit distance being typed. */
   private typed: string = ''
+
+  /** The push/pull just committed, redoable at a typed distance until the
+   *  next pointer action, Escape, tool switch, or other document mutation
+   *  (see `RetypeSpec` and retypeWindow.ts). */
+  private readonly retype: RetypeWindow<RetypeSpec>
 
   /** The snap last seen on hover (for highlight logic) */
   lastSnap: Snap | null = null
@@ -161,6 +191,7 @@ export class PushPullTool implements Tool {
     this.onCommit = onCommit
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.retype = new RetypeWindow(wasmScene)
     this.onExtrudeAsNewModeChange = onExtrudeAsNewModeChange
   }
 
@@ -168,6 +199,31 @@ export class PushPullTool implements Tool {
 
   capturingInput(): boolean {
     return this.stage.kind === 'dragging'
+  }
+
+  /** Armed for Escape's purposes while dragging or while a post-commit
+   *  distance is being typed (see `toolHasArmedGesture` in tools/types.ts). */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.typed !== ''
+  }
+
+  /** Per-key capture (see Tool.capturesKey): a drag keeps the whole
+   *  keyboard as before; the IDLE retype window takes only what a typed
+   *  distance needs (`idleRetypeCapturesKey`). */
+  capturesKey(key: string): boolean {
+    if (this.capturingInput()) return true
+    if (!this.retype.isOpen) return false
+    return idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.stage.kind === 'idle' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
   }
 
   /**
@@ -200,7 +256,7 @@ export class PushPullTool implements Tool {
     if (stage.kind !== 'dragging' || this.lastCommittedDistance === null) {
       return false
     }
-    this._commit(stage.target, this.lastCommittedDistance)
+    this._commitAndArm(stage.target, this.lastCommittedDistance, stage.anchor)
     return true
   }
 
@@ -343,6 +399,8 @@ export class PushPullTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next push/pull begins.
+    this.disarmRetype()
     if (this.stage.kind === 'idle') {
       let target: PushPullTarget | null = null
       let anchor: [number, number, number] = [0, 0, 0]
@@ -486,7 +544,7 @@ export class PushPullTool implements Tool {
       // _axisDistance) so e.g. clicking an edge midpoint cuts to exactly that
       // depth rather than the cursor ray's diagonal closest-approach.
       const finalDistance = this._axisDistance(snap, ray, anchor, target.normal)
-      this._commit(target, finalDistance === 0 ? distance : finalDistance)
+      this._commitAndArm(target, finalDistance === 0 ? distance : finalDistance, anchor)
     }
   }
 
@@ -503,6 +561,20 @@ export class PushPullTool implements Tool {
     // Shift's axis lock each have their own listener). It arrives via
     // `toggleExtrudeAsNew()`, driven by a dedicated Ctrl/Cmd listener in the
     // Viewport.
+    // ── Idle retype window (see `RetypeSpec`) ──
+    if (this.stage.kind === 'idle' && this.retype.isOpen && this.capturesKey(ev.key)) {
+      if (ev.key === 'Enter') {
+        const meters = parseLengthToMeters(this.typed)
+        this.typed = ''
+        this.onMeasurementCb('')
+        if (meters !== null) this._retypeDistance(meters)
+        return
+      }
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+      this.onMeasurementCb(this.typed === '' ? '' : this._typedReadout())
+      return
+    }
+
     if (this.stage.kind !== 'dragging') return
 
     // ── Numeric VCB ──
@@ -545,6 +617,7 @@ export class PushPullTool implements Tool {
   }
 
   cancel(): void {
+    this.retype.close()
     this.stage = { kind: 'idle' }
     this.typed = ''
     clearPreview(this.preview)
@@ -580,7 +653,7 @@ export class PushPullTool implements Tool {
    */
   private _commitFromTyped(dist: number): void {
     if (this.stage.kind !== 'dragging') return
-    const { target, distance } = this.stage
+    const { target, distance, anchor } = this.stage
 
     // Inward when the user typed an explicit `-` (dist < 0), OR when a genuine
     // inward drag cleared the noise threshold; outward otherwise. The explicit
@@ -594,7 +667,7 @@ export class PushPullTool implements Tool {
     clearPreview(this.preview)
     this.onMeasurementCb('')
 
-    this._commit(target, signed)
+    this._commitAndArm(target, signed, anchor)
   }
 
   /** The current editing context (component-edit-parity.md phase A1) — a
@@ -711,10 +784,86 @@ export class PushPullTool implements Tool {
     return projectRayOntoAxis(ray.origin, ray.direction, anchor, normal)
   }
 
-  private _commit(target: PushPullTarget, distance: number): void {
-    if (Math.abs(distance) < 1e-6) {
+  /** Commit through `_commit`, then open the retype window on the result
+   *  (entry count measured from the history generation, so a through
+   *  push/pull that records a boolean's steps retracts them all). */
+  private _commitAndArm(target: PushPullTarget, distance: number, anchor: [number, number, number]): void {
+    const genBefore = this.wasmScene.history_generation()
+    if (this._commit(target, distance)) {
+      this.retype.armFrom({ target, distance, extrudeAsNew: this.extrudeAsNewMode, anchor }, genBefore)
+    }
+  }
+
+  /**
+   * Redo the push/pull just committed at |`d`| — the committed direction
+   * for a positive value, the opposite for a negative one — through the
+   * shared window (undo the commit, re-commit, roll back on refusal).
+   */
+  private _retypeDistance(d: number): void {
+    const spec = this.retype.spec
+    if (spec === null) return
+    if (Math.abs(d) < 1e-6) {
       this.onToast('Move more before committing push/pull')
       return
+    }
+    const signed = (spec.distance < 0 ? -1 : 1) * d
+    const outcome = this.retype.apply(
+      (hot) => this._commitHot(hot, signed),
+      (hot) => this._commitHot(hot, hot.distance),
+      (hot) => ({ ...hot, distance: signed }),
+    )
+    if (outcome === 'stale') this.onToast(retypeStaleMessage('push/pull'))
+  }
+
+  /** Lay the hot push/pull down at `distance`, under the Ctrl mode it was
+   *  committed with. */
+  private _commitHot(hot: RetypeSpec, distance: number): boolean {
+    let target = hot.target
+    if (target.kind === 'region') {
+      // The retype's undo re-minted the sketch's edges, so the region under
+      // the original click has a NEW handle: re-pick it there (a ray dropped
+      // onto the plane at the anchor), exactly as the first click did.
+      const fresh = this._repickRegion(hot.anchor, target.normal, target.instance)
+      if (fresh === null) {
+        this.onToast("Couldn't find the profile to redo the push/pull")
+        return false
+      }
+      target = { ...target, sketchHandle: fresh.sketch, regionHandle: fresh.region }
+    }
+    const prev = this.extrudeAsNewMode
+    this.extrudeAsNewMode = hot.extrudeAsNew
+    try {
+      return this._commit(target, distance)
+    } finally {
+      this.extrudeAsNewMode = prev
+    }
+  }
+
+  /** The sketch region under `anchor`, picked along −`normal` from just above
+   *  the plane (instance-scoped like the first click's pick). */
+  private _repickRegion(
+    anchor: [number, number, number],
+    normal: [number, number, number],
+    instance: bigint | null,
+  ): { sketch: bigint; region: bigint } | null {
+    const o: [number, number, number] = [anchor[0] + normal[0], anchor[1] + normal[1], anchor[2] + normal[2]]
+    const d: [number, number, number] = [-normal[0], -normal[1], -normal[2]]
+    const pick = instance !== null
+      ? this.wasmScene.pick_sketch_region_in_instance(instance, o[0], o[1], o[2], d[0], d[1], d[2])
+      : this.wasmScene.pick_sketch_region(o[0], o[1], o[2], d[0], d[1], d[2])
+    if (pick === undefined) return null
+    try {
+      return { sketch: pick.sketch(), region: pick.region() }
+    } finally {
+      pick.free()
+    }
+  }
+
+  /** True when the kernel accepted the commit (false = refused, toasted). */
+  private _commit(target: PushPullTarget, distance: number): boolean {
+    if (Math.abs(distance) < 1e-6) {
+      this.onToast('Move more before committing push/pull')
+      return false
     }
 
     try {
@@ -789,11 +938,13 @@ export class PushPullTool implements Tool {
       // typed Enter, or a double-click repeat) — a double-click always
       // repeats the MOST RECENT distance, chainable like SketchUp's.
       this.lastCommittedDistance = distance
+      return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
+      return false
     }
   }
 

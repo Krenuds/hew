@@ -43,6 +43,8 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, 
 | Undo | `⌘Z` | `Ctrl+Z` |
 | Redo | `⇧⌘Z` | `Ctrl+Shift+Z` |
 | Select All | `⌘A` | `Ctrl+A` |
+| Select None | `⇧⌘A` | `Ctrl+Shift+A` |
+| Invert Selection | — | — |
 | Cut | `⌘X` | `Ctrl+X` |
 | Copy | `⌘C` | `Ctrl+C` |
 | Paste | `⌘V` | `Ctrl+V` |
@@ -67,14 +69,17 @@ These keys change what the *current tool operation* does. Each is covered in mor
 |---|---|
 | `Esc` | Cancel / step back the current gesture; or exit one editing-context level |
 | `Enter` | Commit the typed value |
-| Type a number/length | Exact value for the current gesture (no input box needed) |
-| `Shift` | Lock to the dominant axis (Line, Move, Tape Measure) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool, held) |
+| Type a number/length | Exact value for the current gesture (no input box needed) — also works right after a commit, redoing what you just made at the new value (every draw tool and Push/Pull, Offset, Move, Rotate, Scale) |
+| `Shift` | Lock to the dominant axis (Line, Move, Tape Measure) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool; can be pressed or released mid-drag, switching orbit and pan back and forth) |
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice, Tape Measure); `↓` clears |
-| `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) |
+| `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) · turn off inertia for a precise, 1:1 orbit or pan (Orbit/Pan tools and middle-button orbit); pressing it while the camera is still coasting stops it dead |
 | `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate toggles between moving/rotating and copying (stays on until tapped again) |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |
-| `Shift`-click | Add to / remove from the selection (Select tool) |
+| `Shift`-click | Toggle each clicked object in the selection (Select tool); same for a Shift-drag marquee |
+| `⌘`/`Option`-click (Mac) · `Ctrl`/`Alt`-click (Windows, Linux) | Add to the selection, never removing (Select tool); same for a marquee drag. On a Mac, `Ctrl`-click is a right-click, so use `⌘` or `Option` there |
+| `Shift` + `⌘`/`Option`-click (Mac) · `Shift` + `Ctrl`/`Alt`-click (Windows, Linux) | Subtract from the selection, never adding (Select tool); same for a marquee drag |
+| Triple-click | Select a line's whole connected shape (Select tool) |
 | `⌘`/`Ctrl`-click | Paint the whole object instead of one face (Paint tool) |
 | Double-click | Enter a group/component/object's editing context; end a Line chain |
 | `Delete` / `Backspace` | Delete the selection (any tool) |
@@ -83,6 +88,6 @@ These keys change what the *current tool operation* does. Each is covered in mor
 
 | Action | Input |
 |---|---|
-| Orbit | Middle-button drag |
+| Orbit | Middle-button drag (hold `⌘`/`Ctrl` to turn off inertia for a precise orbit) |
 | Pan | Right-button drag |
 | Zoom (to cursor) | Scroll wheel |

@@ -4,8 +4,10 @@
  * Gesture (SketchUp's preselect-the-path idiom):
  *   1. Activate with the path already selected (sketch edges, a drawn
  *      curve, or a whole island) → the tool starts at "click the profile".
- *      A single selected edge expands to its whole connected island, the
- *      same pickup a path click gives.
+ *      The selection is the path, exactly as picked: one selected segment
+ *      of a polyline sweeps that segment alone (triple-click a segment with
+ *      the Select tool to take its whole connected run — SketchUp's
+ *      "select all connected"); a drawn curve or a whole island stays whole.
  *   2. Or pick the path with the tool itself: clicking a sketch edge takes
  *      that edge's whole connected island as the path; clicking a solid
  *      face means "run around this face's boundary" (molding). While the
@@ -1273,25 +1275,23 @@ export class FollowMeTool implements Tool {
    * Anything else (objects, groups…) yields no preselected path — the tool
    * starts at pick-path instead. Stale handles resolve to nothing.
    *
-   * A selection of exactly ONE edge expands to its whole connected island —
-   * the same one-click pickup the in-tool path click gives (the guide's
-   * "clicking one line picks up the whole connected shape"); a Select click
-   * on a line yields a single sketch-edge ref, and without this expansion
-   * the preselect flow swept just that segment. An explicit multi-edge
-   * selection is honored as picked (a deliberate partial path).
+   * The selection is honored exactly as picked — a single selected edge
+   * sweeps that one segment, however long the polyline it belongs to. This
+   * used to expand a sole edge to its whole connected island, which made a
+   * deliberate one-segment path unreachable from a preselection; the
+   * whole-run intent now has its own gesture (triple-click with the Select
+   * tool selects the island), and the in-tool path click keeps its island
+   * pickup for discoverability. Curves (an arc's facets) and islands still
+   * contribute all their edges — those ARE the unit the user selected.
    */
   private _pathFromSelection(selection: readonly NodeRef[]): PathTarget | null {
     let sketchHandle: bigint | null = null
     const edges = new Set<bigint>()
-    let sketchRefs = 0
-    let soleEdgeRef: NodeRef | null = null
     for (const ref of selection) {
       if (ref.sketch === undefined) continue
       if (ref.kind !== 'sketch-edge' && ref.kind !== 'sketch-curve' && ref.kind !== 'sketch-island') {
         continue
       }
-      sketchRefs += 1
-      soleEdgeRef = sketchRefs === 1 && ref.kind === 'sketch-edge' ? ref : null
       if (sketchHandle === null) sketchHandle = ref.sketch
       else if (sketchHandle !== ref.sketch) return null // spans two sketches
       try {
@@ -1307,16 +1307,6 @@ export class FollowMeTool implements Tool {
       }
     }
     if (sketchHandle === null || edges.size === 0) return null
-    if (soleEdgeRef !== null) {
-      try {
-        const island = this.wasmScene.sketch_edge_island(sketchHandle, soleEdgeRef.id)
-        if (island !== undefined) {
-          for (const e of this.wasmScene.sketch_island_edges(sketchHandle, island)) edges.add(e)
-        }
-      } catch {
-        // stale mid-query — fall back to the bare edge
-      }
-    }
     return { kind: 'edges', sketchHandle, edgeHandles: [...edges] }
   }
 

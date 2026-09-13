@@ -197,6 +197,8 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'undo', label: 'Undo', description: 'Undo the last change.', group: 'Actions' },
   { id: 'redo', label: 'Redo', description: 'Redo the last undone change.', group: 'Actions' },
   { id: 'edit-select-all', label: 'Select All', description: 'Select every visible object, group, component, and sketch.', group: 'Actions', synonyms: ['select everything'] },
+  { id: 'edit-select-none', label: 'Select None', description: 'Deselect everything.', group: 'Actions', synonyms: ['deselect all', 'clear selection'] },
+  { id: 'edit-invert-selection', label: 'Invert Selection', description: 'Select everything that is not selected, and deselect what is.', group: 'Actions', synonyms: ['inverse selection', 'swap selection'] },
   { id: 'edit-cut', label: 'Cut', description: 'Copy the selection to the clipboard, then delete it.', group: 'Actions', gate: 'hasStructuralSelection' },
   { id: 'edit-copy', label: 'Copy', description: 'Copy the selected objects, groups, and components to the clipboard.', group: 'Actions', gate: 'hasStructuralSelection' },
   { id: 'edit-paste', label: 'Paste', description: 'Place a copy of the clipboard at the cursor.', group: 'Actions', gate: 'clipboardHasContent' },

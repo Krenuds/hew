@@ -16,6 +16,8 @@ Push/Pull (`P`) is the tool that moves your model between 2D and 3D. It does thr
 
 Press `Esc` at any point to cancel. Committing with no real distance is refused ("Move more before committing push/pull").
 
+Type a distance right after that click commits, too: the push/pull you just made redoes at the new distance — a positive number keeps the direction you just pushed or pulled, a negative one flips it — as many times as you like, until you click another face, press `Esc`, or switch tools. A double-click repeats the last distance in one step. One `Undo` afterward removes the whole push/pull, no matter how many times you retyped it.
+
 While dragging, you can rest the cursor on any precise snap point in the scene (an endpoint, midpoint, edge, guide, or guide crossing) and the extrusion depth borrows that point's height. That's how you pull one box exactly up to the level of another.
 
 ![A sketch region extruded into a box](/docs/first-box.webp)
