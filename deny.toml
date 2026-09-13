@@ -90,6 +90,9 @@ allow = [
     "Unlicense",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # clipboard-win and error-code, reached through the Tauri clipboard
+    # plugin on Windows.
+    "BSL-1.0",
     # File-level copyleft: fine to link, and we do not modify these crates.
     # Reaches the tree through minidom (vendored) and the CSS parsers Tauri's
     # webview stack pulls in.
