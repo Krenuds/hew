@@ -330,6 +330,28 @@
       },
       "seconds": 31.7,
       "theme": "dark"
+    },
+    "drawing-planes": {
+      "webm": {
+        "key": "docs/drawing-planes-d3f61dd325.webm",
+        "url": "https://media.hew3d.com/docs/drawing-planes-d3f61dd325.webm",
+        "bytes": 4076767,
+        "sha256": "d3f61dd3250f93248f3da89b812fe332b3a42d6f4294d298cd32d24504794d0e"
+      },
+      "mp4": {
+        "key": "docs/drawing-planes-004218da24.mp4",
+        "url": "https://media.hew3d.com/docs/drawing-planes-004218da24.mp4",
+        "bytes": 6552020,
+        "sha256": "004218da2425a43967ff11cca52410d968d2c200da1407c68eef54dc6e981f5f"
+      },
+      "poster": {
+        "key": "docs/drawing-planes-a970d36362.jpg",
+        "url": "https://media.hew3d.com/docs/drawing-planes-a970d36362.jpg",
+        "bytes": 150363,
+        "sha256": "a970d36362ae19ea5bfb88feba93018921b8ba5582e2599f6460acf225073fa2"
+      },
+      "seconds": 62.6,
+      "theme": "dark"
     }
   },
   "reel": {
