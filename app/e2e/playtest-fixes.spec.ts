@@ -80,6 +80,15 @@ async function clickWorld(page: Page, ctx: Ctx, x: number, y: number, z: number)
   await page.mouse.up()
 }
 
+/** Tap Move's durable copy toggle. The modifier is platform-specific
+ * (`platform.ts`'s `COPY_MODIFIER_KEY`): Option on macOS, a Control clean
+ * tap everywhere else — so read the platform of the browser actually
+ * running the spec instead of assuming Alt. */
+async function tapCopyModifier(page: Page): Promise<void> {
+  const mac = await page.evaluate(() => /Mac|iPod|iPhone|iPad/.test(navigator.platform))
+  await page.keyboard.press(mac ? 'Alt' : 'Control')
+}
+
 /** Move the pointer to a world point via two moves (defeats event
  *  coalescing on a fresh position) plus a short settle — for hover-only
  *  steps that don't need to wait on a specific inference chip (see
@@ -318,13 +327,13 @@ test('Move+Alt on a drawn circle copies it 8 cm along X: two true circles, one u
   await clickWorld(page, ctx, rim[0], rim[1], rim[2])
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
 
-  // Move tool: base at the rim, tap Alt (durable copy), lock X, type the
+  // Move tool: base at the rim, tap the copy modifier (durable copy), lock X, type the
   // exact 8 cm, Enter. (8 cm < the 20 cm diameter, so the copy OVERLAPS its
   // source — the replay goes through the ordinary sticky rules, which split
   // both circles at the crossings; both stay true curve chains.)
   await page.keyboard.press('m')
   await clickWorld(page, ctx, rim[0], rim[1], rim[2])
-  await page.keyboard.press('Alt')
+  await tapCopyModifier(page)
   await expect(page.getByText(/Copy ·/)).toBeVisible()
   await page.keyboard.press('ArrowRight')
   // Cursor to the +X side to give the typed distance its sign. The exact
@@ -428,12 +437,12 @@ test('Move+Alt copies a drawn circle UP the Z axis: a second sketch on the lifte
   await clickWorld(page, ctx, rim[0], rim[1], rim[2])
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
 
-  // Move tool: base at the rim, tap Alt (durable copy), lock Z (ArrowUp),
+  // Move tool: base at the rim, tap the copy modifier (durable copy), lock Z (ArrowUp),
   // type an exact 50 cm height, Enter. Out-of-plane, so the copy detaches
   // onto its OWN new sketch on the lifted plane — the source is untouched.
   await page.keyboard.press('m')
   await clickWorld(page, ctx, rim[0], rim[1], rim[2])
-  await page.keyboard.press('Alt')
+  await tapCopyModifier(page)
   await expect(page.getByText(/Copy ·/)).toBeVisible()
   await page.keyboard.press('ArrowUp')
   // Nudge the cursor toward the +Z projection so the typed height takes the
@@ -547,7 +556,7 @@ test('Move+Alt copies a donut (region + hole) up the Z axis onto ONE new sketch,
 
   await page.keyboard.press('m')
   await clickWorld(page, ctx, 0, 0, 0)
-  await page.keyboard.press('Alt')
+  await tapCopyModifier(page)
   await expect(page.getByText(/Copy ·/)).toBeVisible()
   await page.keyboard.press('ArrowUp')
   await page.keyboard.type('0.5')
