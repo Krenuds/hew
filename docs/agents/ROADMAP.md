@@ -27,7 +27,18 @@ below.
   (drawing onto it extends it directly), or — with a draw tool idle — an
   arrow-key lock to a world-axis plane through the next click (Right/Left/Up
   = red/green/blue, same key mapping and color semantics as the transform
-  tools' axis locks). Mixed-tool profiles close into regions in one shared
+  tools' axis locks), or a Shift pin of the plane under the cursor (a
+  hovered face's plane, a sketch's, or the ground) that holds the cursor
+  to that plane wherever it goes until Shift or Escape releases it.
+  Starting a shape on a solid's edge or corner draws on the face that
+  edge belongs to — the most camera-facing one when two share it — never
+  on the ground beneath; in face mode the shape's later points honour the
+  snap the inference chip names (an endpoint IS the corner, not the ray's
+  own plane hit a pixel off it). A Line chain on a face commits one cut per
+  edge-to-edge stretch (a chain touching the boundary partway is not
+  refused whole), a chain of interior points closing on its start imprints
+  a sub-face, and placed-but-uncommitted face segments are drawn as the
+  chain grows. Mixed-tool profiles close into regions in one shared
   sketch PER plane (ground drawing keeps its own single shared ground
   sketch, generalized rather than replaced); arcs optionally close as a pie
   or a chord segment (Alt cycles); polygon side count is typed (`Ns`) and
@@ -84,7 +95,17 @@ below.
   island — selected, deleted, and transformed (moved, rotated, scaled;
   out-of-plane rotations included, detaching the shape into its own
   sketch when it shares one) without touching anything else
-- Push/pull to extrude a closed profile into a solid, with a live preview;
+- Push/pull to extrude a closed profile into a solid, with a live preview
+  that borrows its depth only from references OFF the face's own plane (a
+  face's own edges and the drawing axes are never a depth), and picks a
+  drawn region standing in front of a solid's face over the face behind it.
+  A sub-face whose corners are the solid's own corners (a face split corner
+  to corner, a triangle drawn from a box's corners) pushes in like any
+  other: the wall built along the cut lands its side edges along the
+  solid's existing edges instead of spiking the neighbouring face, and the
+  through-cut detection recognises such a face's footprint (its vertices
+  all lie on the far wall's outline) so a full-depth push carves the prism
+  out rather than refusing as "would remove the whole object";
   the outline becomes the solid's base face and leaves the sketch.
   Re-extruding occupied ground is allowed — Hew's solids interpenetrate
   freely, so a region over a standing solid extrudes into a coincident
@@ -276,7 +297,14 @@ below.
 ### Inference & precision
 
 - Snapping to endpoints, midpoints, edges, faces, and locked axes, with
-  on-screen cues for every snap
+  on-screen cues for every snap. Where a drawing axis — or the soft axis
+  through a gesture's anchor — crosses an edge, the crossing itself snaps
+  (an intersection carrying the edge and the axis), so dragging along an
+  axis reaches the far edge of a face instead of sliding past it on the
+  axis line. Candidates within a pixel of each other on screen rank by
+  depth, nearest first, so a stack of corners seen from a nearly-vertical
+  Top view — top plate, sole plate, slab — resolves to the one in front
+  rather than to whichever the camera's slight tilt happens to lean toward
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range

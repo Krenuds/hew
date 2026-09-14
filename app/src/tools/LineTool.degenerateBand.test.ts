@@ -229,7 +229,7 @@ describe('LineTool — the degenerate-segment gate sits exactly on the kernel PO
 
 describe('LineTool — face mode shares the same kernel-line gate', () => {
   function makeFaceWasmScene() {
-    const pick = { object: () => 7n, face: () => 3n, instance: () => undefined, free: vi.fn() }
+    const pick = { object: () => 7n, face: () => 3n, depth: () => 1, instance: () => undefined, free: vi.fn() }
     const scene = {
       axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
       history_generation: vi.fn(() => 1n),

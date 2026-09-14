@@ -37,6 +37,7 @@ function makePick(object: bigint, face: bigint, instance?: bigint) {
     object: () => object,
     face: () => face,
     instance: () => instance,
+    depth: () => 1,
     free: vi.fn(),
   }
 }
@@ -68,6 +69,12 @@ function makeWasmScene(opts: {
       sketchCounter += 1n
       return sketchCounter
     }),
+    begin_sketch_on_plane: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    // Every picked object is plain/ungrouped by default (top-level eligibility).
+    node_parent: vi.fn(() => undefined),
     // Every non-stale sketch lies on the ground plane (origin point, +Z).
     sketch_plane: vi.fn((sketch: bigint) =>
       (opts.staleSketchHandles ?? []).includes(sketch)
@@ -887,5 +894,137 @@ describe('ArcTool — retype the bulge after the third click', () => {
     typeIn(tool, '0')
     expect(scene.scene_undo).not.toHaveBeenCalled()
     expect(onMeasurement).toHaveBeenLastCalledWith(expect.stringContaining('bulge'))
+  })
+})
+
+// Boundary-click fix: a click on an object's edge/vertex misses `pick_face`
+// outright (strict polygon test at the boundary) — `_facePickAt` falls back
+// to the ranked boundary pick (`FacePickCache.faceThrough`) instead of
+// silently sending the whole gesture to the ground plane.
+describe('ArcTool — boundary clicks (FacePickCache.faceThrough)', () => {
+  function makeBoundaryScene(pick: ReturnType<typeof makePick>) {
+    const made = makeWasmScene({ faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    ;(made.scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation(
+      (_ox: number, _oy: number, _oz: number, dx: number, dy: number, dz: number) =>
+        dx === 0 && dy === 0 && dz === -1 ? undefined : pick,
+    )
+    return made
+  }
+
+  it('a click on a midpoint snap (pick_face misses the exact ray) still anchors FACE mode, not the ground', () => {
+    const { scene, segments, splitPaths } = makeBoundaryScene(makePick(7n, 3n))
+    const { tool, onFaceImprint, onCommit } = makeTool(scene)
+
+    const boundarySnap = makeSnap({ x: 0.5, y: 2, z: 1, kind: 'midpoint', object: 7n, element: 5n, elementKind: 'edge' })
+    tool.onPointerDown(boundarySnap, RAY) // A, exactly on the boundary
+    expect(tool.capturingInput()).toBe(true) // anchored — not silently dropped
+
+    tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), { origin: [1.5, 2, 5], direction: [0, 0, -1] }) // B
+    tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), { origin: [1, 1.6, 5], direction: [0, 0, -1] }) // bulge → commit
+
+    expect(splitPaths.length).toBe(1) // the FACE split path
+    expect(segments.length).toBe(0) // never fell through to a ground/plane sketch
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+})
+
+// Snapped face cursor fix: face mode used to project the ray onto the face
+// plane unconditionally, ignoring whatever the snap chip claimed.
+// `_faceCursor` now honours an on-plane snap exactly (this was ALREADY
+// ArcTool's behaviour for a bare snap — the fix adds the on-plane guard so
+// an off-plane snap still falls back to the ray, like the other draw tools).
+describe('ArcTool — snapped face cursor (honours the chip, not ray∩plane)', () => {
+  it('the chord endpoint B lands on the snap, not the sub-millimeter-off ray∩plane point', () => {
+    const pick = makePick(7n, 3n)
+    const { scene, splitPaths } = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'object', id: 7n })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1 }), RAY) // A
+    // The chord endpoint's snap sits exactly at (4,0,1); the ray it
+    // travelled along would land 5mm further out on the SAME plane — a
+    // deliberately different point the fix must NOT use.
+    tool.onPointerDown(
+      makeSnap({ x: 4, y: 0, z: 1, kind: 'endpoint' }),
+      { origin: [4.005, 0, 5], direction: [0, 0, -1] },
+    ) // B
+    tool.onPointerDown(makeSnap({ x: 2, y: 1, z: 1 }), { origin: [2, 1, 5], direction: [0, 0, -1] }) // bulge → commit
+
+    expect(splitPaths.length).toBe(1)
+    const path = splitPaths[0]
+    const n = path.length / 3
+    // `arcPolylineOnPlane` always ends the chain on the EXACT chord endpoint
+    // it was built with, so the committed path's last vertex reflects
+    // exactly what `_faceCursor` resolved B to.
+    expect(path[(n - 1) * 3 + 0]).toBeCloseTo(4, 6)
+    expect(path[(n - 1) * 3 + 1]).toBeCloseTo(0, 6)
+  })
+})
+
+// Shift-pinned drawing plane (GitHub issue 14 / planePin.ts): pressing Shift
+// while hovering a face pins that face's plane for the next gesture, even
+// once the cursor leaves the face entirely.
+describe('ArcTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
+  it('pins the hovered face plane; a later click over empty space anchors plane mode on it', () => {
+    const pick = makePick(7n, 3n)
+    // Face at z=1, normal +Z — a genuinely non-ground plane. `pick_face`
+    // hits only under the original hover ray, so the later clicks are
+    // genuinely over empty space, not merely ignored by the mode dispatch.
+    const { scene, segments } = makeWasmScene({ faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation(
+      (ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) =>
+        ox === 0 && oy === 0 && oz === 5 && dx === 0 && dy === 0 && dz === -1 ? pick : undefined,
+    )
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    const emptyRay: Ray = { origin: [10, 10, 5], direction: [0, 0, -1] }
+    expect(tool.snapConstraint(emptyRay)?.constraintPlane).toEqual({ point: [0, 0, 1], normal: [0, 0, 1] })
+
+    // A, B, bulge — all over empty space, all on the pinned plane.
+    tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 1 }), emptyRay) // A
+    tool.onPointerDown(makeSnap({ x: 13, y: 10, z: 1 }), { origin: [13, 10, 5], direction: [0, 0, -1] }) // B
+    tool.onPointerDown(makeSnap({ x: 11.5, y: 11, z: 1 }), { origin: [11.5, 11, 5], direction: [0, 0, -1] }) // bulge
+
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // z=1 is not the ground plane
+    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
+    expect(segments.length).toBeGreaterThan(0) // a real plane-mode chain committed
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a second Shift press releases the pin; autorepeat (Shift held) does not toggle twice', () => {
+    const pick = makePick(7n, 3n)
+    const { scene } = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    tool.setShiftHeld(true)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    tool.setShiftHeld(false)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).not.toContain('Pinned')
+  })
+
+  it('Escape while idle clears the pin', () => {
+    const pick = makePick(7n, 3n)
+    const { scene } = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    tool.onKey(makeKeyEvent('Escape'))
+    expect(tool.statusHint()).not.toContain('Pinned')
+    expect(tool.hasArmedGesture()).toBe(false)
   })
 })

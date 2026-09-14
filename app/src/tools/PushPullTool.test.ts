@@ -18,21 +18,25 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
   return { x: 0, y: 0, z: 0, kind: 'ground', ...overrides }
 }
 
-/** A fake `FacePickJs` returning the seeded handles. */
-function makeFacePick(object: bigint, face: bigint, instance?: bigint) {
+/** A fake `FacePickJs` returning the seeded handles, `depth` metres along
+ *  the (unit) ray — 1 unless a test is about depth ordering. */
+function makeFacePick(object: bigint, face: bigint, instance?: bigint, depth = 1) {
   return {
     object: () => object,
     face: () => face,
+    depth: () => depth,
     instance: () => instance,
     free: vi.fn(),
   }
 }
 
-/** A fake `SketchRegionPickJs` returning the seeded handles. */
-function makeRegionPick(sketch: bigint, region: bigint) {
+/** A fake `SketchRegionPickJs` returning the seeded handles, `depth` in ray
+ *  parameter units (RAY's direction is unit, so metres too). */
+function makeRegionPick(sketch: bigint, region: bigint, depth = 1) {
   return {
     sketch: () => sketch,
     region: () => region,
+    depth: () => depth,
     free: vi.fn(),
   }
 }
@@ -176,7 +180,9 @@ describe('PushPullTool — Path A (object face)', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2 }), RAY)
 
     expect(tool.capturingInput()).toBe(false)      // no drag ever started
-    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    // (The region pick now runs alongside the face pick so a region IN
+    // FRONT of a face can win — GitHub issue 13 — but a region BEHIND the
+    // ineligible face still never extrudes.)
     expect(scene.extrude_region).not.toHaveBeenCalled()
     expect(scene.push_pull).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(2)       // one explicable refusal per click
@@ -300,7 +306,7 @@ describe('PushPullTool — Path B (sketch region, any live sketch)', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
     // The spurious "drag": a hard snap a sub-picometer BELOW the anchor, so the
     // tool reads a distance of -1e-15 — exactly the noise the bug amplified.
-    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: -1e-15, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: -1e-15, kind: 'endpoint' }), RAY)
     tool.onKey({ key: '1' } as KeyboardEvent)
     tool.onKey({ key: 'Enter' } as KeyboardEvent)
 
@@ -318,7 +324,7 @@ describe('PushPullTool — Path B (sketch region, any live sketch)', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
     // A genuine inward pull (half a meter below the anchor) is well past the
     // noise threshold and must still invert the typed magnitude.
-    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: -0.5, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: -0.5, kind: 'endpoint' }), RAY)
     tool.onKey({ key: '1' } as KeyboardEvent)
     tool.onKey({ key: 'Enter' } as KeyboardEvent)
 
@@ -439,7 +445,7 @@ describe('PushPullTool — typed sign precedence (face targets)', () => {
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
     // Half a metre inward along +Z — well past MIN_INWARD_DRAG_M.
-    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: -0.5, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: -0.5, kind: 'endpoint' }), RAY)
     typeAndCommit(tool, '0.5')
 
     expect(pushPullDistance(scene)).toBeLessThan(0)
@@ -451,7 +457,7 @@ describe('PushPullTool — typed sign precedence (face targets)', () => {
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
     // The cursor is dragging OUTWARD (+Z), yet the explicit typed `-` must win.
-    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0.5, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0.5, kind: 'endpoint' }), RAY)
     typeAndCommit(tool, '-0.5')
 
     expect(pushPullDistance(scene)).toBeLessThan(0)
@@ -604,7 +610,7 @@ describe('PushPullTool — in-instance ghost preview matches the plain-object sw
     tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
 
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
-    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'endpoint' }), RAY)
 
     // A plain LineSegments arrow+cross is what the old bug drew; the fix
     // draws the same swept-prism Mesh a plain-object drag gets.
@@ -631,7 +637,7 @@ describe('PushPullTool — in-instance ghost preview matches the plain-object sw
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
 
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
-    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'endpoint' }), RAY)
 
     expect(preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(false)
     const extent = prismXExtent(preview)
@@ -654,7 +660,7 @@ describe('PushPullTool — in-instance ghost preview matches the plain-object sw
 
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
     expect(tool.capturingInput()).toBe(true)
-    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'endpoint' }), RAY)
 
     // No prism (no pose left to map through) — the arrow fallback, same as a
     // stale handle does for a plain object.
@@ -668,7 +674,7 @@ describe('PushPullTool — in-instance ghost preview matches the plain-object sw
     const { tool, preview } = makeTool(scene)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
-    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-axis' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint' }), RAY)
 
     expect(preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(false)
     const extent = prismXExtent(preview)
@@ -956,9 +962,9 @@ describe('PushPullTool — snapConstraint (design v1.1 Lane E "Push/Pull face-fi
     const { tool } = makeTool(scene)
 
     expect(tool.snapConstraint?.(RAY)).toBeNull()
-    // Path B's own picks were never even attempted — the fail-closed check
-    // short-circuits before it.
-    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    // The region IS picked (its depth decides whether it is in front of
+    // the face — GitHub issue 13), but behind an ineligible face it never
+    // becomes the constraint.
   })
 
   it('once a drag has anchored, the constraint is null — HARD_SNAP_KINDS keep working unconstrained ("pull to that edge")', () => {
@@ -1119,5 +1125,128 @@ describe('PushPullTool — retype after extruding a sketch REGION re-picks the r
     // The pick was dropped onto the plane at the click point, along −normal.
     const pickCall = (scene.pick_sketch_region as ReturnType<typeof vi.fn>).mock.calls.at(-1)!
     expect(pickCall[5]).toBeCloseTo(-1, 9)
+  })
+})
+
+describe('PushPullTool — hard snaps that are not a depth (inference-permissiveness fixes)', () => {
+  /** Arm a drag on a +Z face at the origin and return the tool + the live
+   *  distance readout spy. */
+  function armDrag() {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const made = makeTool(scene)
+    made.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    return { scene, ...made }
+  }
+  /** The distance the ghost preview is currently at, read back through the
+   *  second click's commit argument. */
+  function commitAt(tool: PushPullTool, scene: WasmScene, snap: Snap | null, ray: Ray): number {
+    tool.onPointerDown(snap, ray)
+    const call = (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls.at(-1)!
+    return call[2] as number
+  }
+  /** A ray whose closest approach to the +Z axis through the origin is at
+   *  height `z` — the free-drag depth the cursor alone would give. */
+  function freeDragRay(z: number): Ray {
+    return { origin: [5, 0, z], direction: [-1, 0, 0] }
+  }
+
+  it('a snap ON the face\'s own plane (its edge, an edge midpoint) is ignored — the drag keeps following the cursor instead of dropping to 0', () => {
+    const { tool, scene } = armDrag()
+    // Cursor is 0.4 up the axis; the kernel meanwhile snapped the face's own
+    // boundary edge (z = 0) — the ground rectangle's edge under a pull.
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 0, z: 0, kind: 'on-edge' }), freeDragRay(0.4))
+    expect(commitAt(tool, scene, makeSnap({ x: 0.5, y: 0.5, z: 0, kind: 'midpoint' }), freeDragRay(0.4))).toBeCloseTo(0.4)
+  })
+
+  it('a drawing-axis snap is never a depth reference — crossing the blue axis mid-pull does not flip the preview below ground', () => {
+    const { tool, scene } = armDrag()
+    // The cursor ray passes over the +Z axis; the origin-relative on-axis
+    // candidate would sit BELOW the anchor (a fact about the eye, not the
+    // drag), and used to be honoured as a negative depth.
+    expect(commitAt(tool, scene, makeSnap({ x: 0, y: 0, z: -0.7, kind: 'on-axis' }), freeDragRay(0.6))).toBeCloseTo(0.6)
+  })
+
+  it('a real off-plane reference (an edge midpoint at height 0.5) still sets the depth exactly', () => {
+    const { tool, scene } = armDrag()
+    expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'midpoint' }), freeDragRay(0.9))).toBeCloseTo(0.5)
+  })
+
+  it('a guide line stays a depth reference (the user placed it on purpose)', () => {
+    const { tool, scene } = armDrag()
+    expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.75, kind: 'on-guide' }), freeDragRay(0.9))).toBeCloseTo(0.75)
+  })
+})
+
+describe('PushPullTool — a drawn region in front of an object face wins the pick (GitHub issue 13)', () => {
+  it('idle hover: a sketch region NEARER than the face on the same ray offers the region\'s plane, not the face\'s', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0), // the cube's top, behind
+      facePlane: [0, 0, 1, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 1.5), // the vertical rectangle, in front
+      sketchPlane: [0, -1, 0, 0, -1, 0],
+    })
+    const { tool } = makeTool(scene)
+    expect(tool.snapConstraint?.(RAY)).toEqual({
+      constraintPlane: { point: [0, -1, 0], normal: [0, -1, 0] },
+      facesOnly: true,
+    })
+  })
+
+  it('click: the nearer region extrudes (extrude_region), the face behind it is left alone', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      regionPick: makeRegionPick(99n, 7n, 1.5),
+      sketchPlane: [0, -1, 0, 0, -1, 0],
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: -1, z: 1.1, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: -1.4, z: 1.1, kind: 'endpoint' }), RAY)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    expect((scene.extrude_region as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(99n)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a region BEHIND the face (or coplanar with it) still yields to the face — Path A precedence is unchanged there', () => {
+    for (const regionDepth of [2.5, 2.0]) {
+      const scene = makeWasmScene({
+        facePick: makeFacePick(3n, 4n, undefined, 2.0),
+        facePlane: [1, 2, 3, 0, 0, 1],
+        regionPick: makeRegionPick(99n, 7n, regionDepth),
+      })
+      const { tool } = makeTool(scene)
+      expect(tool.snapConstraint?.(RAY)?.constraintPlane).toEqual({ point: [1, 2, 3], normal: [0, 0, 1] })
+      tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+      tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+      expect(scene.push_pull).toHaveBeenCalledTimes(1)
+      expect(scene.extrude_region).not.toHaveBeenCalled()
+    }
+  })
+
+  it('a region in front of an INELIGIBLE (grouped) face wins too — the fail-closed rule only guards regions behind the face', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      parents: new Map([[3n, 9n]]),
+      regionPick: makeRegionPick(99n, 7n, 1.0),
+    })
+    const { tool, onToast } = makeTool(scene)
+    expect(tool.snapConstraint?.(RAY)).not.toBeNull()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint' }), RAY)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('the region depth is compared in metres even when the pick ray is not unit length', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      // Region at ray parameter 1.5 along a length-2 direction = 3 m: BEHIND
+      // the face at 2 m, so the face must still win.
+      regionPick: makeRegionPick(99n, 7n, 1.5),
+    })
+    const { tool } = makeTool(scene)
+    const longRay: Ray = { origin: [0, 0, 5], direction: [0, 0, -2] }
+    expect(tool.snapConstraint?.(longRay)?.constraintPlane).toEqual({ point: [1, 2, 3], normal: [0, 0, 1] })
   })
 })

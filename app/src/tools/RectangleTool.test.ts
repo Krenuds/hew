@@ -18,6 +18,7 @@ function makePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
+    depth: () => 1,
     instance: () => instance,
     free: vi.fn(),
   }
@@ -33,6 +34,10 @@ function makeWasmScene(opts: {
   return {
     history_generation: vi.fn(() => 1n),
     begin_ground_sketch: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    begin_sketch_on_plane: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
     }),
@@ -520,5 +525,159 @@ describe('RectangleTool — retype dimensions after the second click', () => {
     typeDims(tool, '2,2')
     expect(scene.scene_undo).toHaveBeenCalledTimes(1)
     expect(Math.max(...lastRectangle(scene).map((c) => c[0]))).toBeCloseTo(2, 9)
+  })
+})
+
+describe('RectangleTool — clicks on an edge or corner adopt the face through that point (inference-permissiveness fixes)', () => {
+  /** `pick_face` misses on the exact ray (strict at the boundary) but hits
+   *  face 3 of object 7 for any nudged direction — the boundary probe ring. */
+  function boundaryScene(opts: { facePlane?: [number, number, number, number, number, number] } = {}) {
+    const scene = makeWasmScene()
+    const plane = opts.facePlane ?? [0, 0, 1, 0, 0, 1]
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation(
+      (_ox: number, _oy: number, _oz: number, dx: number, dy: number, dz: number) =>
+        dx === 0 && dy === 0 && dz === -1 ? undefined : makePick(7n, 3n),
+    )
+    ;(scene.face_plane as ReturnType<typeof vi.fn>).mockImplementation(() => new Float64Array(plane))
+    ;(scene.face_normal as ReturnType<typeof vi.fn>).mockImplementation(() => new Float64Array(plane.slice(3)))
+    return scene
+  }
+
+  it('a first click on an edge midpoint (the ray itself misses every face) anchors FACE mode on the neighbouring face, not the ground', () => {
+    const scene = boundaryScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(
+      makeSnap({ x: 0.5, y: 0, z: 1, kind: 'midpoint', object: 7n, element: 11n, elementKind: 'edge' }),
+      rayThrough(0.5, 0),
+    )
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1, kind: 'endpoint', object: 7n, element: 2n, elementKind: 'vertex' }), rayThrough(1, 1))
+    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+  })
+
+  it('a probed neighbour whose plane does NOT hold the snapped point is rejected (falls through to plane mode)', () => {
+    const scene = boundaryScene({ facePlane: [0, 0, 5, 0, 0, 1] }) // a face at z = 5, not through the snap
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(
+      makeSnap({ x: 0.5, y: 0, z: 0, kind: 'midpoint', object: 7n, element: 11n, elementKind: 'edge' }),
+      rayThrough(0.5, 0),
+    )
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), rayThrough(1, 1))
+    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+  })
+
+  it('a non-boundary snap over a miss stays in plane mode — the ring probe only runs for object vertices/edges', () => {
+    const scene = boundaryScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0.5, y: 0, z: 0, kind: 'ground' }), rayThrough(0.5, 0))
+    expect(scene.pick_face).toHaveBeenCalledTimes(1)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), rayThrough(1, 1))
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+  })
+
+  it('Shift over an edge midpoint pins the FACE that edge belongs to, not the ground the plain pick fell through to', () => {
+    const scene = boundaryScene({ facePlane: [0, 0, 0, 0, 1, 0] }) // a vertical wall, plane y = 0
+    const { tool } = makeTool(scene)
+    const edgeRay = rayThrough(0.5, 0)
+    tool.snapConstraint(edgeRay)
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 0, z: 0.5, kind: 'midpoint', object: 7n, element: 11n, elementKind: 'edge' }), edgeRay)
+    tool.setShiftHeld(true); tool.setShiftHeld(false)
+    expect(tool.statusHint()).toMatch(/Pinned/)
+    expect(tool.snapConstraint(rayThrough(5, 5))?.constraintPlane).toEqual({ point: [0, 0, 0], normal: [0, 1, 0] })
+  })
+})
+
+describe('RectangleTool — face mode honours the snap (the chip and the rectangle agree)', () => {
+  it('the opposite corner lands on the snapped Endpoint exactly, not on the ray\'s own plane hit a few mm off', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), rayThrough(0, 0))
+    // The cursor ray pierces the plane at (1.004, 2.003) but the kernel
+    // snapped the corner at (1, 2) — the corner wins.
+    tool.onPointerDown(
+      makeSnap({ x: 1, y: 2, z: 1, kind: 'endpoint', object: 7n, element: 2n, elementKind: 'vertex' }),
+      rayThrough(1.004, 2.003),
+    )
+    const [, , loopPts] = (scene.split_face_inner as ReturnType<typeof vi.fn>).mock.calls[0]
+    const pts = Array.from(loopPts as Float64Array)
+    expect(pts.slice(6, 9)).toEqual([1, 2, 1]) // the far corner
+  })
+
+  it('with no snap the ray∩plane point is still used (past the face\'s extent)', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), rayThrough(0, 0))
+    tool.onPointerDown(null, rayThrough(1.5, 2.5))
+    const [, , loopPts] = (scene.split_face_inner as ReturnType<typeof vi.fn>).mock.calls[0]
+    const pts = Array.from(loopPts as Float64Array)
+    expect(pts[6]).toBeCloseTo(1.5)
+    expect(pts[7]).toBeCloseTo(2.5)
+    expect(pts[8]).toBeCloseTo(1)
+  })
+})
+
+describe('RectangleTool — Shift pins the hovered plane (GitHub issue 14)', () => {
+  it('Shift over a face pins its plane: hovers elsewhere are constrained to it and the first click anchors PLANE mode on it', () => {
+    const scene = makeWasmScene({ pick: () => undefined })
+    const faceRay = rayThrough(0, 0)
+    // Over the face: pick hits, plane at z=1. Everywhere else: nothing.
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementationOnce(() => makePick(7n, 3n))
+    const { tool } = makeTool(scene)
+    tool.snapConstraint(faceRay)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face', object: 7n, element: 3n, elementKind: 'face' }), faceRay)
+
+    tool.setShiftHeld(true)
+    tool.setShiftHeld(false)
+    expect(tool.statusHint()).toMatch(/Pinned/)
+    expect(tool.hasArmedGesture()).toBe(true)
+
+    // Off the face, over empty ground: still constrained to the face plane.
+    const groundRay = rayThrough(5, 5)
+    expect(tool.snapConstraint(groundRay)?.constraintPlane).toEqual({ point: [0, 0, 1], normal: [0, 0, 1] })
+
+    // The gesture lands on that plane as a sketch, not as a face imprint
+    // and not on the ground.
+    tool.onPointerDown(makeSnap({ x: 5, y: 5, z: 1, kind: 'plane' }), groundRay)
+    expect(tool.statusHint()).toMatch(/opposite corner/)
+    tool.onPointerDown(makeSnap({ x: 6, y: 7, z: 1, kind: 'plane' }), rayThrough(6, 7))
+    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+    const seg = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(seg.slice(1, 7)).toEqual([5, 5, 1, 6, 5, 1])
+
+    // The pin survives the completed gesture (like the arrow lock) …
+    expect(tool.statusHint()).toMatch(/Pinned/)
+    // … a second Shift press releases it; keydown autorepeat never toggles.
+    tool.setShiftHeld(true)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).not.toMatch(/Pinned/)
+    tool.setShiftHeld(false)
+    expect(tool.snapConstraint(groundRay)).toBeNull()
+  })
+
+  it('Escape while idle releases the pin; an arrow lock displaces it; Escape mid-gesture keeps it (like the arrow lock)', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    const faceRay = rayThrough(0, 0)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), faceRay)
+    tool.setShiftHeld(true); tool.setShiftHeld(false)
+    expect(tool.statusHint()).toMatch(/Pinned/)
+    // Mid-gesture Escape aborts the rectangle but keeps the pin.
+    tool.onPointerDown(makeSnap({ x: 5, y: 5, z: 1, kind: 'plane' }), rayThrough(5, 5))
+    expect(tool.statusHint()).toMatch(/opposite corner/)
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    expect(tool.statusHint()).toMatch(/Pinned/)
+    // Idle Escape releases it.
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    expect(tool.statusHint()).not.toMatch(/Pinned/)
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), faceRay)
+    tool.setShiftHeld(true); tool.setShiftHeld(false)
+    expect(tool.statusHint()).toMatch(/Pinned/)
+    tool.onKey({ key: 'ArrowUp' } as KeyboardEvent)
+    expect(tool.statusHint()).toMatch(/Locked to the blue plane/)
+    expect(tool.statusHint()).not.toMatch(/Pinned/)
   })
 })

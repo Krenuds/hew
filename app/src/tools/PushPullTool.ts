@@ -23,11 +23,18 @@ import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
-import { defaultFaceEligible, worldFaceNormal, FacePickCache, type FaceEligible } from './faceDraw'
+import { defaultFaceEligible, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
  * cursor was parked on a real feature. `on-face` is excluded on purpose: it
- * fires continuously during a drag and would hijack the free-drag depth. */
+ * fires continuously during a drag and would hijack the free-drag depth.
+ * `on-axis` is excluded too: the drag carries no anchor, so the only axis
+ * candidates are the drawing axes through the origin, and the point on one
+ * of those nearest the cursor ray is a fact about where the eye happens to
+ * sit, not a depth the user chose — pulling a ground rectangle up past the
+ * blue axis flipped the preview BELOW the ground the instant the cursor
+ * crossed the axis line, and crossing the red or green axis dropped it to
+ * zero. A guide line stays: the user placed it on purpose. */
 const HARD_SNAP_KINDS = new Set([
   'endpoint',
   'center',
@@ -37,8 +44,23 @@ const HARD_SNAP_KINDS = new Set([
   'intersection',
   'on-edge',
   'on-guide',
-  'on-axis',
 ])
+
+/** Metres of perpendicular depth below which a hard snap counts as lying ON
+ *  the plane of the face being pushed — the face's own boundary edges, the
+ *  midpoints of those edges, a neighbouring coplanar face's corner. Such a
+ *  point names the plane the face is already in, so "pull to it" means a
+ *  zero-length push/pull: never what a drag past it intends, and exactly
+ *  what made a steady pull up from a ground rectangle drop to 0 m every time
+ *  the cursor crossed one of the rectangle's own edges. The kernel's plane
+ *  tolerance scale (`GROUND_PLANE_EPS`), well below any drawn feature. */
+const COPLANAR_SNAP_EPS_M = 1e-9
+
+/** Ray depth (metres) a drawn sketch region must be NEARER than the object
+ *  face on the same ray to take the pick over it — a real "in front of" by
+ *  more than rounding, so a region drawn ON a face (coplanar with it) still
+ *  yields to the face it lies on. */
+const REGION_IN_FRONT_EPS_M = 1e-9
 
 /**
  * Minimum inward (negative) live-drag distance, in meters, that counts as a
@@ -51,6 +73,28 @@ const HARD_SNAP_KINDS = new Set([
  * `_commitFromTyped`).
  */
 const MIN_INWARD_DRAG_M = 1e-9
+
+/** A `pick_sketch_region` hit: the region handles plus its ray depth in
+ *  metres along the normalized ray (the scale `pick_face` reports in). */
+type RegionPick = { sketch: bigint; region: bigint; depth: number }
+
+/**
+ * Whether a picked sketch region sits IN FRONT of the object face picked on
+ * the same ray — nearer by more than `REGION_IN_FRONT_EPS_M`. A drawn region
+ * is opaque to the pick exactly as it is to snapping (the inference crate's
+ * occlusion cull already counts sketch faces): a vertical rectangle standing
+ * on a cube's top edge, seen with the cube's top face visible THROUGH it,
+ * must push/pull as the rectangle everywhere on its fill, not as the cube
+ * wherever the cube happens to lie behind (GitHub issue 13 — "On Face" on
+ * the part of the rectangle with nothing behind it, "On Plane" and the CUBE
+ * extruding on the rest). No face on the ray at all also counts as "in
+ * front"; no region never does.
+ */
+function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null): boolean {
+  if (region === null) return false
+  if (face === null) return true
+  return region.depth < face.depth - REGION_IN_FRONT_EPS_M
+}
 
 export type PushPullTarget =
   | {
@@ -297,25 +341,31 @@ export class PushPullTool implements Tool {
     // Path A: the same eligible-face pick `onPointerDown` would commit to.
     const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
       this._isEligible(object, instance))
-    if (eligible !== null) {
-      const a = this.wasmScene.face_plane(eligible.object, eligible.face)
-      return {
-        constraintPlane: { point: [a[0], a[1], a[2]], normal: [a[3], a[4], a[5]] },
-        facesOnly: true,
-      }
-    }
-    // A face WAS hit but rejected by eligibility — fail closed exactly like
-    // onPointerDown's ineligible branch (toast, click consumed): no
-    // constraint, never Path B's sketch-region fallback behind it.
-    if (this._pickCache.rawPickFor(ray) !== null) return null
-
-    // Path B: a hovered sketch region's own plane, exactly as `onPointerDown`
-    // scopes it — top-level (or the entered instance's own def-owned
-    // sketches) only, never inside an OBJECT editing context. Only reached
-    // when Path A found no face under the cursor at all.
-    if (this._activeContext !== null) return null
+    const raw = this._pickCache.rawPickFor(ray)
+    // Path B's region, picked up front so the two paths can be ordered by
+    // DEPTH (`regionInFrontOfFace`): a region nearer the eye than the face
+    // on the same ray is what the cursor is on, whatever lies behind it —
+    // eligible face or not. Scoped exactly as `onPointerDown` scopes it:
+    // top-level (or the entered instance's own def-owned sketches) only,
+    // never inside an OBJECT editing context.
     const activeInstance = this._activeInstance
-    const region = this._pickRegionFor(ray, activeInstance)
+    const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
+    if (!regionInFrontOfFace(region, raw)) {
+      if (eligible !== null) {
+        const a = this.wasmScene.face_plane(eligible.object, eligible.face)
+        return {
+          constraintPlane: { point: [a[0], a[1], a[2]], normal: [a[3], a[4], a[5]] },
+          facesOnly: true,
+        }
+      }
+      // A face WAS hit but rejected by eligibility — fail closed exactly
+      // like onPointerDown's ineligible branch (toast, click consumed): no
+      // constraint, never Path B's sketch-region fallback BEHIND it.
+      return null
+    }
+
+    // Path B: the hovered sketch region's own plane — in front of any face
+    // on the ray, or the only thing on it.
     if (region === null) return null
     const plane = this.wasmScene.sketch_plane(region.sketch)
     if (plane === undefined) return null // stale handle — no constraint
@@ -349,10 +399,10 @@ export class PushPullTool implements Tool {
   private _regionPickCache: {
     ray: Ray
     instance: bigint | null
-    region: { sketch: bigint; region: bigint } | null
+    region: RegionPick | null
   } | null = null
 
-  private _pickRegionFor(ray: Ray, activeInstance: bigint | null): { sketch: bigint; region: bigint } | null {
+  private _pickRegionFor(ray: Ray, activeInstance: bigint | null): RegionPick | null {
     if (
       this._regionPickCache !== null &&
       this._regionPickCache.ray === ray &&
@@ -371,10 +421,18 @@ export class PushPullTool implements Tool {
             ray.origin[0], ray.origin[1], ray.origin[2],
             ray.direction[0], ray.direction[1], ray.direction[2],
           )
-    let region: { sketch: bigint; region: bigint } | null = null
+    let region: RegionPick | null = null
     if (regionPick !== undefined) {
       try {
-        region = { sketch: regionPick.sketch(), region: regionPick.region() }
+        // `pick_sketch_region`'s depth is the ray parameter for the RAW
+        // direction; `pick_face`'s is metres along the normalized ray.
+        // Bring the world region's onto the same scale so the two compare.
+        // The `_in_instance` sibling already answers in world metres (it
+        // multiplies its definition-local parameter by the world
+        // direction's length itself) — scaling it again would double-count
+        // any non-unit direction.
+        const dirLen = activeInstance !== null ? 1 : Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
+        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen }
       } finally {
         regionPick.free()
       }
@@ -420,7 +478,14 @@ export class PushPullTool implements Tool {
       const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
         this._isEligible(object, instance))
       const raw = this._pickCache.rawPickFor(ray)
-      if (raw !== null) {
+      // The region pick runs FIRST here too, so a drawn region nearer the
+      // eye than the face behind it takes the click (`regionInFrontOfFace`,
+      // GitHub issue 13) — Path A is skipped entirely in that case, exactly
+      // as `snapConstraint` skips it at hover time. The two must agree.
+      const activeInstance = this._activeInstance
+      const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
+      const regionWins = regionInFrontOfFace(region, raw)
+      if (raw !== null && !regionWins) {
         // Same face-eligibility policy as the draw tools (faceDraw.ts): at
         // the top level only PLAIN objects are directly push/pullable —
         // faces inside a group or component instance keep their explicit
@@ -461,9 +526,9 @@ export class PushPullTool implements Tool {
         }
       }
 
-      // --- Path B: no object face hit — try picking a sketch region ---
-      // Only reached when pick_face returns undefined (bare ground click, or
-      // no objects in scene yet). `pick_sketch_region` resolves the smallest
+      // --- Path B: a sketch region — in front of any face on the ray, or
+      //     the only thing on it (bare ground click, or no objects yet) ---
+      // `pick_sketch_region` resolves the smallest
       // containing region across ALL live sketches kernel-side (nested rings
       // resolve to the innermost — the app no longer has to walk sketch_regions
       // + region_boundary + point-in-polygon itself). `pick_sketch_region`
@@ -482,8 +547,6 @@ export class PushPullTool implements Tool {
       // just computed for this exact `ray` (mirrors Path A's `_pickCache`
       // reuse above), so this costs one `pick_sketch_region` per ray too.
       if (target === null && this._activeContext === null) {
-        const activeInstance = this._activeInstance
-        const region = this._pickRegionFor(ray, activeInstance)
         if (region !== null) {
           const sketchHandle = region.sketch
           const regionHandle = region.region
@@ -775,11 +838,14 @@ export class PushPullTool implements Tool {
     // the depth jump to whatever face got snapped (e.g. the far/bottom wall).
     // Free drag (and on-face) follows the cursor ray projected onto the axis.
     if (snap !== null && HARD_SNAP_KINDS.has(snap.kind)) {
-      return (
+      const depth =
         (snap.x - anchor[0]) * normal[0] +
         (snap.y - anchor[1]) * normal[1] +
         (snap.z - anchor[2]) * normal[2]
-      )
+      // A reference ON the face's own plane (its boundary edges, their
+      // midpoints — see `COPLANAR_SNAP_EPS_M`) is not a depth at all; the
+      // drag keeps following the cursor instead of collapsing to zero.
+      if (Math.abs(depth) > COPLANAR_SNAP_EPS_M) return depth
     }
     return projectRayOntoAxis(ray.origin, ray.direction, anchor, normal)
   }

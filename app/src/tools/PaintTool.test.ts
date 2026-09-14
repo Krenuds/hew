@@ -22,6 +22,7 @@ function makeFacePick(object: bigint, face: bigint) {
   return {
     object: () => object,
     face: () => face,
+    depth: () => 1,
     instance: () => undefined,
     free: vi.fn(),
   }
@@ -31,6 +32,7 @@ function makeFacePick(object: bigint, face: bigint) {
 function makeFaceMaterial(face: bigint, objectDefault: bigint) {
   return {
     face: () => face,
+    depth: () => 1,
     object_default: () => objectDefault,
     free: vi.fn(),
   }

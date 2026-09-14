@@ -2944,6 +2944,114 @@ fn soft_axis_snaps_through_the_anchor_within_tolerance() {
     assert!((snap.position.z - anchor.z).abs() <= tol::POINT_MERGE);
 }
 
+/// Axis × edge crossings: dragging along a soft axis from an anchor on one
+/// vertical edge of a face and hovering the OPPOSITE vertical edge resolves
+/// to the exact point where the axis line through the anchor crosses that
+/// edge — as an `Intersection` carrying the edge's provenance and the
+/// axis direction. Before this candidate existed, `OnAxis` (a rank group
+/// above `OnEdge`) won here and the edge was unreachable: the Line tool
+/// "visibly following the red axis" with "no snapping to the edge at all".
+#[test]
+fn soft_axis_crossing_an_edge_snaps_the_crossing_as_an_intersection() {
+    let scene = cube_scene();
+    // Anchor part-way up the cube's (0,0,z) edge; the +X soft axis through
+    // it crosses the (1,0,z) edge at (1, 0, 0.3).
+    let anchor = Point3::new(0.0, 0.0, 0.3);
+    let crossing = Point3::new(1.0, 0.0, 0.3);
+    // Aimed a hair off the crossing along the edge (still inside the pick
+    // cone), from a 3/4 view in front of the y=0 face.
+    let aim = Point3::new(1.0, 0.0, 0.31);
+    let ray = ray_at(Point3::new(2.0, -3.0, 1.5), aim);
+    let q = SnapQuery {
+        aperture_mode: ApertureMode::Cone,
+        weights: SnapWeights::default(),
+        ray,
+        anchor: Some(anchor),
+        lock: None,
+        aperture: NARROW,
+        constraint_plane: None,
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
+    };
+    let snap = scene.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(
+        snap.kind,
+        SnapKind::Intersection,
+        "the crossing beats both OnAxis and OnEdge"
+    );
+    assert!(
+        snap.position.approx_eq(crossing, tol::POINT_MERGE),
+        "{:?}",
+        snap.position
+    );
+    assert_eq!(
+        snap.direction,
+        Some(Vec3::new(1.0, 0.0, 0.0)),
+        "carries the axis for the cue"
+    );
+    let source = snap.source.expect("carries the crossed edge's provenance");
+    assert!(matches!(source.element, ElementRef::Edge(_)));
+}
+
+/// The same crossing without an anchor: a DRAWING axis through the origin
+/// crossing a drawn sketch edge snaps the crossing (sketch-edge provenance),
+/// not the axis line's ray-nearest point beside it.
+#[test]
+fn drawing_axis_crossing_a_sketch_edge_snaps_the_crossing() {
+    let mut scene = InferenceScene::new();
+    // A sketch segment crossing the +X axis at (3, 0, 0) — deliberately
+    // NOT at its own midpoint (3, 0.5, 0), which would outrank the crossing
+    // as the stronger kind and is the right answer when they coincide.
+    scene.add_sketch(
+        SketchId::default(),
+        &[(
+            SketchEdgeId::default(),
+            Point3::new(3.0, -1.0, 0.0),
+            Point3::new(3.0, 2.0, 0.0),
+        )],
+    );
+    let aim = Point3::new(3.0, 0.02, 0.0);
+    let ray = ray_at(Point3::new(3.5, -2.0, 3.0), aim);
+    let snap = resolve(&scene, query(ray, NARROW)).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection);
+    assert!(
+        snap.position
+            .approx_eq(Point3::new(3.0, 0.0, 0.0), tol::POINT_MERGE),
+        "{:?}",
+        snap.position
+    );
+    assert_eq!(snap.direction, Some(Vec3::new(1.0, 0.0, 0.0)));
+    assert!(
+        snap.sketch_source.is_some(),
+        "carries the crossed sketch edge"
+    );
+}
+
+/// A real vertex AT the crossing still wins (Endpoint outranks
+/// Intersection), so the new candidate never masks exact geometry.
+#[test]
+fn a_vertex_at_an_axis_crossing_still_wins() {
+    let scene = cube_scene();
+    // The +X soft axis through (0,0,1) crosses the (1,0,z) edge exactly at
+    // the (1,0,1) corner.
+    let anchor = Point3::new(0.0, 0.0, 1.0);
+    let corner = Point3::new(1.0, 0.0, 1.0);
+    let ray = ray_at(Point3::new(2.0, -3.0, 2.0), corner);
+    let q = SnapQuery {
+        aperture_mode: ApertureMode::Cone,
+        weights: SnapWeights::default(),
+        ray,
+        anchor: Some(anchor),
+        lock: None,
+        aperture: NARROW,
+        constraint_plane: None,
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
+    };
+    let snap = scene.resolve(&q).expect("the corner is dead-on");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+}
+
 /// Past the soft-axis tolerance, dragging "roughly" along an axis no longer
 /// snaps — with nothing else in the scene, resolve finds nothing at all.
 #[test]
@@ -4150,9 +4258,12 @@ fn locked_hover_on_the_anchor_still_takes_real_geometry_at_its_true_station() {
                 off_plane_points: false,
             })
             .expect("a lock with an anchor always resolves");
-        assert_eq!(
-            snap.kind,
-            SnapKind::OnEdge,
+        // The blue drawing axis through the origin IS the lock line here and
+        // crosses the edge at exactly this station, so the axis × edge
+        // crossing (an `Intersection`, a point kind) may name the same point
+        // — still the hovered edge, at its true station, never the anchor.
+        assert!(
+            matches!(snap.kind, SnapKind::OnEdge | SnapKind::Intersection),
             "side {side}: the hovered edge must win, got {:?} at {:?}",
             snap.kind,
             snap.position
@@ -4313,4 +4424,145 @@ fn an_unprojected_snap_has_no_projected_from() {
         ))
         .expect("the north midpoint is under the ray");
     assert_eq!(snap.projected_from, None);
+}
+
+fn boxed(min: Point3, max: Point3) -> Object {
+    Object::from_polygons(
+        &[
+            Point3::new(min.x, min.y, min.z),
+            Point3::new(max.x, min.y, min.z),
+            Point3::new(max.x, max.y, min.z),
+            Point3::new(min.x, max.y, min.z),
+            Point3::new(min.x, min.y, max.z),
+            Point3::new(max.x, min.y, max.z),
+            Point3::new(max.x, max.y, max.z),
+            Point3::new(min.x, max.y, max.z),
+        ],
+        &[
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+    )
+    .unwrap()
+}
+
+/// A framed wall's corner stack seen from a "Top" view that is — as every
+/// orbit-camera top view is — a hair off vertical: the wall-top corner, the
+/// slab's corners below it, all within a pixel of one another on screen
+/// but millimetres apart in the tilted ray's frame. The one in FRONT wins
+/// (`RANK_TIE_FRACTION` is a pixel wide, not a millionth of one), whichever
+/// way the tilt leans. Ray, aperture and geometry are the app's own from
+/// the plan-view Dimension repro (parallel projection, cylinder aperture).
+#[test]
+fn stacked_corner_in_a_slightly_tilted_top_view_prefers_the_nearest() {
+    let mut scene = InferenceScene::new();
+    // The slab (its corner a hair inside the wall's, as the model has it).
+    scene.add_object(
+        ObjectId::default(),
+        &boxed(
+            Point3::new(3.0e-11, -13.3985, -0.1016),
+            Point3::new(8.92175, -0.00635, 0.0),
+        ),
+        &Transform::IDENTITY,
+    );
+    let wall = ObjectId::from(slotmap::KeyData::from_ffi(2));
+    scene.add_object(
+        wall,
+        &boxed(
+            Point3::new(0.0, -13.3985, 0.0),
+            Point3::new(0.1905, 0.0, 2.4384),
+        ),
+        &Transform::IDENTITY,
+    );
+    // The app's ray: a pixel outside the corner, tilted 0.001 rad toward
+    // +y — so the deeper a stacked point, the nearer the ray passes it.
+    let ray = PickRay {
+        origin: Point3::new(-0.045, -13.481, 39.98),
+        direction: Vec3::new(0.0, 0.0009999995, -0.9999995),
+    };
+    let q = SnapQuery {
+        aperture_mode: ApertureMode::Cylinder,
+        weights: SnapWeights::default(),
+        ray,
+        anchor: None,
+        lock: None,
+        aperture: 0.36, // 8 px at 45 mm/px
+        constraint_plane: None,
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
+    };
+    let snap = scene.resolve(&q).expect("a corner is within reach");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(
+        (snap.position.z - 2.4384).abs() < 1e-9,
+        "the wall-top corner, not the slab's: {:?}",
+        snap.position
+    );
+}
+
+/// The rank tie is a pixel of the ACQUIRE aperture even under the app's
+/// widened hysteresis-release query (`soft_axis_aperture_scale` set to the
+/// widening ratio), so re-querying at a wider reach never reorders two
+/// candidates the normal query already admitted: a held snap the cursor is
+/// still nearest to keeps winning, and the release query answers only the
+/// question it was asked — is that target still within reach.
+#[test]
+fn a_widened_release_query_ranks_with_the_acquire_tie_band() {
+    let mut scene = InferenceScene::new();
+    // The ray runs straight down the blue axis; hide the axes so the frame
+    // origin's own Endpoint candidate is not the (trivial) winner.
+    scene.set_axes_enabled(false);
+    // Two endpoint-class points: P_near (0.021 off the ray, deep) and P_far
+    // (0.026 off the ray, nearer the eye). At an 0.08 cylinder aperture the
+    // one the cursor is nearest to wins — one-pixel buckets 2 vs 3.
+    scene.add_guide(
+        GuideId::default(),
+        &Guide::Point {
+            position: Point3::new(0.021, 0.0, 8.0),
+        },
+    );
+    scene.add_guide(
+        GuideId::from(slotmap::KeyData::from_ffi(2)),
+        &Guide::Point {
+            position: Point3::new(0.026, 0.0, 3.0),
+        },
+    );
+    let ray = PickRay {
+        origin: Point3::new(0.0, 0.0, 10.0),
+        direction: Vec3::new(0.0, 0.0, -1.0),
+    };
+    let base = SnapQuery {
+        aperture_mode: ApertureMode::Cylinder,
+        weights: SnapWeights::default(),
+        ray,
+        anchor: None,
+        lock: None,
+        aperture: 0.08,
+        constraint_plane: None,
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
+    };
+    let acquire = scene.resolve(&base).expect("both inside the aperture");
+    assert!(
+        (acquire.position.x - 0.021).abs() < 1e-12,
+        "{:?}",
+        acquire.position
+    );
+    // The release query: twice the aperture AND the widening ratio declared.
+    let release = scene
+        .resolve(&SnapQuery {
+            aperture: 0.16,
+            soft_axis_aperture_scale: Some(2.0),
+            ..base
+        })
+        .expect("both still inside");
+    assert!(
+        (release.position.x - 0.021).abs() < 1e-12,
+        "the widened query must not reorder already-admitted candidates: {:?}",
+        release.position
+    );
 }

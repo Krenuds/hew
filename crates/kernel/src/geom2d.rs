@@ -78,6 +78,19 @@ pub(crate) fn point_inside_polygon(pt: Point3, poly: &[Point3], normal: Vec3) ->
 /// the signed-area / cross-product test in 3-D).  Returns true if the open
 /// segments (p,q) and (r,s) properly cross, or if any endpoint touches the
 /// other segment (closed-interval test).
+/// Whether two segments cross at a single interior point of both — a
+/// PROPER crossing: touching at an endpoint, sharing a point of one with the
+/// interior of the other, or lying along each other all answer false.
+pub(crate) fn segments_cross_properly(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
+    let eps = tol::POINT_MERGE;
+    let d1 = cross_z(r, s, p);
+    let d2 = cross_z(r, s, q);
+    let d3 = cross_z(p, q, r);
+    let d4 = cross_z(p, q, s);
+    ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
+        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+}
+
 pub(crate) fn segments_intersect(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
     let d1 = cross_z(r, s, p);
     let d2 = cross_z(r, s, q);

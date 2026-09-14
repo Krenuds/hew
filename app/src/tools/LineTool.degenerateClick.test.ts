@@ -61,7 +61,7 @@ function makeTool(scene: WasmScene) {
 
 /** A plain (ungrouped, non-instanced) top-level object's face, always under the ray. */
 function makeFaceWasmScene() {
-  const pick = { object: () => 7n, face: () => 3n, instance: () => undefined, free: vi.fn() }
+  const pick = { object: () => 7n, face: () => 3n, depth: () => 1, instance: () => undefined, free: vi.fn() }
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     pick_face: vi.fn(() => pick),

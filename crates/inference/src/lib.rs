@@ -327,10 +327,20 @@ pub const SOFT_AXIS_APERTURE: f64 = SOFT_AXIS_APERTURE_DEG * std::f64::consts::P
 /// Candidates whose weighted distances differ by no more than this fraction
 /// of the query aperture rank as EQUALLY distant, so the nearest-depth
 /// tie-break decides between them (see the ranking sort in `resolve_impl`).
-/// One millionth of an 8 px aperture is a hundredth of a pixel's worth of
-/// angle at any zoom — far below anything a hand can aim, far above the
-/// ~1e-12 noise a placed instance's pose composition introduces.
-pub const RANK_TIE_FRACTION: f64 = 1e-6;
+///
+/// An eighth of an 8 px aperture is ONE PIXEL's worth of angle (or radius)
+/// at any zoom: two candidates the cursor cannot tell apart on screen are
+/// the same target, and the one in front is the one the user sees. The
+/// previous value, one millionth, only tied points stacked EXACTLY along
+/// the ray — and a "Top" view is never exactly vertical (the orbit camera
+/// stops a hair short of straight down), so a framed wall's corner stack —
+/// top plate, sole plate, slab — fanned out by millimetres in the ray's
+/// frame and the DEEPEST one won whenever the tilt happened to lean its
+/// way: a Dimension clicked on a wall top in plan view landed on the slab
+/// two and a half metres below it, with nothing on screen to say so. Still
+/// far above the ~1e-12 noise a placed instance's pose composition
+/// introduces, and well under the distance a hand deliberately aims by.
+pub const RANK_TIE_FRACTION: f64 = 0.125;
 
 /// Below this angle (degrees) between the pick ray and a candidate soft-axis
 /// direction, the axis is treated as too EDGE-ON to trust and no candidate
@@ -711,7 +721,10 @@ pub struct SnapQuery {
     /// query sets this to the SAME ratio it already widens the pixel radius
     /// by (`SNAP_BREAK_RADIUS_PX / SNAP_RADIUS_PX`), so soft-axis hysteresis
     /// matches the "feel" of every other sticky kind without inventing a
-    /// second, independently-tuned constant.
+    /// second, independently-tuned constant. The ranking tie band
+    /// ([`RANK_TIE_FRACTION`]) is divided by this same ratio, so a widened
+    /// query still ranks at the acquire query's pixel resolution and can
+    /// never reorder candidates the acquire query already admitted.
     pub soft_axis_aperture_scale: Option<f64>,
     /// Keep PRECISE POINT candidates ([`SnapKind::Endpoint`],
     /// [`SnapKind::Midpoint`], [`SnapKind::Center`], [`SnapKind::Quadrant`],
@@ -2485,6 +2498,65 @@ impl InferenceScene {
             }
         }
 
+        // --- Axis × edge crossings ---
+        // Where an axis line — a drawing axis through the frame origin, or
+        // (with an anchor and no hard lock) a soft axis through the anchor
+        // — crosses an edge, the crossing itself is what the user is after:
+        // "along the red axis from where I started, out to that edge".
+        // Without this candidate the two ingredients FIGHT: `OnAxis` sits a
+        // rank group above `OnEdge`, so hovering the far edge of a face
+        // while dragging along an axis resolved to the axis line's
+        // ray-nearest point and the edge was unreachable at all (the Line
+        // tool "visibly following the red axis" with "no snapping to the
+        // edge whatsoever" — the only way onto it was a hard lock plus a
+        // projected midpoint). Snapped as `Intersection`, the same tier a
+        // guide × edge crossing gets (between Midpoint and OnEdge: a real
+        // vertex at the crossing still wins), carrying the EDGE's
+        // provenance (a tool may adopt the face that edge belongs to — the
+        // crossing is a point ON that edge) and the axis DIRECTION (the cue
+        // draws the axis-coloured line and names the axis, exactly like a
+        // plain `OnAxis` snap). Admission is the ordinary point aperture at
+        // the crossing point itself: the cursor is pixel-close to the
+        // crossing, which already implies the drag runs along the axis, so
+        // no separate soft-axis deviation test is needed — and none of the
+        // edge-on guard either, since the crossing is pure line×segment
+        // geometry with no ray in it. Edge sets are the cone-pruned ones
+        // the segment candidates above walked: a crossing outside the cone
+        // could never be admitted, and its segment would have to pass
+        // through the cone to hold a point inside it. Suppressed with the
+        // axes hidden, like every other axis candidate.
+        if self.axes_enabled {
+            let frame_origin = self.axes_frame.origin;
+            let frame_axes = [self.axes_frame.x, self.axes_frame.y, self.axes_frame.z()];
+            let mut axis_lines: Vec<(Point3, Vec3)> =
+                frame_axes.iter().map(|&d| (frame_origin, d)).collect();
+            if let (Some(anchor), None) = (query.anchor, query.lock) {
+                axis_lines.extend(frame_axes.iter().map(|&d| (anchor, d)));
+            }
+            let world_segments_for_axes = world_segments();
+            let mut cross = |o: Point3, d: Vec3, a: Point3, b: Point3, prov: Option<Provenance>| {
+                if let Some(p) = line_segment_intersection(o, d, a, b)
+                    && let Some((ang, depth)) = wcone(p, SnapKind::Intersection)
+                {
+                    candidates.push((SnapKind::Intersection, ang, depth, p, prov, Some(d)));
+                }
+            };
+            for &(ao, ad) in &axis_lines {
+                for seg in world_segments_for_axes
+                    .clone()
+                    .chain(placed_segments.iter())
+                {
+                    cross(ao, ad, seg.a, seg.b, Some(Provenance::Object(seg.source)));
+                }
+                for &(sid, eid, _cid, ref seg) in &self.sketch_segments {
+                    cross(ao, ad, seg.a, seg.b, Some(Provenance::SketchEdge(sid, eid)));
+                }
+                for seg in &self.transient_segments {
+                    cross(ao, ad, seg.a, seg.b, None);
+                }
+            }
+        }
+
         // --- Construction guide candidates ---
         // A guide point is a precise snap (Endpoint-tier, like the world
         // origin); a guide line snaps as OnGuide, carrying its direction for
@@ -2660,7 +2732,19 @@ impl InferenceScene {
         // on a dense candidate set (a framed floor plan under a Top view)
         // and panics — which poisoned the whole resolver. Integer buckets
         // and `f64::total_cmp` make the ordering total by construction.
-        let tie = aperture * RANK_TIE_FRACTION;
+        // …and measured against the ACQUIRE aperture, not a widened one: the
+        // app's hysteresis-release query re-runs this resolve at twice the
+        // pixel radius and declares that ratio in `soft_axis_aperture_scale`
+        // (that field's doc). Scaling the tie band with it would let a
+        // reach-only widening reorder two candidates the normal query had
+        // already admitted — the held target losing its own hold to a
+        // nearer-depth neighbour a pixel further from the cursor — so the
+        // band is divided back down to one pixel of the unscaled radius.
+        let widening = match query.soft_axis_aperture_scale {
+            Some(scale) if scale.is_finite() && scale > 0.0 => scale,
+            _ => 1.0,
+        };
+        let tie = aperture / widening * RANK_TIE_FRACTION;
         let rank_key = |c: &Candidate| {
             let ref_aperture = if c.0 == SnapKind::OnAxis {
                 soft_axis_aperture.max(aperture)

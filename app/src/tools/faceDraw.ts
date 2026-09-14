@@ -33,9 +33,10 @@
  */
 
 import type { Ray } from '../viewport/math'
+import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { transformNormalThroughPose } from '../viewport/geoHelpers'
+import { applyAffine3x4, transformNormalThroughPose } from '../viewport/geoHelpers'
 
 /** May the face on `object` (hit through `instance`, when the ray struck
  *  instanced geometry) be drawn on directly? */
@@ -49,14 +50,18 @@ export interface EligibleFacePick {
 
 /** The raw `pick_face` result under the cursor, regardless of eligibility —
  *  `object`/`instance`/`face` exactly as the WASM pick reported them before
- *  `FacePickCache.pickFor`'s eligibility filter ran. Lets a caller that
- *  needs the INELIGIBLE case too (PushPullTool's onPointerDown: the toast
- *  hint names the instance the rejected face belonged to) read it back from
- *  the SAME memoized pick instead of re-raycasting for it. */
+ *  `FacePickCache.pickFor`'s eligibility filter ran, plus the hit's ray
+ *  `depth` (metres along the normalized ray). Lets a caller that needs the
+ *  INELIGIBLE case too (PushPullTool's onPointerDown: the toast hint names
+ *  the instance the rejected face belonged to) read it back from the SAME
+ *  memoized pick instead of re-raycasting for it, and lets a caller with a
+ *  competing pick (PushPullTool's sketch-region pick) compare depths so a
+ *  drawn region IN FRONT of the face wins the hover, not the face behind it. */
 export interface RawFacePick {
   object: bigint
   instance: bigint | undefined
   face: bigint
+  depth: number
 }
 
 /**
@@ -97,6 +102,53 @@ export function worldFaceNormal(
   return transformNormalThroughPose(pose, local)
 }
 
+/** Metres off a face's plane a point may sit and still count as ON that
+ *  face for every face-adoption test in the draw tools (`FacePickCache.
+ *  faceThrough`, LineTool's re-adoption) — the kernel's own plane tolerance
+ *  scale (`GROUND_PLANE_EPS`), well below any drawn feature. */
+export const FACE_PLANE_EPS_M = 1e-6
+
+/** A face's world-space plane: a point on it and its unit normal, mapped
+ *  through the active instance's pose when drawing inside one (the same
+ *  mapping `worldFaceNormal` applies to the normal). `null` for a stale
+ *  handle or a singular pose — callers treat that exactly like a miss. */
+export function worldFacePlane(
+  wasmScene: WasmScene,
+  object: bigint,
+  face: bigint,
+  activeInstance: bigint | null,
+): { point: V3; normal: V3 } | null {
+  const normal = worldFaceNormal(wasmScene, object, face, activeInstance)
+  if (normal === null) return null
+  const planeArr = wasmScene.face_plane(object, face)
+  let point: V3 = [planeArr[0], planeArr[1], planeArr[2]]
+  if (activeInstance !== null) {
+    const pose = wasmScene.instance_pose(activeInstance)
+    if (pose === undefined) return null
+    point = applyAffine3x4(pose, point)
+  }
+  return { point, normal }
+}
+
+/** Whether `snap` sits on an OBJECT's edge or corner — the one place a pick
+ *  ray misses the faces under it (strict polygon test at the boundary), so
+ *  the ranked boundary pick (`FacePickCache.faceThrough`) must answer which
+ *  face the point belongs to. A type guard: the snap is non-null past it. */
+export function snapOnObjectBoundary(
+  snap: Snap | null,
+): snap is Snap & { object: bigint; elementKind: 'vertex' | 'edge' } {
+  return (
+    snap !== null &&
+    snap.object !== undefined &&
+    (snap.elementKind === 'vertex' || snap.elementKind === 'edge')
+  )
+}
+
+/** Signed distance of `p` off the plane through `point` with unit `normal`. */
+export function distanceOffPlane(p: V3, point: V3, normal: V3): number {
+  return normal[0] * (p[0] - point[0]) + normal[1] * (p[1] - point[1]) + normal[2] * (p[2] - point[2])
+}
+
 /**
  * The default tool-local policy (used when the Viewport hasn't injected one):
  * scoped to the entered object inside a context; at top level, plain
@@ -116,22 +168,18 @@ export function defaultFaceEligible(
   return wasmScene.node_parent(0, object) === undefined
 }
 
-/**
- * Memoizes the single `pick_face` raycast for the CURRENT pointer event.
- * Keyed by reference equality on the `Ray` passed in (the Viewport builds one
- * Ray object per event); a miss just falls back to a fresh pick.
- * `eligible: null` means either nothing was hit, or a face was hit but the
- * eligibility predicate rejected it.
- */
-/** Angular nudge of the boundary probes in `FacePickCache.pickFor` —
- *  about a pixel and a half of a 45° view on a 720 px canvas, so the probe
+/** Angular nudge of the boundary probes in `FacePickCache.faceThrough` —
+ *  about a pixel and a half of a 45° view on a 720 px canvas, so a probe
  *  lands on the face beside an edge without reaching anything a hand would
  *  not have aimed at. */
 const PICK_NUDGE_RAD = 0.002
 
-/** Four directions a hair off `dir`: screen-up-ish first (the face a top
- *  edge belongs to, seen from above), then down, then the two sides. */
-function nudgedDirections(dir: V3): V3[] {
+/** Eight directions a hair off `dir`, evenly spaced around it: the four
+ *  screen-axis nudges (up, down, left, right) and the four diagonals. A ray
+ *  through a point ON an edge or corner misses both faces that meet there
+ *  (the polygon test is strict at the boundary), and a single nudge can miss
+ *  too — sliding along a vertical edge, say — so the probe is a full ring. */
+function ringDirections(dir: V3): V3[] {
   const [dx, dy, dz] = dir
   const len = Math.hypot(dx, dy, dz)
   if (len < 1e-12) return []
@@ -144,64 +192,122 @@ function nudgedDirections(dir: V3): V3[] {
   u = [u[0] / ul, u[1] / ul, u[2] / ul]
   const v: V3 = [u[1] * d[2] - u[2] * d[1], u[2] * d[0] - u[0] * d[2], u[0] * d[1] - u[1] * d[0]]
   const e = PICK_NUDGE_RAD
-  return [
-    [d[0] + v[0] * e, d[1] + v[1] * e, d[2] + v[2] * e],
-    [d[0] - v[0] * e, d[1] - v[1] * e, d[2] - v[2] * e],
-    [d[0] + u[0] * e, d[1] + u[1] * e, d[2] + u[2] * e],
-    [d[0] - u[0] * e, d[1] - u[1] * e, d[2] - u[2] * e],
-  ]
+  const out: V3[] = []
+  for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4
+    const cu = Math.cos(a) * e
+    const sv = Math.sin(a) * e
+    out.push([d[0] + u[0] * cu + v[0] * sv, d[1] + u[1] * cu + v[1] * sv, d[2] + u[2] * cu + v[2] * sv])
+  }
+  return out
 }
 
+/** An eligible face found by `FacePickCache.faceThrough`, with its world
+ *  plane (already mapped through the active instance's pose). */
+export interface FaceThroughPick extends EligibleFacePick {
+  point: V3
+  normal: V3
+}
+
+/**
+ * Memoizes the single `pick_face` raycast for the CURRENT pointer event.
+ * Keyed by reference equality on the `Ray` passed in (the Viewport builds one
+ * Ray object per event); a miss just falls back to a fresh pick.
+ * `eligible: null` means either nothing was hit, or a face was hit but the
+ * eligibility predicate rejected it.
+ */
 export class FacePickCache {
-  private cache: { ray: Ray; probeEdges: boolean; raw: RawFacePick | null; eligible: EligibleFacePick | null } | null = null
+  private cache: { ray: Ray; raw: RawFacePick | null; eligible: EligibleFacePick | null } | null = null
+  private throughCache: { ray: Ray; key: string; pick: FaceThroughPick | null } | null = null
 
   pickFor(
     wasmScene: WasmScene,
     ray: Ray,
     isEligible: FaceEligible,
-    probeEdges = false,
   ): EligibleFacePick | null {
-    if (this.cache !== null && this.cache.ray === ray && this.cache.probeEdges === probeEdges) {
+    if (this.cache !== null && this.cache.ray === ray) {
       return this.cache.eligible
     }
-    let pick = wasmScene.pick_face(
-      ray.origin[0], ray.origin[1], ray.origin[2],
-      ray.direction[0], ray.direction[1], ray.direction[2],
-    )
-    if (pick === undefined && probeEdges) {
-      // A ray through a point ON an edge or corner misses both faces that
-      // meet there (the polygon test is strict at the boundary), which is
-      // exactly where a drawing gesture usually starts — a midpoint, a
-      // corner. Probe a hair to each side of the ray and take the first
-      // face hit, so "the face under the cursor" is answered at the
-      // boundary too. Opt-in (`probeEdges`), and only worth asking for when
-      // the snap under the cursor IS an edge or corner: a caller that would
-      // then commit to whichever neighbour the probe found must be able to
-      // correct that choice from its next point (the Line tool can; the
-      // shape tools and Push/Pull keep the plain miss), and a miss over
-      // empty space must not cost four more raycasts on every hover.
-      for (const d of nudgedDirections(ray.direction)) {
-        pick = wasmScene.pick_face(ray.origin[0], ray.origin[1], ray.origin[2], d[0], d[1], d[2])
-        if (pick !== undefined) break
-      }
-    }
-    let raw: RawFacePick | null = null
+    const raw = rawPick(wasmScene, ray.origin, ray.direction)
     let eligible: EligibleFacePick | null = null
-    if (pick !== undefined) {
-      try {
-        const object = pick.object()
-        const instance = pick.instance()
-        const face = pick.face()
-        raw = { object, instance, face }
-        if (isEligible(object, instance)) {
-          eligible = { object, face }
-        }
-      } finally {
-        pick.free()
-      }
+    if (raw !== null && isEligible(raw.object, raw.instance)) {
+      eligible = { object: raw.object, face: raw.face }
     }
-    this.cache = { ray, probeEdges, raw, eligible }
+    this.cache = { ray, raw, eligible }
     return eligible
+  }
+
+  /**
+   * The eligible face under `ray` whose plane holds every point in
+   * `through` — the answer to "which face did a click ON an edge or corner
+   * mean?", where the plain `pickFor` is blind: a ray through a point on
+   * the boundary misses both faces meeting there (strict polygon test), and
+   * even a ray a sub-pixel to one side lands on whichever neighbour the
+   * rounding favours — a coin toss the user cannot see, and one that put a
+   * Rectangle started on a vertical edge's midpoint onto the ground plane.
+   *
+   * Candidates are the plain ray hit plus a ring of eight probes a hair
+   * around it (`ringDirections`), deduplicated, eligibility-filtered, and
+   * kept only when their plane contains every `through` point within
+   * `FACE_PLANE_EPS_M` (the snapped point itself; for a Line chain's second
+   * point, the anchor as well — the face the user is drawing ACROSS holds
+   * both). Ties between the surviving neighbours — a vertical edge shared by
+   * two visible walls — go to the face most squarely facing the camera
+   * (largest `normal · −ray`): the one the user sees most of, and the one a
+   * SketchUp user expects the edge click to land on. `null` when no
+   * eligible face through those points is under or beside the cursor.
+   *
+   * Memoized per `ray` reference AND `through` set, like `pickFor`; a
+   * caller pairs it with the snap under the cursor (an object vertex or
+   * edge — see LineTool's `_snapOnBoundary`), never with a free point, so
+   * the nine raycasts run only for boundary hovers/clicks.
+   */
+  faceThrough(
+    wasmScene: WasmScene,
+    ray: Ray,
+    isEligible: FaceEligible,
+    activeInstance: bigint | null,
+    through: readonly V3[],
+  ): FaceThroughPick | null {
+    const key = through.map((p) => p.join(',')).join(';') + `|${activeInstance ?? ''}`
+    if (this.throughCache !== null && this.throughCache.ray === ray && this.throughCache.key === key) {
+      return this.throughCache.pick
+    }
+    const seen = new Set<string>()
+    const candidates: { pick: FaceThroughPick; facing: number }[] = []
+    const dirLen = Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
+    const consider = (raw: RawFacePick | null) => {
+      if (raw === null) return
+      const id = `${raw.object}:${raw.face}:${raw.instance ?? ''}`
+      if (seen.has(id)) return
+      seen.add(id)
+      if (!isEligible(raw.object, raw.instance)) return
+      const plane = worldFacePlane(wasmScene, raw.object, raw.face, activeInstance)
+      if (plane === null) return
+      for (const p of through) {
+        if (Math.abs(distanceOffPlane(p, plane.point, plane.normal)) > FACE_PLANE_EPS_M) return
+      }
+      const facing = dirLen < 1e-12
+        ? 0
+        : -(plane.normal[0] * ray.direction[0] + plane.normal[1] * ray.direction[1] + plane.normal[2] * ray.direction[2]) / dirLen
+      candidates.push({ pick: { object: raw.object, face: raw.face, point: plane.point, normal: plane.normal }, facing })
+    }
+    // The plain ray first (reusing `pickFor`'s memo when it already ran for
+    // this ray), then the ring.
+    if (this.cache !== null && this.cache.ray === ray) {
+      consider(this.cache.raw)
+    } else {
+      consider(rawPick(wasmScene, ray.origin, ray.direction))
+    }
+    for (const d of ringDirections(ray.direction)) {
+      consider(rawPick(wasmScene, ray.origin, d))
+    }
+    // Most camera-facing first; a tie keeps probe order (plain ray, then
+    // the ring from screen-right counter-clockwise), which is deterministic.
+    candidates.sort((a, b) => b.facing - a.facing)
+    const pick = candidates.length > 0 ? candidates[0].pick : null
+    this.throughCache = { ray, key, pick }
+    return pick
   }
 
   /**
@@ -229,5 +335,17 @@ export class FacePickCache {
 
   clear(): void {
     this.cache = null
+    this.throughCache = null
+  }
+}
+
+/** One `pick_face` raycast, with the wasm handle freed. */
+function rawPick(wasmScene: WasmScene, origin: V3, direction: V3): RawFacePick | null {
+  const pick = wasmScene.pick_face(origin[0], origin[1], origin[2], direction[0], direction[1], direction[2])
+  if (pick === undefined) return null
+  try {
+    return { object: pick.object(), instance: pick.instance(), face: pick.face(), depth: pick.depth() }
+  } finally {
+    pick.free()
   }
 }

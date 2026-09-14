@@ -26,6 +26,7 @@ function makePick(object: bigint, face: bigint, instance?: bigint) {
     object: () => object,
     face: () => face,
     instance: () => instance,
+    depth: () => 1,
     free: vi.fn(),
   }
 }
@@ -51,6 +52,10 @@ function makeWasmScene(opts: {
       sketchCounter += 1n
       return sketchCounter
     }),
+    begin_sketch_on_plane: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
     // Every non-stale sketch lies on the ground plane (origin point, +Z).
     sketch_plane: vi.fn((sketch: bigint) =>
       (opts.staleSketchHandles ?? []).includes(sketch)
@@ -73,6 +78,8 @@ function makeWasmScene(opts: {
     }),
     pick_face: vi.fn(() => opts.pick),
     pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
+    // Every picked object is plain/ungrouped by default (top-level eligibility).
+    node_parent: vi.fn(() => undefined),
     face_normal: vi.fn(() => new Float64Array(opts.faceNormal ?? [0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array(opts.facePlane ?? [0, 0, 0, 0, 0, 1])),
     split_face_inner: vi.fn(() => {
@@ -259,7 +266,7 @@ describe('CircleTool — face mode', () => {
     tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
-    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
 
     // Plain imprint is NOT used — the identity-carrying variant is.
     expect(scene.split_face_inner).not.toHaveBeenCalled()
@@ -294,7 +301,7 @@ describe('CircleTool — face mode', () => {
     tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
-    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onFaceImprint).not.toHaveBeenCalled()
@@ -352,7 +359,7 @@ describe('CircleTool — instance editing context (component-edit-parity.md phas
     tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
-    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
 
     expect(scene.split_face_inner_with_curve_in_instance).toHaveBeenCalledTimes(1)
     const callArgs = (scene.split_face_inner_with_curve_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
@@ -491,5 +498,142 @@ describe('CircleTool — retype the radius after the rim click', () => {
     const call = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[1]
     expect(call[4]).toBeCloseTo(2.5, 6) // radius argument
     expect(onFaceImprint).toHaveBeenCalledTimes(2)
+  })
+})
+
+// Boundary-click fix: a click on an object's edge/vertex misses `pick_face`
+// outright (strict polygon test at the boundary) — `_facePickAt` falls back
+// to the ranked boundary pick (`FacePickCache.faceThrough`) instead of
+// silently sending the whole gesture to the ground plane.
+describe('CircleTool — boundary clicks (FacePickCache.faceThrough)', () => {
+  /** `pick_face` misses on the exact base-ray direction (the boundary click)
+   *  but hits `pick` on any other (nudged) direction — mirrors a real
+   *  boundary miss where the ring probes around the ray find the face. */
+  function makeBoundaryScene(pick: ReturnType<typeof makePick>) {
+    const scene = makeWasmScene({ faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation(
+      (_ox: number, _oy: number, _oz: number, dx: number, dy: number, dz: number) =>
+        dx === 0 && dy === 0 && dz === -1 ? undefined : pick,
+    )
+    return scene
+  }
+
+  it('a click on a midpoint snap (pick_face misses the exact ray) still anchors FACE mode, not the ground', () => {
+    const scene = makeBoundaryScene(makePick(7n, 3n))
+    const { tool, onCommit, onFaceImprint } = makeTool(scene)
+
+    const boundarySnap = makeSnap({ x: 0, y: 0, z: 0, kind: 'midpoint', object: 7n, element: 5n, elementKind: 'edge' })
+    tool.onPointerDown(boundarySnap, RAY) // first click, exactly on the boundary
+    expect(tool.capturingInput()).toBe(true) // anchored — not silently dropped
+
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim
+
+    // The commit went through the FACE split path, never a ground sketch.
+    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+})
+
+// Snapped face cursor fix: face mode used to project the ray onto the face
+// plane unconditionally for the rubber band AND the commit, ignoring
+// whatever the snap chip claimed. `_faceCursor` now honours an on-plane snap
+// exactly.
+describe('CircleTool — snapped face cursor (honours the chip, not ray∩plane)', () => {
+  it('the rim commit lands on the snap, not the sub-millimeter-off ray∩plane point', () => {
+    // Face at z=1, normal +Z.
+    const pick = makePick(7n, 3n)
+    const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1 }), RAY) // centre
+    // The rim click's snap sits exactly 3m out; the ray it travelled along
+    // would land 5mm further out on the SAME plane — a deliberately
+    // different point the fix must NOT use.
+    tool.onPointerDown(
+      makeSnap({ x: 3, y: 0, z: 1, kind: 'endpoint' }),
+      { origin: [3.005, 0, 5], direction: [0, 0, -1] },
+    )
+
+    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
+    const call = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[0]
+    // Radius argument: exactly 3 (the snap), not ~3.005 (the ray∩plane miss).
+    expect(call[4]).toBeCloseTo(3, 6)
+    const loopPts = call[2] as Float64Array
+    // vertex 0 of the loop is the rim point itself.
+    expect(loopPts[0]).toBeCloseTo(3, 6)
+    expect(loopPts[1]).toBeCloseTo(0, 6)
+  })
+})
+
+// Shift-pinned drawing plane (GitHub issue 14 / planePin.ts): pressing Shift
+// while hovering a face pins that face's plane for the next gesture, even
+// once the cursor leaves the face entirely.
+describe('CircleTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
+  it('pins the hovered face plane; a later click over empty space anchors plane mode on it', () => {
+    const pick = makePick(7n, 3n)
+    // Face at z=1, normal +Z — a genuinely non-ground plane. `pick_face`
+    // hits only under the original hover ray, so the later clicks are
+    // genuinely over empty space, not merely ignored by the mode dispatch.
+    const scene = makeWasmScene({ faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation(
+      (ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) =>
+        ox === 0 && oy === 0 && oz === 5 && dx === 0 && dy === 0 && dz === -1 ? pick : undefined,
+    )
+    const { tool, onCommit } = makeTool(scene)
+
+    // Idle hover over the face.
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    // The pin constrains the snap even over empty space, far from the face.
+    const emptyRay: Ray = { origin: [10, 10, 5], direction: [0, 0, -1] }
+    expect(tool.snapConstraint(emptyRay)?.constraintPlane).toEqual({ point: [0, 0, 1], normal: [0, 0, 1] })
+
+    // A first click over empty space anchors PLANE mode on the pinned plane
+    // — never the face-split path.
+    tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 1 }), emptyRay)
+    tool.onPointerDown(makeSnap({ x: 13, y: 10, z: 1 }), { origin: [13, 10, 5], direction: [0, 0, -1] })
+
+    expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // z=1 is not the ground plane
+    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a second Shift press releases the pin; autorepeat (Shift held) does not toggle twice', () => {
+    const pick = makePick(7n, 3n)
+    const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    // Autorepeat: further `true` calls without a `false` in between are inert.
+    tool.setShiftHeld(true)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    tool.setShiftHeld(false) // physical key-up
+    tool.setShiftHeld(true) // second physical press: releases the pin
+    expect(tool.statusHint()).not.toContain('Pinned')
+  })
+
+  it('Escape while idle clears the pin', () => {
+    const pick = makePick(7n, 3n)
+    const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY)
+    tool.setShiftHeld(true)
+    expect(tool.statusHint()).toContain('Pinned')
+
+    tool.onKey(makeKeyEvent('Escape'))
+    expect(tool.statusHint()).not.toContain('Pinned')
+    expect(tool.hasArmedGesture()).toBe(false)
   })
 })

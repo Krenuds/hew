@@ -78,7 +78,7 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { rayPlaneIntersect, facePlaneBasis } from '../viewport/geoHelpers'
+import { rayPlaneIntersect, facePlaneBasis, applyAffine3x4 } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE, type FatSegmentsOpts } from '../viewport/fatLine'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
@@ -88,9 +88,10 @@ import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePl
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
-import { pointOnPlane, drawPlaneCue, isGroundPlane, isPointOnDrawPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
+import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
+import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { PlanePin } from './planePin'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -176,6 +177,52 @@ const FROM_POINT_WEAK_SNAP_KINDS: ReadonlySet<string> = new Set(['plane', 'groun
  *  gesture could be aimed at. */
 const READOPT_PROBE_M = 1e-3
 
+/** How far above a face `_facePickAtPoint` starts its pick ray — a
+ *  centimetre: comfortably past the kernel's plane tolerance, well inside
+ *  any face a chain can be drawn on, and never reaching another face of
+ *  the same solid before the one directly below. */
+const FACE_PICK_LIFT_M = 1e-2
+
+/** Whether `p` lies on the closed polygon `poly`'s boundary — within
+ *  `FACE_PLANE_EPS_M` of one of its segments. The polygon comes from
+ *  `face_boundary`, which answers in f32, so the tolerance is the plane
+ *  scale, not the kernel's merge tolerance. */
+function pointOnPolygonBoundary(p: V3, poly: readonly V3[]): boolean {
+  // f32 keeps ~7 significant digits: a vertex 200 m out is only good to
+  // ~1.5e-5, so the tolerance grows with the coordinates' magnitude.
+  let extent = 0
+  for (const q of poly) extent = Math.max(extent, Math.abs(q[0]), Math.abs(q[1]), Math.abs(q[2]))
+  const eps = Math.max(FACE_BOUNDARY_EPS_M, extent * FACE_BOUNDARY_REL_EPS)
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i]
+    const b = poly[(i + 1) % poly.length]
+    if (distanceToSegment(p, a, b) <= eps) return true
+  }
+  return false
+}
+
+/** Distance from `p` to the segment `a`–`b`. */
+function distanceToSegment(p: V3, a: V3, b: V3): number {
+  const ab: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+  const len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
+  let t = 0
+  if (len2 > 0) {
+    t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / len2
+    t = t < 0 ? 0 : t > 1 ? 1 : t
+  }
+  return Math.hypot(p[0] - (a[0] + ab[0] * t), p[1] - (a[1] + ab[1] * t), p[2] - (a[2] + ab[2] * t))
+}
+
+/** Metres within which a placed point counts as ON the face's boundary
+ *  (`_commitFacePath`'s sub-path cuts). Looser than `FACE_PLANE_EPS_M`:
+ *  `face_boundary` rounds its vertices to f32, ~1e-7 at metre scale. */
+const FACE_BOUNDARY_EPS_M = 1e-5
+
+/** Relative part of that tolerance: four f32 ulps (2⁻²³ ≈ 1.2e-7 each) of
+ *  the polygon's largest coordinate, so an exactly-snapped boundary point
+ *  still reads as on the f32 boundary at any distance from the origin. */
+const FACE_BOUNDARY_REL_EPS = 4 * 2 ** -23
+
 /** |cos| below which a unit lock direction counts as lying IN a face plane
  *  (`_readoptFaceForLock`) — a numerical guard, not a kernel tolerance. */
 const LOCK_IN_PLANE_EPS = 1e-6
@@ -205,6 +252,11 @@ type FaceStage =
       planePoint: V3
       /** All points placed so far on the plane, in order. */
       points: V3[]
+      /** Per point: whether it was snapped to one of the object's own
+       *  edges or corners — an exact "on the boundary" the commit's
+       *  geometric test (against an f32 copy of the boundary) cannot beat
+       *  far from the origin. */
+      boundary: boolean[]
     }
 
 
@@ -262,6 +314,9 @@ export class LineTool implements Tool {
     }
     if (this.idlePlaneLock !== null) {
       return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+    }
+    if (this.pin.current !== null) {
+      return 'Pinned to the hovered plane — click to start; Shift again or Esc unpins.'
     }
     return 'Click to start a line — on the ground plane or any face or sketch.'
   }
@@ -501,6 +556,11 @@ export class LineTool implements Tool {
    *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
   private _lastIdleHoverPoint: V3 | null = null
 
+  /** Shift-pinned drawing plane (GitHub issue 14) — see planePin.ts and
+   *  RectangleTool's identical field. Idle-only; a pin displaces an arrow
+   *  lock and vice versa. */
+  private readonly pin = new PlanePin()
+
   /** Per-pointer-event `pick_face` memo — see `FacePickCache` in faceDraw.ts. */
   private readonly _pickCache = new FacePickCache()
   /** Per-pointer-event `pick_sketch` memo — see `SketchPickCache` in drawPlane.ts. */
@@ -509,20 +569,39 @@ export class LineTool implements Tool {
   /** Run `pick_face` for `ray` and return the eligible {object, face} pair
    *  (or null), reusing a cached result for the same `ray` reference if one
    *  was already computed earlier in this same pointer event. */
-  private _eligiblePickFor(ray: Ray, probeEdges = false): { object: bigint; face: bigint } | null {
+  private _eligiblePickFor(ray: Ray): { object: bigint; face: bigint } | null {
     return this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
-      this._isEligible(object, instance), probeEdges)
+      this._isEligible(object, instance))
   }
 
-  /** Whether `snap` sits on an object's edge or corner — the one place a
-   *  pick ray misses the faces under it, so the face pick may probe beside
-   *  the ray (`FacePickCache.pickFor`'s `probeEdges`). */
-  private _snapOnBoundary(snap: Snap | null): boolean {
-    return (
-      snap !== null &&
-      snap.object !== undefined &&
-      (snap.elementKind === 'vertex' || snap.elementKind === 'edge')
-    )
+  /**
+   * The eligible face a click at `snap` means, with its world plane. For a
+   * snap ON an object's edge or corner (`snapOnObjectBoundary`) the plain
+   * pick under the ray is a coin toss between the faces meeting there — or
+   * a miss, which sent the chain to the GROUND plane, so a line clicked
+   * from a cube's bottom corner to its top far corner committed as a ground
+   * sketch to the bottom far corner instead — so the ranked boundary pick
+   * (`FacePickCache.faceThrough`) answers: the most camera-facing eligible
+   * face whose plane holds the snapped point (and every point in `also` —
+   * the chain's anchor, when the second point is deciding which of an
+   * edge's faces the first click meant). Any other snap keeps the plain
+   * pick, with the plane read from it.
+   */
+  private _facePickAt(snap: Snap | null, ray: Ray, also: readonly V3[] = []): FaceThroughPick | null {
+    if (snapOnObjectBoundary(snap)) {
+      return this._pickCache.faceThrough(
+        this.wasmScene, ray, (object, instance) => this._isEligible(object, instance),
+        this._activeInstance, [[snap.x, snap.y, snap.z], ...also],
+      )
+    }
+    const eligible = this._eligiblePickFor(ray)
+    if (eligible === null) return null
+    // The plain pick's plane: its world normal, through the snapped point
+    // (which the idle `snapConstraint` already holds to this face's plane)
+    // — no second kernel query for the plane's own point.
+    const normal = worldFaceNormal(this.wasmScene, eligible.object, eligible.face, this._activeInstance)
+    if (normal === null) return null
+    return { ...eligible, normal, point: snap !== null ? [snap.x, snap.y, snap.z] : [0, 0, 0] }
   }
 
   constructor(
@@ -641,22 +720,57 @@ export class LineTool implements Tool {
       return Object.keys(lockPart).length > 0 ? lockPart : null
     }
 
-    const eligible = this._eligiblePickFor(ray)
-    if (eligible !== null) {
-      const a = this.wasmScene.face_plane(eligible.object, eligible.face)
-      return {
-        constraintPlane: {
-          point: [a[0], a[1], a[2]],
-          normal: [a[3], a[4], a[5]],
-        },
+    // A Shift-pinned plane (planePin.ts) is a FIXED plane: the cursor is
+    // held to it wherever it goes, so it constrains the snap outright.
+    const pinned = this.pin.constraint()
+    if (pinned !== null) return { ...lockPart, ...pinned }
+
+    const plane = this._idleHoverPlane(ray)
+    if (!plane.ground) {
+      return { ...lockPart, constraintPlane: { point: plane.origin, normal: plane.normal } }
+    }
+    return Object.keys(lockPart).length > 0 ? lockPart : null
+  }
+
+  /**
+   * The plane an idle click at `ray` would land on — the hovered eligible
+   * face's, a hovered non-ground sketch's, else the ground — as a
+   * `DrawPlane`, and the plane a Shift press pins (`_trackIdleHover`
+   * records it into `pin` with the hover point). Falls back to the ground
+   * plane for a stale face (no world normal), matching `_currentMode`'s
+   * miss.
+   */
+  private _idleHoverPlane(ray: Ray, snap: Snap | null = null): DrawPlane {
+    // Hovering an object's edge or corner: the plain ray pick misses there
+    // (strict at the boundary), so the ranked boundary pick answers which
+    // face the point belongs to — a Shift press over a wall's edge
+    // midpoint pins that WALL, not the ground the miss fell through to.
+    if (snapOnObjectBoundary(snap)) {
+      const through = this._facePickAt(snap, ray)
+      if (through !== null) {
+        const drawPlane = drawPlaneThrough(through.point, through.normal)
+        if (drawPlane !== null) return drawPlane
       }
     }
-
-    const { plane } = this._resolveIdleTarget(ray)
-    if (!plane.ground) {
-      return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+    const eligible = this._eligiblePickFor(ray)
+    if (eligible !== null) {
+      const plane = this._worldFacePlane(eligible.object, eligible.face)
+      if (plane !== null) {
+        const drawPlane = drawPlaneThrough(plane.point, plane.normal)
+        if (drawPlane !== null) return drawPlane
+      }
     }
-    return null
+    return this._resolveIdleTarget(ray).plane
+  }
+
+  /** Idle hover bookkeeping: the hover point for the plane cue (arrow lock
+   *  and Shift pin previews both draw through it) and, for the pin, the
+   *  plane the next click would land on (`_idleHoverPlane`). */
+  private _trackIdleHover(snap: Snap | null, ray: Ray): void {
+    if (snap === null) return
+    const through: V3 = [snap.x, snap.y, snap.z]
+    this._lastIdleHoverPoint = through
+    if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
   }
 
   /**
@@ -688,6 +802,18 @@ export class LineTool implements Tool {
       return drawPlaneCue({
         anchoredPlane: this.planeStage.plane,
         anchoredThrough: this.planeStage.anchor,
+        idleLock: null,
+        idleHover: null,
+      })
+    }
+    const pinned = this.pin.current
+    if (pinned !== null) {
+      // The pinned plane through wherever the cursor is now (its foot on
+      // the plane — the snap is constrained to it), so the patch follows
+      // the hover exactly as the arrow-lock preview does.
+      return drawPlaneCue({
+        anchoredPlane: pinned.plane,
+        anchoredThrough: this._lastIdleHoverPoint ?? pinned.through,
         idleLock: null,
         idleHover: null,
       })
@@ -752,6 +878,8 @@ export class LineTool implements Tool {
    * point yet (nothing to click through).
    */
   private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
+    const pinned = this.pin.clickTarget(this._editContext)
+    if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
     )
@@ -805,9 +933,19 @@ export class LineTool implements Tool {
   /** Whether the last `_planeCursor` discarded a non-zero snap z. */
   private _snapProjected = false
 
+  /** The face chain's normal while `_commitFacePath` runs after the stage
+   *  has been reset — it drops the sub-face pick rays along it. */
+  private _lastFaceNormal: V3 | null = null
+
+  /** Set when a single click closed a face loop (`_appendFacePoint`), so
+   *  the `dblclick` that may follow it is consumed by `onDoubleClick`.
+   *  Cleared by the next pointer move or press. */
+  private _closedByClick = false
+
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._lastViewDir = ray.direction
     this._lastRayDir = ray.direction
+    this._closedByClick = false
     // The pointer moved on: the segment just placed is settled and a typed
     // length now means the next one (module doc — `RetypeSpec`).
     if (this.retype.isOpen && this._retypeRayDir !== null && this._retypeScreen === null) {
@@ -815,7 +953,7 @@ export class LineTool implements Tool {
       const dot = d[0] * ray.direction[0] + d[1] * ray.direction[1] + d[2] * ray.direction[2]
       if (dot < RETYPE_POINTER_STILL_COS) this.retype.close()
     }
-    if (this._currentMode(ray, this._snapOnBoundary(snap)) === 'face') {
+    if (this._currentMode(ray, snap) === 'face') {
       this._onPointerMoveFace(snap, ray)
     } else {
       this._onPointerMovePlane(snap, ray)
@@ -845,26 +983,21 @@ export class LineTool implements Tool {
    *     under the cursor (via `pick_face`), else plane mode (which itself
    *     resolves sketch-vs-ground via `_resolveIdleTarget`).
    */
-  private _currentMode(ray?: Ray, probeEdges = false): 'face' | 'plane' {
+  private _currentMode(ray?: Ray, snap: Snap | null = null): 'face' | 'plane' {
     if (this.faceStage.kind === 'anchored') return 'face'
     if (this.planeStage.kind === 'anchored') return 'plane'
     if (this._activeContext !== null) return 'face'
-    // An active idle plane lock beats face pick and sketch-hover adoption
-    // (design §5.2) — the user already chose a plane.
-    if (this.idlePlaneLock !== null) return 'plane'
+    // An active idle plane lock or Shift pin beats face pick and
+    // sketch-hover adoption (design §5.2) — the user already chose a plane.
+    if (this.idlePlaneLock !== null || this.pin.current !== null) return 'plane'
     if (ray === undefined) return 'plane'
 
-    return this._eligiblePickFor(ray, probeEdges) !== null ? 'face' : 'plane'
+    return this._facePickAt(snap, ray) !== null ? 'face' : 'plane'
   }
 
   private _onPointerMovePlane(snap: Snap | null, ray: Ray): void {
     if (this.planeStage.kind !== 'anchored') {
-      // Idle-locked: track the hover snap for `activeDrawPlaneCue()` (design
-      // §6 bullet 1) — the cue previews the plane through wherever the FIRST
-      // click would land right now.
-      if (this.idlePlaneLock !== null && snap !== null) {
-        this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
-      }
+      this._trackIdleHover(snap, ray)
       this.lastSnap = null
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
@@ -893,6 +1026,7 @@ export class LineTool implements Tool {
     // that has since been cancelled or closed.
     this.lastSnap = null
     if (this.faceStage.kind !== 'anchored') {
+      this._trackIdleHover(snap, ray)
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
       return
@@ -907,9 +1041,21 @@ export class LineTool implements Tool {
     const { points } = this.faceStage
     const last = points[points.length - 1]
     this._clearPreview()
+    this._drawFaceChain(points)
     this._drawRubberBandSegment(last, cursor, this._previewStyle(snap))
     this._reportMeasurement(last, cursor)
     this._publishTransient()
+  }
+
+  /** The segments a face chain has PLACED but not yet committed — nothing
+   *  reaches the kernel until the chain ends (`_commitFacePath`), so
+   *  without drawing them here a line clicked across a face was invisible
+   *  until Escape. Plane-mode chains need no equivalent: each of their
+   *  segments commits to the sketch as it is placed. */
+  private _drawFaceChain(points: readonly V3[]): void {
+    for (let i = 0; i + 1 < points.length; i++) {
+      this._drawRubberBandSegment(points[i], points[i + 1], PREVIEW_LINE_STYLE)
+    }
   }
 
   /**
@@ -938,7 +1084,7 @@ export class LineTool implements Tool {
     if (Math.abs(dotV3(normal, [p[0] - anchor[0], p[1] - anchor[1], p[2] - anchor[2]])) <= ANCHOR_ON_PLANE_EPS_M) {
       return p
     }
-    if (this._readoptFaceForPoint(p, ray, this._snapOnBoundary(snap))) return p
+    if (this._readoptFaceForPoint(p, ray, snap)) return p
     return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
   }
 
@@ -949,23 +1095,37 @@ export class LineTool implements Tool {
    * edge's two faces the first click meant. False, and nothing changes,
    * when there is no such face.
    */
-  private _readoptFaceForPoint(p: V3, ray: Ray, probeEdges: boolean): boolean {
+  private _readoptFaceForPoint(p: V3, ray: Ray, snap: Snap | null): boolean {
     if (this.faceStage.kind !== 'anchored') return false
-    const eligible = this._eligiblePickFor(ray, probeEdges)
-    if (eligible === null) return false
-    if (eligible.object === this.faceStage.object && eligible.face === this.faceStage.face) return false
-    const plane = this._worldFacePlane(eligible.object, eligible.face)
-    if (plane === null) return false
     const anchor = this.faceStage.points[0]
-    const off = (q: V3) => Math.abs(dotV3(plane.normal, [q[0] - plane.point[0], q[1] - plane.point[1], q[2] - plane.point[2]]))
+    // A boundary snap asks the ranked pick for a face through BOTH points
+    // (`_facePickAt`'s `also`) — the crossed edge's own faces, ranked, and
+    // filtered to the one holding the anchor too. Any other snap takes the
+    // plain pick and checks the same two-point containment against that
+    // face's real plane.
+    let eligible: FaceThroughPick | null
+    if (snapOnObjectBoundary(snap)) {
+      eligible = this._facePickAt(snap, ray, [anchor])
+      if (eligible === null) return false
+    } else {
+      const plain = this._eligiblePickFor(ray)
+      if (plain === null) return false
+      if (plain.object === this.faceStage.object && plain.face === this.faceStage.face) return false
+      const plane = this._worldFacePlane(plain.object, plain.face)
+      if (plane === null) return false
+      eligible = { ...plain, ...plane }
+    }
+    if (eligible.object === this.faceStage.object && eligible.face === this.faceStage.face) return false
+    const off = (q: V3) => Math.abs(dotV3(eligible.normal, [q[0] - eligible.point[0], q[1] - eligible.point[1], q[2] - eligible.point[2]]))
     if (off(anchor) > ANCHOR_ON_PLANE_EPS_M || off(p) > ANCHOR_ON_PLANE_EPS_M) return false
     this.faceStage = {
       kind: 'anchored',
       object: eligible.object,
       face: eligible.face,
-      normal: plane.normal,
+      normal: eligible.normal,
       planePoint: anchor,
       points: [anchor],
+      boundary: [this.faceStage.boundary[0]],
     }
     this._lastFaceCursor = null
     return true
@@ -975,20 +1135,7 @@ export class LineTool implements Tool {
    *  the active instance's pose when drawing inside one; null for a stale
    *  handle or a singular pose. */
   private _worldFacePlane(object: bigint, face: bigint): { point: V3; normal: V3 } | null {
-    const normal = worldFaceNormal(this.wasmScene, object, face, this._activeInstance)
-    if (normal === null) return null
-    const planeArr = this.wasmScene.face_plane(object, face)
-    let point: V3 = [planeArr[0], planeArr[1], planeArr[2]]
-    if (this._activeInstance !== null) {
-      const pose = this.wasmScene.instance_pose(this._activeInstance)
-      if (pose === undefined) return null
-      point = [
-        pose[0] * point[0] + pose[1] * point[1] + pose[2] * point[2] + pose[3],
-        pose[4] * point[0] + pose[5] * point[1] + pose[6] * point[2] + pose[7],
-        pose[8] * point[0] + pose[9] * point[1] + pose[10] * point[2] + pose[11],
-      ]
-    }
-    return { point, normal }
+    return worldFacePlane(this.wasmScene, object, face, this._activeInstance)
   }
 
   /**
@@ -1031,6 +1178,7 @@ export class LineTool implements Tool {
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
     this._lastRayDir = ray.direction
+    this._closedByClick = false
     // A new press ends the window; the segment it places re-arms it.
     this.retype.close()
     // The phantom second pointerdown of a double-click (used to finish a
@@ -1038,7 +1186,7 @@ export class LineTool implements Tool {
     // genuine double-click places exactly one point then `onDoubleClick` ends
     // the chain. Every distinct click reaches here, regardless of cadence.
     this._lastViewDir = ray.direction
-    if (this._currentMode(ray, this._snapOnBoundary(snap)) === 'face') {
+    if (this._currentMode(ray, snap) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
       this._onPointerDownPlane(snap, ray)
@@ -1062,7 +1210,7 @@ export class LineTool implements Tool {
    * but IS armed for Escape's purposes.
    */
   hasArmedGesture(): boolean {
-    return this.capturingInput() || this.idlePlaneLock !== null
+    return this.capturingInput() || this.idlePlaneLock !== null || this.pin.current !== null
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -1070,8 +1218,9 @@ export class LineTool implements Tool {
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
-      if (!this.capturingInput() && this.idlePlaneLock !== null) {
+      if (!this.capturingInput() && (this.idlePlaneLock !== null || this.pin.current !== null)) {
         this.idlePlaneLock = null
+        this.pin.clear()
         this._lastIdleHoverPoint = null
         return
       }
@@ -1084,6 +1233,7 @@ export class LineTool implements Tool {
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
         this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
+        this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
       }
@@ -1187,6 +1337,7 @@ export class LineTool implements Tool {
       normal,
       planePoint: anchor,
       points: [anchor],
+      boundary: [this.faceStage.boundary[0]],
     }
     this._lastFaceCursor = null
   }
@@ -1198,7 +1349,18 @@ export class LineTool implements Tool {
    * arrow lock takes precedence and is left alone.
    */
   setShiftHeld(held: boolean): void {
-    if (!this.capturingInput()) return
+    if (!this.capturingInput()) {
+      // Idle: Shift toggles the plane PIN (planePin.ts; GitHub issue 14) —
+      // the plane the last hover recorded becomes the chain's drawing
+      // plane until Shift is pressed again or Escape releases it. A pin
+      // displaces an arrow-key lock (two shapes of the same choice).
+      if (this.pin.setShiftHeld(held)) {
+        this.idlePlaneLock = null
+        this._lastIdleHoverPoint = null
+      }
+      return
+    }
+    this.pin.markShift(held) // keep the autorepeat guard honest, never toggle
     if (held) {
       if (this.lockAxis !== null) return
       const axis = this._dominantAxis()
@@ -1239,6 +1401,14 @@ export class LineTool implements Tool {
    * to the Viewport's default "enter context" double-click gesture.
    */
   onDoubleClick(_snap: Snap | null, _ray: Ray): boolean {
+    // The dblclick of a double-click whose FIRST press already closed a
+    // face loop (`_appendFacePoint`): the chain is gone by now, but the
+    // gesture was this tool's, so it must not fall through to the host's
+    // enter-context / group-session double-click.
+    if (this._closedByClick) {
+      this._closedByClick = false
+      return true
+    }
     if (!this.capturingInput()) return false
     this._endChain()
     return true
@@ -1267,9 +1437,15 @@ export class LineTool implements Tool {
    */
   private _endChain(): void {
     this.retype.close()
+    // Idle hovers never run `_planeCursor`, so a "projected" verdict left
+    // by a ground chain's last hover would otherwise stick to every chip
+    // until the tool changed — "Ground projected" included.
+    this._snapProjected = false
     if (this.faceStage.kind === 'anchored' && this.faceStage.points.length >= 2) {
-      const { object, face, points } = this.faceStage
-      this._commitFacePath(object, face, points)
+      const { object, face, points, normal, boundary } = this.faceStage
+      this._lastFaceNormal = normal
+      this._commitFacePath(object, face, points, boundary)
+      this._lastFaceNormal = null
     }
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
@@ -1287,6 +1463,7 @@ export class LineTool implements Tool {
 
   cancel(): void {
     this.retype.close()
+    this._snapProjected = false
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
@@ -1298,6 +1475,7 @@ export class LineTool implements Tool {
     this.lockAxis = null
     this.shiftAxisLock = false
     this.idlePlaneLock = null
+    this.pin.clear()
     this._lastIdleHoverPoint = null
     this._clearPreview()
     this.onMeasurementCb('')
@@ -1599,12 +1777,10 @@ export class LineTool implements Tool {
     if (this.faceStage.kind === 'idle') {
       if (snap === null) return
 
-      const eligible = this._eligiblePickFor(ray, this._snapOnBoundary(snap))
+      const eligible = this._facePickAt(snap, ray)
       if (eligible === null) return
 
-      const { object: objectHandle, face: faceHandle } = eligible
-      const normal = worldFaceNormal(this.wasmScene, objectHandle, faceHandle, this._activeInstance)
-      if (normal === null) return // stale instance/degenerate pose — treat as no eligible face
+      const { object: objectHandle, face: faceHandle, normal } = eligible
       const anchor: V3 = [snap.x, snap.y, snap.z]
 
       this.faceStage = {
@@ -1614,6 +1790,7 @@ export class LineTool implements Tool {
         normal,
         planePoint: anchor,
         points: [anchor],
+        boundary: [snapOnObjectBoundary(snap)],
       }
       this._lastFaceCursor = null
       this.typed = ''
@@ -1622,7 +1799,7 @@ export class LineTool implements Tool {
     } else {
       const cursor = this._faceCursor(snap, ray)
       if (cursor === null) return
-      this._appendFacePoint(cursor)
+      this._appendFacePoint(cursor, snapOnObjectBoundary(snap))
     }
   }
 
@@ -1639,9 +1816,9 @@ export class LineTool implements Tool {
    * the cause is an ordinary same-point re-click or a genuine
    * snap-resolution defect.
    */
-  private _appendFacePoint(point: V3): void {
+  private _appendFacePoint(point: V3, onBoundary = false): void {
     if (this.faceStage.kind !== 'anchored') return
-    const { points } = this.faceStage
+    const { points, boundary } = this.faceStage
     const last = points[points.length - 1]
     if (segmentLength(last, point) <= DEGENERATE_SEGMENT_EPS) {
       this.onToast("That point is the same as the last one — move the cursor before clicking")
@@ -1649,10 +1826,22 @@ export class LineTool implements Tool {
     }
 
     points.push(point)
+    boundary.push(onBoundary)
     this._lastFaceCursor = null
     this.typed = ''
     this._clearPreview()
     this.onMeasurementCb('')
+    // Clicking back onto the chain's own start closes a loop: the chain is
+    // done, exactly as a ground chain closing a region ends itself. The
+    // `dblclick` a double-click on that start point then delivers belongs
+    // to this chain too (`onDoubleClick` consumes it) — not to the
+    // Viewport's enter-a-group gesture.
+    if (points.length >= 4 && segmentLength(points[0], point) <= DEGENERATE_SEGMENT_EPS) {
+      this._closedByClick = true
+      this._endChain()
+      return
+    }
+    this._drawFaceChain(points)
     this._publishTransient()
     if (!this._retyping) {
       this.retype.arm({ mode: 'face', index: points.length - 1 })
@@ -1690,8 +1879,10 @@ export class LineTool implements Tool {
       const dir = directionBetween(prev, points[spec.index])
       if (dir === null) return
       points[spec.index] = pointAlong(prev, dir, distance)
+      this.faceStage.boundary[spec.index] = false // moved along its segment: no longer a snapped edge hit
       this.typed = ''
       this._clearPreview()
+      this._drawFaceChain(points)
       this.onMeasurementCb('')
       this._publishTransient()
       return
@@ -1731,14 +1922,83 @@ export class LineTool implements Tool {
   }
 
   /** Cut `face` along the accumulated path (boundary-to-boundary). */
-  private _commitFacePath(object: bigint, face: bigint, points: V3[]): void {
+  /**
+   * Commit a face chain's placed points as face cuts.
+   *
+   * The kernel's `split_face` takes one SIMPLE boundary-to-boundary path:
+   * a chain that TOUCHES the face's boundary partway — a bisecting line
+   * continued to a third point on another edge, a corner-to-midpoint-to-
+   * corner triangle — was refused whole as `PathNotSimple`, though every
+   * piece of it is an ordinary cut. So the chain is cut into sub-paths at
+   * each point that lies on the boundary and committed one cut at a time,
+   * re-resolving which sub-face holds each sub-path after the previous
+   * split (a short pick ray dropped onto the sub-path's midpoint along the
+   * face normal — the two halves of a split are exactly the faces a pick
+   * at that spot can land on). A chain with no boundary point at all that
+   * closes onto its start is an interior loop and imprints a coplanar
+   * sub-face (`split_face_inner`) — a face drawn freehand inside a face,
+   * ready to push. Anything else (a dangling interior end, a
+   * self-touching path) is refused by the kernel with its usual typed
+   * error, one sub-path at a time; the cuts already made stay, as they
+   * are complete geometry the user drew. Every commit routes through the
+   * instance-aware sibling inside a component context.
+   */
+  private _commitFacePath(object: bigint, face: bigint, points: V3[], hints: readonly boolean[]): void {
+    // A point is on the boundary when it was SNAPPED to one of the object's
+    // edges or corners (exact, any scale) or when it lies on the face's
+    // outer loop geometrically (catches points that reached an edge by a
+    // lock projection or a typed length — tested against an f32 copy of
+    // the loop, so the tolerance follows the coordinates' magnitude).
+    const boundary = this._faceBoundaryPolygon(object, face)
+    const onBoundary = points.map((p, i) =>
+      hints[i] === true || (boundary !== null && pointOnPolygonBoundary(p, boundary)))
+    const closes = points.length >= 4 && segmentLength(points[0], points[points.length - 1]) <= DEGENERATE_SEGMENT_EPS
+
+    if (closes && !onBoundary.some(Boolean)) {
+      this._commitFaceLoop(object, face, points.slice(0, -1))
+      return
+    }
+
+    // Cut into boundary-to-boundary sub-paths. A leading or trailing run
+    // that never reaches the boundary is left to the kernel to refuse (it
+    // is a dangling edge), exactly as a whole such chain always was.
+    const subPaths: V3[][] = []
+    let current: V3[] = [points[0]]
+    for (let i = 1; i < points.length; i++) {
+      current.push(points[i])
+      if (onBoundary[i] && i < points.length - 1) {
+        subPaths.push(current)
+        current = [points[i]]
+      }
+    }
+    subPaths.push(current)
+
+    let target = face
+    for (let k = 0; k < subPaths.length; k++) {
+      const sub = subPaths[k]
+      if (k > 0) {
+        // The previous split replaced `target`: find the sub-face this
+        // path now lies on.
+        const found = this._facePickAtPoint(object, sub)
+        if (found === null) {
+          this.onToast('That line runs off the face it started on — draw it edge to edge')
+          return
+        }
+        target = found
+      }
+      if (!this._commitFaceCut(object, target, sub)) return
+    }
+  }
+
+  /** One `split_face` cut (instance-aware). False when the kernel refused
+   *  (already toasted). */
+  private _commitFaceCut(object: bigint, face: bigint, points: readonly V3[]): boolean {
     const path = new Float64Array(points.length * 3)
     for (let i = 0; i < points.length; i++) {
       path[i * 3 + 0] = points[i][0]
       path[i * 3 + 1] = points[i][1]
       path[i * 3 + 2] = points[i][2]
     }
-
     try {
       // Inside a component instance's editing context (component-edit-
       // parity.md phase A2), `object` is a definition member — the world
@@ -1754,12 +2014,88 @@ export class LineTool implements Tool {
         report.free()
       }
       this.onFaceImprint(object)
+      return true
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
+      this.onToast(message, code ?? undefined)
+      return false
+    }
+  }
+
+  /** An interior closed loop imprinted as a coplanar sub-face
+   *  (`split_face_inner`, instance-aware) — the same commit the shape tools
+   *  make for a rectangle or circle drawn inside a face. */
+  private _commitFaceLoop(object: bigint, face: bigint, loop: readonly V3[]): void {
+    const pts = new Float64Array(loop.length * 3)
+    for (let i = 0; i < loop.length; i++) {
+      pts[i * 3 + 0] = loop[i][0]
+      pts[i * 3 + 1] = loop[i][1]
+      pts[i * 3 + 2] = loop[i][2]
+    }
+    try {
+      if (this._activeInstance !== null) {
+        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, pts)
+      } else {
+        this.wasmScene.split_face_inner(object, face, pts)
+      }
+      this.onFaceImprint(object)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
     }
+  }
+
+  /** The face's outer boundary as WORLD points (posed through the active
+   *  instance), or null for a stale handle. */
+  private _faceBoundaryPolygon(object: bigint, face: bigint): V3[] | null {
+    let raw: ArrayLike<number>
+    try {
+      raw = this.wasmScene.face_boundary(object, face)
+    } catch {
+      return null
+    }
+    const pose = this._activeInstance !== null ? this.wasmScene.instance_pose(this._activeInstance) : undefined
+    if (this._activeInstance !== null && pose === undefined) return null
+    const out: V3[] = []
+    for (let i = 0; i + 2 < raw.length; i += 3) {
+      const p: V3 = [raw[i], raw[i + 1], raw[i + 2]]
+      out.push(pose !== undefined ? applyAffine3x4(pose, p) : p)
+    }
+    return out.length >= 3 ? out : null
+  }
+
+  /**
+   * The eligible face of `object` under the midpoint of `path`, found by
+   * dropping a short pick ray onto it along the face chain's normal — the
+   * sub-face a just-split path now lies on. Null when nothing eligible is
+   * there (the path left the face).
+   */
+  private _facePickAtPoint(object: bigint, path: readonly V3[]): bigint | null {
+    if (this.faceStage.kind !== 'anchored' && this._lastFaceNormal === null) return null
+    const normal = this.faceStage.kind === 'anchored' ? this.faceStage.normal : this._lastFaceNormal!
+    // Probe at a SEGMENT midpoint, never the chord between the sub-path's
+    // ends: the kernel accepts a cut exactly when every segment's midpoint
+    // is inside the face, so those points are the ones guaranteed to be on
+    // it — a bent path across a concave face (an L-shaped slab) can have
+    // its end-to-end chord midpoint out in the notch.
+    const lift = FACE_PICK_LIFT_M
+    for (let i = 0; i + 1 < path.length; i++) {
+      const a = path[i]
+      const b = path[i + 1]
+      const mid: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]
+      const ray: Ray = {
+        origin: [mid[0] + normal[0] * lift, mid[1] + normal[1] * lift, mid[2] + normal[2] * lift],
+        direction: [-normal[0], -normal[1], -normal[2]],
+      }
+      const pick = this._pickCache.pickFor(this.wasmScene, ray, (o, instance) =>
+        o === object && this._isEligible(o, instance))
+      if (pick !== null) return pick.face
+    }
+    return null
   }
 
   // ------------------------------------------------------------------ preview

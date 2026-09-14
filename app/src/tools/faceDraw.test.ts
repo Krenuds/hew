@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal } from './faceDraw'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import type { V3 } from '../viewport/geoHelpers'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -10,6 +11,7 @@ function makePick(object: bigint, face: bigint, instance?: bigint) {
     object: () => object,
     face: () => face,
     instance: () => instance,
+    depth: () => 0,
     free: vi.fn(),
   }
 }
@@ -149,14 +151,77 @@ describe('FacePickCache boundary probe', () => {
     expect(cache.pickFor(scene, RAY, eligible)).toBeNull()
     expect(pick_face).toHaveBeenCalledTimes(1)
   })
+})
 
-  it('with probeEdges, a miss on the ray retries beside it and takes the first face hit', () => {
-    const { scene, pick_face } = sceneMissingOnTheRay()
+describe('FacePickCache.faceThrough (boundary-click face resolution)', () => {
+  const RAY = { origin: [0, 0, 5] as [number, number, number], direction: [0, 0, -1] as [number, number, number] }
+  const eligible = () => true
+
+  /** A fake scene whose `pick_face` misses on the exact ray direction (a
+   *  boundary click — the strict polygon test misses both faces meeting
+   *  there) but returns `hit` for every nudged ring probe direction, and
+   *  whose `face_plane`/`face_normal` answer per the given `planes` map
+   *  (keyed `object:face`). */
+  function makeScene(
+    hit: { object: bigint; face: bigint } | ((callIndex: number) => { object: bigint; face: bigint } | undefined),
+    planes: Map<string, { point: V3; normal: V3 }>,
+  ) {
+    let callIndex = 0
+    const pick_face = vi.fn((_ox: number, _oy: number, _oz: number, dx: number, dy: number, dz: number) => {
+      const isBaseRay = dx === 0 && dy === 0 && dz === -1
+      const idx = callIndex++
+      if (isBaseRay) return undefined // exactly on the edge: a strict miss
+      const picked = typeof hit === 'function' ? hit(idx) : hit
+      if (picked === undefined) return undefined
+      return { object: () => picked.object, instance: () => undefined, face: () => picked.face, depth: () => 0, free: vi.fn() }
+    })
+    const face_normal = vi.fn((object: bigint, face: bigint) => {
+      const p = planes.get(`${object}:${face}`)
+      if (p === undefined) throw new Error(`no plane for ${object}:${face}`)
+      return new Float64Array(p.normal)
+    })
+    const face_plane = vi.fn((object: bigint, face: bigint) => {
+      const p = planes.get(`${object}:${face}`)
+      if (p === undefined) throw new Error(`no plane for ${object}:${face}`)
+      return new Float64Array([...p.point, ...p.normal])
+    })
+    return { pick_face, face_normal, face_plane } as unknown as WasmScene
+  }
+
+  it('a miss on the exact ray, a ring hit whose plane contains the through point, is returned', () => {
+    const scene = makeScene(
+      { object: 7n, face: 3n },
+      new Map([['7:3', { point: [0, 0, 0], normal: [0, 0, 1] }]]),
+    )
     const cache = new FacePickCache()
-    expect(cache.pickFor(scene, RAY, eligible, true)).toEqual({ object: 7n, face: 3n })
-    expect(pick_face).toHaveBeenCalledTimes(2) // the ray, then the first nudge hit
-    // Cached per (ray, probe) — the plain question about the same ray is
-    // answered afresh, not from the probed answer.
-    expect(cache.pickFor(scene, RAY, eligible)).toBeNull()
+    const result = cache.faceThrough(scene, RAY, eligible, null, [[0, 0, 0]])
+    expect(result).toEqual({ object: 7n, face: 3n, point: [0, 0, 0], normal: [0, 0, 1] })
+  })
+
+  it('a ring hit whose plane does NOT contain the through point is rejected', () => {
+    const scene = makeScene(
+      { object: 7n, face: 3n },
+      new Map([['7:3', { point: [0, 0, 0], normal: [0, 0, 1] }]]),
+    )
+    const cache = new FacePickCache()
+    // The through point sits 5m off the z=0 plane the only candidate lives on.
+    const result = cache.faceThrough(scene, RAY, eligible, null, [[0, 0, 5]])
+    expect(result).toBeNull()
+  })
+
+  it('two candidates through the point: the more camera-facing one wins', () => {
+    // Object 10/face 1: a vertical plane through the origin (normal +X) —
+    // facing the ray [0,0,-1] edge-on (facing score 0). Object 20/face 2: a
+    // horizontal plane through the origin (normal +Z) — facing the camera
+    // dead-on (facing score 1, since -ray.direction is +Z). Both planes pass
+    // through the origin, so the through point [0,0,0] lies on both.
+    const planes = new Map([
+      ['10:1', { point: [0, 0, 0] as V3, normal: [1, 0, 0] as V3 }],
+      ['20:2', { point: [0, 0, 0] as V3, normal: [0, 0, 1] as V3 }],
+    ])
+    const scene = makeScene((idx) => (idx === 1 ? { object: 10n, face: 1n } : { object: 20n, face: 2n }), planes)
+    const cache = new FacePickCache()
+    const result = cache.faceThrough(scene, RAY, eligible, null, [[0, 0, 0]])
+    expect(result).toEqual({ object: 20n, face: 2n, point: [0, 0, 0], normal: [0, 0, 1] })
   })
 })

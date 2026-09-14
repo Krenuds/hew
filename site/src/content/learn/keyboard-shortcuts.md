@@ -70,7 +70,7 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | `Esc` | Cancel / step back the current gesture; or exit one editing-context level |
 | `Enter` | Commit the typed value |
 | Type a number/length | Exact value for the current gesture (no input box needed) — also works right after a commit, redoing what you just made at the new value (every draw tool and Push/Pull, Offset, Move, Rotate, Scale) |
-| `Shift` | Lock to the dominant axis (Line, Move, Tape Measure) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool; can be pressed or released mid-drag, switching orbit and pan back and forth) |
+| `Shift` | Lock to the dominant axis (Line mid-chain, Move, Tape Measure) · pin the drawing plane under the cursor before the first click (Line, Rectangle, Circle, Polygon, Arc; `Shift` again or `Esc` releases) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool; can be pressed or released mid-drag, switching orbit and pan back and forth) |
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice, Tape Measure); `↓` clears |
 | `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) · turn off inertia for a precise, 1:1 orbit or pan (Orbit/Pan tools and middle-button orbit); pressing it while the camera is still coasting stops it dead |
 | `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate toggles between moving/rotating and copying (stays on until tapped again) |

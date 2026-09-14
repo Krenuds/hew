@@ -2340,7 +2340,13 @@ impl Object {
     ///   **unwelds** and a fresh quad wall is erected between the old edge and
     ///   the raised one, so the neighbor keeps its shape and the solid gains a
     ///   facet. Junctions where such an edge meets a transverse one reshape the
-    ///   transverse neighbor into a (still planar) stepped polygon.
+    ///   transverse neighbor into a (still planar) stepped polygon — unless the
+    ///   junction is a corner of the solid whose neighbor edge runs straight
+    ///   along the sweep (a triangle cut corner to corner across a box face):
+    ///   there the neighbor's edge simply ends at the raised vertex and the
+    ///   step is spliced into the THIRD face across that edge, splitting it
+    ///   (see `collinear_step_up`/`collinear_step_down`), since a step in the
+    ///   neighbor would double back over its own edge.
     /// - **PULL (outward) is unbounded by neighbor angle:** erecting a prism of
     ///   material on a flat face is always valid however oblique the neighbors,
     ///   so pulls do not refuse on account of the neighbor angles this rework
@@ -5331,16 +5337,10 @@ impl Object {
                 continue;
             }
             let oouter: Vec<Point3> = self.loop_positions(other.outer_loop).collect();
-            // Footprint overlap (projected along the sweep): a corner of either
-            // loop inside the other. Sufficient for the axis-aligned faces and
-            // imprint-over-wall cases that arise here.
-            let overlaps = mouter
-                .iter()
-                .any(|&p| point_inside_polygon(p, &oouter, mnormal))
-                || oouter
-                    .iter()
-                    .any(|&p| point_inside_polygon(p, &mouter, mnormal));
-            if !overlaps {
+            // Footprint overlap (projected along the sweep) — see
+            // `footprints_overlap` for why a corner-of-either-inside-the-other
+            // test alone was not enough.
+            if !footprints_overlap(&mouter, &oouter, mnormal) {
                 continue;
             }
             // Nearest part of this wall along the swept direction.
@@ -5466,6 +5466,85 @@ fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
 /// One face of a closed shell, flattened for the parity cast: its plane,
 /// outer loop positions, and hole loop positions.
 type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
+
+/// A point strictly inside the simple polygon `poly` (projected along
+/// `normal`), or `None` for a degenerate outline. Candidates are the
+/// vertex average and then the centroid of each corner's triangle
+/// (`p[i-1]`, `p[i]`, `p[i+1]`) — every simple polygon has a convex ear
+/// whose triangle lies inside it — and each is CHECKED with
+/// `point_inside_polygon` before being returned, so a concave outline's
+/// average sitting in its own notch is rejected rather than trusted.
+fn polygon_interior_point(poly: &[Point3], normal: Vec3) -> Option<Point3> {
+    let n = poly.len();
+    if n < 3 {
+        return None;
+    }
+    let nf = n as f64;
+    let sum = poly
+        .iter()
+        .fold(Vec3::new(0.0, 0.0, 0.0), |acc, p| acc + p.to_vec());
+    let mean = Point3::new(sum.x / nf, sum.y / nf, sum.z / nf);
+    if point_inside_polygon(mean, poly, normal) {
+        return Some(mean);
+    }
+    for i in 0..n {
+        let (a, b, c) = (poly[(i + n - 1) % n], poly[i], poly[(i + 1) % n]);
+        let centroid = Point3::new(
+            (a.x + b.x + c.x) / 3.0,
+            (a.y + b.y + c.y) / 3.0,
+            (a.z + b.z + c.z) / 3.0,
+        );
+        if point_inside_polygon(centroid, poly, normal) {
+            return Some(centroid);
+        }
+    }
+    None
+}
+
+/// Whether two face outlines overlap when both are projected along
+/// `normal` — the question the through-cut detection asks of the pushed face
+/// and a wall it might punch through. A vertex of either strictly inside
+/// the other is the plain case; but a sub-face whose every vertex is a
+/// corner of the solid (a diagonal triangle across a box face, a face
+/// split corner to corner) has NO vertex strictly inside the far wall's
+/// outline, nor the far wall's corners inside it, and `point_inside_polygon`
+/// answers boundary points by the luck of edge orientation — so which
+/// triangle counted as "through" was a coin toss. Two more tests settle
+/// it: a point verified to lie strictly INSIDE each outline
+/// (`polygon_interior_point`) tested against the other, and a proper
+/// crossing of the two boundaries. Mere boundary CONTACT (a shared edge, a
+/// corner touching an edge) is deliberately not overlap: a face beside the
+/// far wall's footprint slides past it, it does not punch through it. The
+/// interior sample is verified, never assumed: a concave outline's vertex
+/// average can sit in its own notch — and inside some unrelated face
+/// parked there — which would have reported overlap between two outlines
+/// that do not even touch.
+fn footprints_overlap(a: &[Point3], b: &[Point3], normal: Vec3) -> bool {
+    if a.iter().any(|&p| point_inside_polygon(p, b, normal))
+        || b.iter().any(|&p| point_inside_polygon(p, a, normal))
+    {
+        return true;
+    }
+    if polygon_interior_point(a, normal).is_some_and(|p| point_inside_polygon(p, b, normal))
+        || polygon_interior_point(b, normal).is_some_and(|p| point_inside_polygon(p, a, normal))
+    {
+        return true;
+    }
+    let (u, v) = crate::geom2d::plane_axes(normal);
+    let flat = |p: Point3| Point3::new(p.to_vec().dot(u), p.to_vec().dot(v), 0.0);
+    let na = a.len();
+    let nb = b.len();
+    for i in 0..na {
+        let (p, q) = (flat(a[i]), flat(a[(i + 1) % na]));
+        for j in 0..nb {
+            let (r, s) = (flat(b[j]), flat(b[(j + 1) % nb]));
+            if crate::geom2d::segments_cross_properly(p, q, r, s) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// A few non-axis-aligned ray directions for [`point_in_shell_faces`]; the
 /// first one whose cast grazes no face boundary decides the parity (same
@@ -6093,24 +6172,28 @@ fn push_pull_build_walls(
             // Junction at `h`'s origin (walk.verts[k]): `twin_h`'s
             // DESTINATION is this vertex (twin_h runs dest_of_h -> origin_of_h).
             // Splice a `down` step (raised -> original) right after `twin_h`.
-            if let Some(&v_raised) = raised.get(&walk.verts[k]) {
-                let v = walk.verts[k];
-                steps
-                    .entry(v)
-                    .or_default()
-                    .down
-                    .get_or_insert_with(|| splice_after(obj, wall_loop, twin_h, v_raised, v));
+            let v = walk.verts[k];
+            if let Some(&v_raised) = raised.get(&v)
+                && steps.entry(v).or_default().down.is_none()
+            {
+                let step = match collinear_step_down(obj, twin_h, v, v_raised, sweep) {
+                    Some(step) => step,
+                    None => splice_after(obj, wall_loop, twin_h, v_raised, v),
+                };
+                steps.entry(v).or_default().down = Some(step);
             }
             // Junction at `h`'s destination (walk.verts[(k+1)%n]): `twin_h`'s
             // ORIGIN is this vertex. Splice an `up` step (original -> raised)
             // right before `twin_h`, then repoint `twin_h`'s origin to raised.
             let v_dest = walk.verts[(k + 1) % n];
-            if let Some(&v_raised) = raised.get(&v_dest) {
-                steps
-                    .entry(v_dest)
-                    .or_default()
-                    .up
-                    .get_or_insert_with(|| splice_before(obj, wall_loop, twin_h, v_dest, v_raised));
+            if let Some(&v_raised) = raised.get(&v_dest)
+                && steps.entry(v_dest).or_default().up.is_none()
+            {
+                let step = match collinear_step_up(obj, twin_h, v_dest, v_raised, sweep) {
+                    Some(step) => step,
+                    None => splice_before(obj, wall_loop, twin_h, v_dest, v_raised),
+                };
+                steps.entry(v_dest).or_default().up = Some(step);
             }
         }
     }
@@ -7188,6 +7271,114 @@ fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
     obj.half_edges[a].edge = edge;
     obj.half_edges[b].twin = Some(a);
     obj.half_edges[b].edge = edge;
+}
+
+/// Whether the edge `dir` (from a junction vertex) runs along the sweep
+/// line — `sign` +1 for the same way as `sweep`, -1 for the opposite — and
+/// reaches strictly past the raised vertex, so the step from the junction
+/// to its raised copy lies INSIDE that edge.
+fn edge_runs_along_sweep(dir: Vec3, sweep: Vec3, sign: f64) -> bool {
+    let len = dir.length();
+    let sw = sweep.length();
+    if len <= sw + tol::POINT_MERGE || sw < tol::POINT_MERGE {
+        return false;
+    }
+    sign * dir.dot(sweep) / (len * sw) >= 1.0 - tol::NORMAL_DIRECTION
+}
+
+/// The junction step at a solid's CORNER, `up` direction (original ->
+/// raised; the junction is `twin_h`'s origin). When the transverse
+/// neighbor's own edge INTO the junction vertex runs straight back along
+/// the sweep — the pushed sub-face's corner is a corner of the whole solid,
+/// and the neighbor's edge continues along the line the step would take —
+/// a step spliced into the neighbor would double back over that edge: a
+/// collinear spike the plane refit rightly refuses (the diagonal triangle
+/// across a box face, pushed in: the bottom face's loop went (0,1,0) ->
+/// (0,0,0) -> (0,0.3,0)). The neighbor's edge instead ends at the raised
+/// vertex directly (the junction vertex leaves this neighbor), and the
+/// step lives on the THIRD face across that edge, which gains the raised
+/// vertex as a split of its own edge: its half-edge from the junction is
+/// shortened into the step (returned; Pass 4 twins it with the coplanar
+/// wall's vertical) and a new half-edge carries the remainder. `None` when
+/// the neighbor's edge is not collinear (the ordinary stepped-polygon
+/// case) or has no twin to carry the step.
+fn collinear_step_up(
+    obj: &mut Object,
+    twin_h: HalfEdgeId,
+    v: VertexId,
+    v_raised: VertexId,
+    sweep: Vec3,
+) -> Option<HalfEdgeId> {
+    let old_prev = obj.half_edges[twin_h].prev;
+    let p_origin = obj.half_edges[old_prev].origin;
+    let dir = obj.vertices[v].position - obj.vertices[p_origin].position;
+    if !edge_runs_along_sweep(dir, sweep, -1.0) {
+        return None;
+    }
+    let q = obj.half_edges[old_prev].twin?; // v -> p_origin, on the third face
+    let e_old = obj.half_edges[old_prev].edge;
+    // The neighbor: its edge now ends at the raised vertex (a half-edge
+    // ends where its `next` begins).
+    obj.half_edges[twin_h].origin = v_raised;
+    obj.vertices[v_raised].outgoing = twin_h;
+    // The third face: split `q` at the raised vertex. `q` keeps its origin
+    // (the junction) and becomes the step; `q2` carries the rest.
+    let q_next = obj.half_edges[q].next;
+    let m_loop = obj.half_edges[q].loop_id;
+    let q2 = obj.half_edges.insert(HalfEdge {
+        origin: v_raised,
+        twin: Some(old_prev),
+        next: q_next,
+        prev: q,
+        edge: e_old,
+        loop_id: m_loop,
+    });
+    obj.half_edges[q].next = q2;
+    obj.half_edges[q_next].prev = q2;
+    obj.half_edges[old_prev].twin = Some(q2);
+    obj.edges[e_old].half_edge = old_prev;
+    obj.edges[e_old].twin_half_edge = Some(q2);
+    obj.half_edges[q].twin = None;
+    obj.half_edges[q].edge = EdgeId::default();
+    obj.vertices[v].outgoing = q;
+    Some(q)
+}
+
+/// The `down` mirror of [`collinear_step_up`] (raised -> original; the
+/// junction is `twin_h`'s destination): the neighbor's edge OUT of the
+/// junction runs straight on along the sweep. That edge now starts at the
+/// raised vertex, and the third face across it gains the step `raised ->
+/// original` spliced after its own (now shortened) half-edge.
+fn collinear_step_down(
+    obj: &mut Object,
+    twin_h: HalfEdgeId,
+    v: VertexId,
+    v_raised: VertexId,
+    sweep: Vec3,
+) -> Option<HalfEdgeId> {
+    let old_next = obj.half_edges[twin_h].next;
+    let n_dest = obj.half_edges[obj.half_edges[old_next].next].origin;
+    let dir = obj.vertices[n_dest].position - obj.vertices[v].position;
+    if !edge_runs_along_sweep(dir, sweep, 1.0) {
+        return None;
+    }
+    let r = obj.half_edges[old_next].twin?; // n_dest -> v, on the third face
+    obj.half_edges[old_next].origin = v_raised;
+    obj.vertices[v_raised].outgoing = old_next;
+    let r_next = obj.half_edges[r].next; // originates at the junction
+    let m_loop = obj.half_edges[r].loop_id;
+    let r2 = obj.half_edges.insert(HalfEdge {
+        origin: v_raised,
+        twin: None,
+        next: r_next,
+        prev: r,
+        edge: EdgeId::default(),
+        loop_id: m_loop,
+    });
+    obj.half_edges[r].next = r2;
+    obj.half_edges[r_next].prev = r2;
+    obj.vertices[v].outgoing = r_next;
+    Some(r2)
 }
 
 /// Splices a fresh half-edge `origin -> existing_next.origin` into `loop_id`

@@ -5018,3 +5018,294 @@ fn follow_me_sphere_is_smooth_in_both_directions() {
         "every interior edge of a sphere is soft ({soft}/{interior})"
     );
 }
+
+// ------------------------------------------- push/pull of corner-touching sub-faces
+
+/// The app's push/pull routing (`wasm-api`'s `push_pull`): an overshoot is
+/// a through-cut, everything else the kernel op. Returns the resulting
+/// object or the kernel's refusal, so a spec can pin both.
+fn app_push_pull(
+    obj: &Object,
+    face: FaceId,
+    distance: f64,
+) -> Result<Object, kernel::PushPullError> {
+    if obj.push_pull_overshoots(face, distance) {
+        return obj.push_through(face, distance);
+    }
+    let mut o = obj.clone();
+    o.push_pull(face, distance)?;
+    Ok(o)
+}
+
+/// The south face (normal -Y) of `obj` containing `p` (on the y=0 plane).
+fn south_face_at(obj: &Object, x: f64, z: f64) -> FaceId {
+    obj.faces()
+        .keys()
+        .find(|&f| obj.face_contains_point(f, Point3::new(x, 0.0, z)))
+        .unwrap_or_else(|| panic!("no south face at ({x}, 0, {z})"))
+}
+
+/// Case 1: a unit cube whose south face is split corner to corner.
+fn cube_with_diagonal(from_bottom_left: bool) -> Object {
+    let mut cube = unit_cube();
+    let south = face_with_normal(&cube, Vec3::new(0.0, -1.0, 0.0));
+    let path = if from_bottom_left {
+        [Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 1.0)]
+    } else {
+        [Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 0.0, 1.0)]
+    };
+    cube.split_face(south, &path).unwrap();
+    cube.validate().unwrap();
+    cube
+}
+
+/// Case 2: a unit cube whose south face is cut from both bottom corners to
+/// the top edge's midpoint — two right triangles flanking a middle one.
+fn cube_with_two_diagonals() -> Object {
+    let mut cube = unit_cube();
+    let south = face_with_normal(&cube, Vec3::new(0.0, -1.0, 0.0));
+    cube.split_face(
+        south,
+        &[Point3::new(0.0, 0.0, 0.0), Point3::new(0.5, 0.0, 1.0)],
+    )
+    .unwrap();
+    let right = south_face_at(&cube, 0.9, 0.5);
+    cube.split_face(
+        right,
+        &[Point3::new(0.5, 0.0, 1.0), Point3::new(1.0, 0.0, 0.0)],
+    )
+    .unwrap();
+    cube.validate().unwrap();
+    cube
+}
+
+fn expect_ok(label: &str, r: Result<Object, kernel::PushPullError>) -> Object {
+    match r {
+        Ok(o) => {
+            o.validate()
+                .unwrap_or_else(|e| panic!("{label}: result invalid: {e:?}"));
+            assert_eq!(
+                o.watertight(),
+                WatertightState::Watertight,
+                "{label}: not watertight"
+            );
+            o
+        }
+        Err(e) => panic!("{label}: refused with {e:?}"),
+    }
+}
+
+#[test]
+fn case1_each_diagonal_triangle_pushes_partway_and_all_the_way_through() {
+    for from_bottom_left in [true, false] {
+        let cube = cube_with_diagonal(from_bottom_left);
+        // Interior sample points of the two triangles, either side of the cut
+        // (the line z = x, or x + z = 1).
+        let samples: [(f64, f64); 2] = if from_bottom_left {
+            [(0.25, 0.75), (0.75, 0.25)]
+        } else {
+            [(0.25, 0.25), (0.75, 0.75)]
+        };
+        for (x, z) in samples {
+            let tri = south_face_at(&cube, x, z);
+            let label =
+                format!("diagonal from_bottom_left={from_bottom_left}, triangle at ({x},{z})");
+            let partial = expect_ok(&format!("{label} partial"), app_push_pull(&cube, tri, -0.3));
+            // The pushed triangle sits at y = 0.3, the rest of the cube is intact.
+            assert!(
+                partial.face_contains_point(
+                    south_face_at_y(&partial, x, 0.3, z),
+                    Point3::new(x, 0.3, z)
+                )
+            );
+            let through = expect_ok(&format!("{label} through"), app_push_pull(&cube, tri, -1.0));
+            // A triangular prism is gone: the far face lost the triangle.
+            assert!(
+                through
+                    .faces()
+                    .keys()
+                    .all(|f| !through.face_contains_point(f, Point3::new(x, 1.0, z))),
+                "{label}: the far face still covers the pushed-out triangle"
+            );
+            assert!(
+                through
+                    .faces()
+                    .keys()
+                    .any(|f| through.face_contains_point(f, Point3::new(1.0 - x, 1.0, 1.0 - z))),
+                "{label}: the far face lost the OTHER triangle too"
+            );
+        }
+    }
+}
+
+/// A face of `obj` lying on the plane y = `y` and containing (x, y, z).
+fn south_face_at_y(obj: &Object, x: f64, y: f64, z: f64) -> FaceId {
+    obj.faces()
+        .keys()
+        .find(|&f| obj.face_contains_point(f, Point3::new(x, y, z)))
+        .unwrap_or_else(|| panic!("no face at ({x}, {y}, {z})"))
+}
+
+#[test]
+fn case2_the_outer_triangles_push_partway_and_through() {
+    let cube = cube_with_two_diagonals();
+    for (x, z, name) in [(0.15, 0.7, "left"), (0.85, 0.7, "right")] {
+        let tri = south_face_at(&cube, x, z);
+        expect_ok(
+            &format!("case 2 {name} partial"),
+            app_push_pull(&cube, tri, -0.3),
+        );
+        let through = expect_ok(
+            &format!("case 2 {name} through"),
+            app_push_pull(&cube, tri, -1.0),
+        );
+        assert!(
+            through
+                .faces()
+                .keys()
+                .all(|f| !through.face_contains_point(f, Point3::new(x, 1.0, z))),
+            "case 2 {name}: the far face still covers the pushed-out triangle"
+        );
+    }
+}
+
+/// The middle triangle's apex is the top edge's midpoint: any inward push
+/// drags that apex across the TOP face's interior, so the two slanted walls
+/// would meet along a ridge lying in the top face — a solid pinched to zero
+/// thickness along a line, non-manifold. Refused typed, object untouched
+/// (and the through-cut boolean refuses the same contact); carving the two
+/// OUTER triangles instead leaves the middle prism, which is the shape a
+/// user reaching for this actually wants (see `case3_…`).
+#[test]
+fn case2_the_middle_triangle_refuses_because_its_apex_would_crease_the_top_face() {
+    let cube = cube_with_two_diagonals();
+    let tri = south_face_at(&cube, 0.5, 0.3);
+    for d in [-0.3, -1.0] {
+        let before = cube.clone();
+        let r = app_push_pull(&cube, tri, d);
+        assert!(
+            r.is_err(),
+            "middle triangle pushed {d}: expected a typed refusal"
+        );
+        assert!(objects_equivalent(&cube, &before));
+    }
+}
+
+/// The wall-building push of a corner-touching triangle records an exact
+/// inverse: unbuilding it restores the split cube, vertex for vertex.
+#[test]
+fn case1_partial_push_unbuilds_exactly() {
+    for from_bottom_left in [true, false] {
+        let cube = cube_with_diagonal(from_bottom_left);
+        let samples: [(f64, f64); 2] = if from_bottom_left {
+            [(0.25, 0.75), (0.75, 0.25)]
+        } else {
+            [(0.25, 0.25), (0.75, 0.75)]
+        };
+        for (x, z) in samples {
+            let tri = south_face_at(&cube, x, z);
+            let mut o = cube.clone();
+            let report = o
+                .push_pull(tri, -0.3)
+                .expect("partial push of a corner triangle");
+            // Exactly what the History records as this push's inverse: the
+            // recorded un-build for a slanted-wall push, the plain reverse
+            // push (a coplanar-step collapse) otherwise.
+            if report.requires_unbuild_inverse {
+                o.unbuild_push_pull(report.face, &report.created_faces, -0.3)
+                    .expect("the recorded inverse un-builds the walls");
+            } else {
+                o.push_pull(report.face, 0.3)
+                    .expect("the reverse push collapses the step");
+            }
+            o.validate().unwrap();
+            assert!(
+                objects_equivalent(&o, &cube),
+                "the inverse must restore the split cube exactly"
+            );
+        }
+    }
+}
+
+#[test]
+fn case3_carving_both_outer_triangles_works_in_either_order() {
+    for order in [["left", "right"], ["right", "left"]] {
+        let mut obj = cube_with_two_diagonals();
+        for name in order {
+            let (x, z) = if name == "left" {
+                (0.15, 0.7)
+            } else {
+                (0.85, 0.7)
+            };
+            let tri = south_face_at(&obj, x, z);
+            obj = expect_ok(
+                &format!("case 3 order {order:?}, carving {name}"),
+                app_push_pull(&obj, tri, -1.0),
+            );
+        }
+        // Only the middle prism remains: a solid with the middle triangle at both ends.
+        assert!(
+            obj.faces()
+                .keys()
+                .any(|f| obj.face_contains_point(f, Point3::new(0.5, 0.0, 0.3)))
+        );
+        assert!(
+            obj.faces()
+                .keys()
+                .any(|f| obj.face_contains_point(f, Point3::new(0.5, 1.0, 0.3)))
+        );
+        assert!(
+            obj.faces()
+                .keys()
+                .all(|f| !obj.face_contains_point(f, Point3::new(0.15, 1.0, 0.7)))
+        );
+    }
+}
+
+/// Through-cut detection must not be fooled by a CONCAVE far wall: an
+/// L-shaped wall's vertex average sits in its own notch, and a small,
+/// entirely unrelated face parked in that notch (a second shell of the
+/// same object, with a real gap between them) must not read as "under" the
+/// L. Before the interior sample was verified, that pair counted as an
+/// overlap and a plain local push was misrouted into a whole-object boolean.
+#[test]
+fn a_concave_far_wall_does_not_fake_a_through_cut_for_a_face_in_its_notch() {
+    // Shell 1: an L-prism, y in [0, 3], cross-section (x,z) = the L
+    // (0,0),(3,0),(3,1),(1,1),(1,3),(0,3) — its notch is the square
+    // (1..3, 1..3). Shell 2: a box in that notch, x,z in [1.2, 2.8], y in
+    // [-6, -3] — a gap of 3 between them, so nothing the box's y=-3 face is
+    // pushed toward (+y) is ever touched before y = 0... and the L's y=0
+    // cap does not lie over the box at all.
+    let l = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(3.0, 0.0, 0.0),
+        Point3::new(3.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 3.0),
+        Point3::new(0.0, 0.0, 3.0),
+    ];
+    let profile =
+        kernel::Profile::new(Plane::from_polygon(&l).unwrap(), l.to_vec(), Vec::new()).unwrap();
+    let l_prism = Object::from_extrusion(&profile, 3.0).unwrap();
+    let cube = box_object(Point3::new(1.2, -6.0, 1.2), Point3::new(2.8, -3.0, 2.8));
+    let obj = Object::boolean(
+        kernel::BooleanOp::Union,
+        &l_prism,
+        &cube,
+        &Transform::IDENTITY,
+    )
+    .unwrap();
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    // The box's +y face (at y = -3), pushed OUTWARD toward the L.
+    let face = obj
+        .faces()
+        .keys()
+        .find(|&f| obj.face_contains_point(f, Point3::new(2.0, -3.0, 2.0)))
+        .expect("the box's y = -3 face");
+    for d in [1.0, 2.9, 3.1, 10.0] {
+        assert!(
+            !obj.push_pull_overshoots(face, d),
+            "a pull of {d} through the L's notch never meets the L, so it is no through-cut"
+        );
+    }
+}

@@ -258,7 +258,7 @@ describe('glyphIndexAt — real ink-based attribution (previously zero coverage:
 })
 
 function makePick(object: bigint, face: bigint, instance?: bigint) {
-  return { object: () => object, face: () => face, instance: () => instance, free: vi.fn() }
+  return { object: () => object, face: () => face, depth: () => 1, instance: () => instance, free: vi.fn() }
 }
 
 /** Minimal WasmScene stub — only the members TextPlaceTool calls. */

@@ -24,6 +24,7 @@ function makeFacePick(object: bigint, face: bigint, instance: bigint | undefined
   return {
     object: () => object,
     face: () => face,
+    depth: () => 1,
     instance: () => instance,
     free: vi.fn(),
   }

@@ -137,6 +137,20 @@ export function planeFromSketch(
 }
 
 /**
+ * The `DrawPlane` through `origin` with unit `normal` — the general
+ * point+normal constructor `axisDrawPlane` below doesn't cover (its normal
+ * is always a literal drawing axis). Mirrors `planeFromSketch`'s tail: the
+ * exact `groundDrawPlane()` when the result IS the ground plane, else
+ * `null` for a degenerate normal.
+ */
+export function drawPlaneThrough(origin: V3, normal: V3): DrawPlane | null {
+  if (isGroundPlane(origin, normal)) return groundDrawPlane()
+  const basis = facePlaneBasis(normal)
+  if (basis === null) return null
+  return { origin, normal, u: basis.u, v: basis.v, ground: false }
+}
+
+/**
  * The `DrawPlane` through `through` with unit normal along drawing-axis
  * `axis` (0=red/X, 1=green/Y, 2=blue/Z) of `frame` — the idle plane lock
  * (Phase 3), extended by the movable-drawing-axes design (tool-parity §4)

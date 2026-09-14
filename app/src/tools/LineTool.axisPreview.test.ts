@@ -167,6 +167,7 @@ describe('LineTool — soft/hard axis preview colour and weight (design §2c)', 
     ;(scene as unknown as { pick_face: ReturnType<typeof vi.fn> }).pick_face = vi.fn(() => ({
       object: () => 1n,
       face: () => 2n,
+      depth: () => 1,
       instance: () => undefined,
       free: vi.fn(),
     }))

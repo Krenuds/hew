@@ -41,7 +41,7 @@ function makeKeyEvent(key: string): KeyboardEvent {
 }
 
 function makePick(object: bigint, face: bigint) {
-  return { object: () => object, face: () => face, instance: () => undefined, free: vi.fn() }
+  return { object: () => object, face: () => face, depth: () => 1, instance: () => undefined, free: vi.fn() }
 }
 
 function makeWasmScene(opts: {

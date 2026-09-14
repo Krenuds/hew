@@ -18,6 +18,7 @@ function makePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
+    depth: () => 1,
     instance: () => instance,
     free: vi.fn(),
   }

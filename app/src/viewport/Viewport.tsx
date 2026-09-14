@@ -7475,10 +7475,17 @@ export default function Viewport({
     function onShiftKeyDown(ev: KeyboardEvent): void {
       if (ev.key !== 'Shift') return
       switchLiveDragForShift(true)
-      // Move's Shift-held axis lock. Idempotent under keydown autorepeat.
+      // Move's Shift-held axis lock, and the draw tools' idle plane pin
+      // (planePin.ts). Idempotent under keydown autorepeat.
       const at = toolController.activeTool
       if ('setShiftHeld' in at) {
         (at as { setShiftHeld(held: boolean): void }).setShiftHeld(true)
+        // A pin changes the status hint and the plane cue without any
+        // pointer movement to re-poll them — refresh both here, the same
+        // way the key router does after a captured arrow key.
+        reportToolHint()
+        drawPlaneCueLayer.update(queryDrawPlaneCue(at), getDrawingAxes(wasmScene))
+        scheduleRender()
       }
       if (!shiftPanActive && activeToolPropRef.current === 'Orbit') {
         shiftPanActive = true
