@@ -410,35 +410,65 @@ file. On desktop this is written to the app's log directory (in a
 is normally the single best attachment for a bug report, since it already
 contains everything needed to reproduce the failure.
 
-The crash screen (`ErrorBoundary.tsx`) has a **Save reproducer** button for
+The crash screen (`ErrorBoundary.tsx`) has a **Report this crash** button for
 the case the automatic dump can't cover: a kernel panic. The crash screen
 appears either on an uncaught render error or, for a panic, as soon as the
 panic hook fires `hew:kernel-panic` — the handler that hit the panic usually
 catches the trap, so no render error follows, and the screen shows only the
 underlying panic. Once a panic has been captured the automatic dump stands
 down (every later uncaught error is the poisoned instance's symptom), and
-the button is the way to save the bundle. It sources `recording` from the
-panic capture (§2 above), since by then `take_recording()` on the registered
-scene would just throw; with no capture (a render crash that isn't a kernel
-panic) it tries `take_recording()` directly. If an automatic dump is still
-writing when the button is pressed, it waits for that write to finish.
+the button is the way to send or save a bundle instead. It opens
+`ReportBugDialog` (below) in crash mode, rendered inside the boundary itself
+since the rest of the app tree is gone; the model row is unavailable there
+(no live scene to save), and `recording` comes from the panic capture (§2
+above) when there is one, since `take_recording()` on the registered scene
+would just throw by then.
 
-**Help ▸ Report Bug…**'s bundle (`reportBug.ts`) is separate from both: it's
-user-triggered rather than failure-triggered, so it additionally carries
-OS/GPU/app-version and the input recorder's buffer, and it **peeks** the
-session recording (`peek_recording()`) rather than taking it — a menu action
-has no reason to steal the calls a later crash reproducer might still need.
+**Help ▸ Report Bug…** (`log/reportBundle.ts`, `log/reportImports.ts`,
+`panels/ReportBugDialog.tsx`, docs/design/report-bug.md) opens a dialog
+rather than writing a file directly: a checklist of what a report would
+contain — app/system details, recorded steps, imported files, the model, a
+log tail, and (Debug Mode only) raw input events — each shown with its size
+and a preview, any of which can be unticked before sending. Imported files
+are the user files recorded calls embed as byte arrays: the `import_*`
+calls, `add_texture_material`'s image, `insert_item` and
+`insert_item_palette`, and a mid-session `load` (`FILE_CALLS` in
+`reportImports.ts`). Unticking that row empties those arrays (and
+`import_dae`'s `images`) and marks the bundle `importsStripped`, so the
+steps no longer replay.
+**Send report** gzips the bundle and submits it to a private intake service
+on Hew's Cloudflare account, leaving out the model and then imported files
+when it passes 90 MiB compressed, and returns a short report ID; **Save to
+file…** writes every ticked row as uncompressed JSON locally instead, for
+attaching to a manually-filed issue. A report after a large import runs to
+hundreds of megabytes, so the bundle is never held as one string: it is
+written in pieces of at most 1 MiB that are compressed or encoded as they
+come, with a task boundary after each piece (browsers compress inside
+`CompressionStream` writes that resolve as microtasks, so without one a
+whole report compresses as a single long task). The dialog paints first and gathers once per opening (one
+`peek_recording`, one `save`, one scan of the recording), showing
+"Gathering details…" until that's done; ticking rows recomputes the
+checklist from what was gathered, and only the compressed size is measured
+again, cancellably, with one build running at a time. Unlike the automatic dump, this is user-triggered
+rather than failure-triggered, so it additionally carries OS/GPU/app-version,
+and it **peeks** the session recording (`peek_recording()`) rather than
+taking it — a menu action has no reason to steal the calls a later crash
+reproducer might still need.
 
 If a bug doesn't trigger an unhandled error (a wrong result rather than a
-crash), attach these three things by hand instead:
+crash), Help ▸ Report Bug… still works — or attach these three things by
+hand to a manually-filed issue instead:
 
 1. The **debug log** — enable Debug Mode first if it wasn't already on, so
    the file exists; download it via Settings → Debug on web, or locate
    `diagnostic.log` in the app log directory on desktop.
 2. The **session recording** — obtained via `take_recording()` (§2 above), or
-   from an existing reproducer bundle's `recording` field.
+   from an existing report/reproducer bundle's `recording` field.
 3. The **`.hew` file** you were working in when the problem occurred.
 
-File bugs at https://github.com/hew3d/hew/issues. Include the Hew version,
-platform, and a short description of what you expected versus what happened
-— the attached files carry the reproducible detail.
+A report sent through the dialog never becomes public by itself. To also
+file a public issue, use the dialog's "Also open a public GitHub issue" link
+after sending (prefilled with the description, version, platform, and report
+ID, never an attachment), or file one directly at
+https://github.com/hew3d/hew/issues with the same three files attached by
+hand.

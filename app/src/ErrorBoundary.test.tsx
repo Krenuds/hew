@@ -5,24 +5,14 @@
  * ErrorBoundary is the ideal subject — it's the one component whose whole job is
  * an observable render branch (children vs. fallback) with no wasm/three.js seam.
  */
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBoundary, LAST_ERROR_KEY } from './ErrorBoundary'
 import { KERNEL_PANIC_EVENT } from './log/panicCapture'
 
-// The real saveCrashReproducer talks to the reproducer store — mock it so
-// the Save reproducer button's feedback states can be driven deterministically.
-vi.mock('./log/reproducerDump', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./log/reproducerDump')>()
-  return { ...actual, saveCrashReproducer: vi.fn() }
-})
-import { saveCrashReproducer } from './log/reproducerDump'
-const mockSaveCrashReproducer = vi.mocked(saveCrashReproducer)
-
 describe('ErrorBoundary', () => {
   beforeEach(() => {
     localStorage.clear()
-    mockSaveCrashReproducer.mockReset().mockResolvedValue({ ok: true, path: null })
   })
   afterEach(() => {
     vi.restoreAllMocks()
@@ -101,7 +91,7 @@ describe('ErrorBoundary', () => {
     expect(screen.queryByText('still running')).not.toBeInTheDocument()
     expect(screen.getByText(/UnknownVertex/)).toBeInTheDocument()
     expect(screen.queryByText(/render error/i)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /save reproducer/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^report this crash$/i })).toBeInTheDocument()
     expect(localStorage.getItem(LAST_ERROR_KEY)).toContain('UnknownVertex')
   })
 
@@ -224,7 +214,7 @@ describe('ErrorBoundary', () => {
     expect(screen.getByText(/kernel panic — panicked at crates\/kernel\/src\/ops\.rs:123/)).toBeInTheDocument()
   })
 
-  describe('Save reproducer button', () => {
+  describe('Report this crash button', () => {
     function renderBoom() {
       vi.spyOn(console, 'error').mockImplementation(() => {})
       function Boom(): never {
@@ -239,57 +229,61 @@ describe('ErrorBoundary', () => {
 
     it('shows the hint line', () => {
       renderBoom()
-      expect(screen.getByText(/save reproducer writes a file with the steps that led here/i)).toBeInTheDocument()
+      expect(
+        screen.getByText(/report this crash sends the steps that led here privately to the hew developer/i),
+      ).toBeInTheDocument()
     })
 
-    it('shows Saving… immediately, then Saved with the path on a Tauri-style result', async () => {
-      let resolveSave!: (v: { ok: boolean; path: string | null }) => void
-      mockSaveCrashReproducer.mockReturnValue(
-        new Promise((resolve) => {
-          resolveSave = resolve
-        }),
+    it('opens ReportBugDialog in crash mode on click, with the model row unavailable', async () => {
+      renderBoom()
+      expect(screen.queryByRole('dialog', { name: /report this crash/i })).not.toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('button', { name: /^report this crash$/i }))
+
+      const dialog = await screen.findByRole('dialog', { name: /report this crash/i })
+      expect(dialog).toBeInTheDocument()
+      // Crash mode: no live scene, so the model row's checkbox is disabled and
+      // shows why (reportBundle.ts's ReportRowInfo.disabledReason).
+      expect(await screen.findByText(/unavailable after a crash/i)).toBeInTheDocument()
+    })
+
+    it('closes the dialog via its own Cancel button', async () => {
+      renderBoom()
+      fireEvent.click(screen.getByRole('button', { name: /^report this crash$/i }))
+      await screen.findByRole('dialog', { name: /report this crash/i })
+
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+
+      expect(screen.queryByRole('dialog', { name: /report this crash/i })).not.toBeInTheDocument()
+    })
+
+    it('sources the crash message from the in-memory panic capture when present', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      function Boom(): never {
+        throw new Error('kaboom')
+      }
+      ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = {
+        at: '2026-01-01T00:00:00.000Z',
+        message: 'panicked at crates/kernel/src/document.rs:42: UnknownVertex',
+        recording: '{"version":2,"calls":["Foo"],"golden_hash":0}',
+      }
+      render(
+        <ErrorBoundary>
+          <Boom />
+        </ErrorBoundary>,
       )
-      renderBoom()
 
-      fireEvent.click(screen.getByRole('button', { name: /save reproducer/i }))
-      expect(mockSaveCrashReproducer).toHaveBeenCalledTimes(1)
-      expect(screen.getByRole('button', { name: /saving/i })).toBeInTheDocument()
-
-      resolveSave({ ok: true, path: '/home/user/.local/share/hew/reproducers/reproducer-1.json' })
-      expect(await screen.findByRole('button', { name: /^saved$/i })).toBeInTheDocument()
-      expect(screen.getByText(/\/home\/user\/\.local\/share\/hew\/reproducers\/reproducer-1\.json/)).toBeInTheDocument()
-    })
-
-    it('shows Saved with no path text on a web-style result (download, no path)', async () => {
-      mockSaveCrashReproducer.mockResolvedValue({ ok: true, path: null })
-      renderBoom()
-
-      fireEvent.click(screen.getByRole('button', { name: /save reproducer/i }))
-      expect(await screen.findByRole('button', { name: /^saved$/i })).toBeInTheDocument()
-      expect(screen.queryByText(/^saved to /i)).not.toBeInTheDocument()
-    })
-
-    it("shows Couldn't save on failure", async () => {
-      mockSaveCrashReproducer.mockResolvedValue({ ok: false, path: null })
-      renderBoom()
-
-      fireEvent.click(screen.getByRole('button', { name: /save reproducer/i }))
-      expect(await screen.findByRole('button', { name: /couldn't save/i })).toBeInTheDocument()
-    })
-
-    it('ignores a click while a save is already in flight', () => {
-      let resolveCount = 0
-      mockSaveCrashReproducer.mockImplementation(() => {
-        resolveCount++
-        return new Promise(() => {}) // never resolves within this test
-      })
-      renderBoom()
-
-      const button = screen.getByRole('button', { name: /save reproducer/i })
-      fireEvent.click(button)
-      fireEvent.click(screen.getByRole('button', { name: /saving/i }))
-
-      expect(resolveCount).toBe(1)
+      fireEvent.click(screen.getByRole('button', { name: /^report this crash$/i }))
+      await screen.findByRole('dialog', { name: /report this crash/i })
+      // Expand the Recorded steps row's preview — it reflects the panic
+      // capture's recording (one step, "Foo"), not "no recording available",
+      // proof crashInfo() picked up the in-memory capture rather than
+      // falling back to a bare render-error crash block.
+      const showButtons = await screen.findAllByRole('button', { name: /^show$/i })
+      // Show links wait for the dialog to finish gathering the report.
+      await waitFor(() => expect(showButtons[1]).not.toBeDisabled())
+      fireEvent.click(showButtons[1]) // rows: system, recording, model, log
+      expect(await screen.findByText(/1 step recorded/i)).toBeInTheDocument()
     })
   })
 })

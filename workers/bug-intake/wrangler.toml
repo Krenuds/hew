@@ -1,0 +1,43 @@
+name = "bug-intake"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# No [vars] block anywhere in this file, deliberately: every configurable
+# value (docs/design/report-bug.md §8 "Configuration") is a Worker secret
+# (`wrangler secret put`, see README.md's deploy checklist) rather than a
+# plaintext var — a committed `[vars]` block would publish the maintainer's
+# address in this public repository, and secrets (unlike `[vars]`) survive
+# `wrangler deploy`. Tunables (retention, size caps, rate limits) are
+# constants in `src/constants.ts`, not configuration at all.
+
+# One Durable Object per report (`ReportDrop`, chunked bundle storage with a
+# retention alarm) plus a single `ReportIndex` instance (the admin list,
+# storage ceiling, and rate-limit counters) — both SQLite-backed, both on
+# the Workers FREE plan, same posture as share-relay's `ShareDrop` (see
+# workers/share-relay/wrangler.toml and its README's "Storage" section for
+# why: every free-tier limit fails closed, nothing here can bill).
+[[durable_objects.bindings]]
+name = "REPORT_DROP"
+class_name = "ReportDrop"
+
+[[durable_objects.bindings]]
+name = "REPORT_INDEX"
+class_name = "ReportIndex"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReportDrop", "ReportIndex"]
+
+# The maintainer notification email (src/email.ts, src/emailMailer.ts). No
+# `destination_address` here: the recipient comes from the `NOTIFY_TO`
+# secret at send time (§8), and Cloudflare still restricts delivery to a
+# verified Email Routing destination address regardless.
+[[send_email]]
+name = "NOTIFY"
+
+# app.hew3d.com also serves the Pages-hosted web app; a Workers route on the
+# same hostname takes precedence for matching paths (confirmed, not just
+# trusted, on first deploy — see README.md's deploy checklist).
+[[routes]]
+pattern = "app.hew3d.com/report/*"
+zone_name = "hew3d.com"

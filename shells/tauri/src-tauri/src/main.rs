@@ -43,6 +43,7 @@ mod qr;
 // (Settings ▸ Advanced ▸ Server) — see its module doc for why the requests
 // live in Rust rather than behind an HTTP plugin scope.
 mod relay_client;
+mod report_client;
 
 // ---------------------------------------------------------------------------
 // In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
@@ -1833,6 +1834,74 @@ fn write_file(app: tauri::AppHandle, path: String, contents: Vec<u8>) -> Result<
     std::fs::write(&path, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
 }
 
+/// Percent-decode (the inverse of JS's `encodeURIComponent`) a string carried
+/// in an IPC request header. Header values reach Rust through the same
+/// ASCII/Latin-1-only `Headers` model the browser Fetch API uses, so a path
+/// containing any non-ASCII character would arrive silently mangled (or, for
+/// most non-Latin-1 text, outright corrupted — JS's `Headers` coerces to a
+/// "byte string" by truncating each UTF-16 code unit) if sent raw; the caller
+/// percent-encodes it first, and this undoes that.
+fn percent_decode(s: &str) -> Result<String, String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s
+                .get(i + 1..i + 3)
+                .ok_or("percent_decode: truncated %XX escape")?;
+            let byte = u8::from_str_radix(hex, 16)
+                .map_err(|_| format!("percent_decode: invalid escape %{hex}"))?;
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "percent_decode: not valid UTF-8 after decoding".to_owned())
+}
+
+/// The raw-IPC-body twin of `write_file`, for a payload where `Vec<u8>` JSON
+/// marshalling (roughly 4 bytes of IPC JSON per file byte — every byte
+/// becomes a decimal number 0-255 plus a comma) would be prohibitively slow:
+/// the Report Bug dialog's Save to file… writes exactly this way, and a
+/// bundle carrying an imported model easily reaches hundreds of megabytes of
+/// JSON for what's really a few hundred megabytes of bytes, which is what
+/// hung the webview.
+///
+/// A raw-body invoke's argument position IS the byte buffer (see
+/// `relay_client.rs::relay_put`, the same pattern), so the destination path
+/// can't ride along as a normal argument — it comes in the `path` request
+/// header instead, percent-encoded by the caller. Gated by the exact same
+/// `write_allowed` approval check `write_file` uses, not a looser one: this
+/// is still arbitrary-file-write from the webview's perspective if that
+/// check were skipped or reimplemented more permissively.
+#[tauri::command]
+fn write_file_bytes(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let path_header = request
+        .headers()
+        .get("path")
+        .ok_or_else(|| "write_file_bytes: missing path header".to_owned())?
+        .to_str()
+        .map_err(|_| "write_file_bytes: path header is not valid ASCII".to_owned())?;
+    let path = percent_decode(path_header)?;
+
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("write_file_bytes expects a raw byte body".to_owned());
+        }
+    };
+
+    if !write_allowed(&app, Path::new(&path)) {
+        return Err(format!(
+            "write_file_bytes: {path:?} is not a user-approved path"
+        ));
+    }
+    std::fs::write(&path, bytes).map_err(|e| format!("write_file_bytes failed for {path:?}: {e}"))
+}
+
 /// List the direct children of a user-approved directory, returning their
 /// absolute paths. Only regular files are included (directories are omitted).
 #[tauri::command]
@@ -2536,6 +2605,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
+            write_file_bytes,
             list_dir,
             pick_open_path,
             pick_save_path,
@@ -2594,6 +2664,7 @@ fn main() {
             relay_client::relay_put,
             relay_client::relay_peek,
             relay_client::relay_delete,
+            report_client::report_submit,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -3968,6 +4039,47 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `write_file_bytes` itself needs a live `AppHandle` for its
+    // `write_allowed` check, which a plain `#[test]` can't construct (see
+    // the library_* tests below for the same limitation) — `percent_decode`
+    // is the part of it that's pure and worth pinning directly. The
+    // approval gate itself is exactly `write_file`'s own `write_allowed`
+    // call, unchanged and untouched by this addition.
+    #[test]
+    fn percent_decode_round_trips_encodeuricomponent_output() {
+        let cases = [
+            "/Users/kurt/Desktop/hew-bug-report-2026-01-01.json",
+            "C:\\Users\\kurt\\Desktop\\report.json",
+            "/tmp/héllo wörld/plus+sign/report.json",
+            "/tmp/100%/report.json",
+        ];
+        for path in cases {
+            // JS-side encoding this test stands in for: `encodeURIComponent(path)`.
+            let encoded = path
+                .bytes()
+                .map(|b| {
+                    let c = b as char;
+                    if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) {
+                        c.to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect::<String>();
+            assert_eq!(
+                percent_decode(&encoded).unwrap(),
+                path,
+                "round-trip of {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_decode_rejects_a_truncated_or_invalid_escape() {
+        assert!(percent_decode("abc%2").is_err());
+        assert!(percent_decode("abc%zz").is_err());
+    }
 
     #[test]
     fn slot_paths_maps_labels_and_legacy() {

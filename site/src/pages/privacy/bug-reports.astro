@@ -1,0 +1,108 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="Bug report privacy"
+  description="What a Hew bug report contains, where it's stored, who reads it, and how to have one deleted."
+>
+  <div class="container privacy-page">
+    <header class="page-head">
+      <h1>Bug reports</h1>
+      <p class="intro">
+        What Help ▸ Report Bug… sends, where it goes, and how long it's kept.
+      </p>
+    </header>
+
+    <div class="prose">
+      <h2>What's in a report</h2>
+      <p>
+        A report can include the description you write, an optional email
+        address, your app version and system details, the current session's
+        recorded steps, the files the session took in (imported or opened
+        files, and textures and library items you added), your model file,
+        and a tail of the diagnostic log. Each of those is a
+        separate checkbox in the dialog, on by default, with its size and a
+        preview shown next to it. Untick anything before sending.
+      </p>
+      <p>
+        Recorded steps and the model file carry your model's geometry.
+        Imported files are those original files byte for byte, such as a
+        SketchUp <code>.skp</code> or a photo used as a texture. Untick all
+        three to send only your description, system details, and log.
+      </p>
+
+      <h2>Nothing leaves your machine until you click Send</h2>
+      <p>
+        Opening the dialog sends nothing by itself. Only clicking
+        <strong>Send report</strong> submits it, compressed. A report over
+        90 MB after compression is sent without the model file, and then
+        without imported files; the dialog marks each one it leaves out.
+        <strong>Save to file…</strong> writes everything you ticked to a file
+        on your machine instead, and <strong>Cancel</strong> sends nothing at
+        all.
+      </p>
+
+      <h2>Where it's stored</h2>
+      <p>
+        Reports are stored on Cloudflare, inside Hew's own account — not on
+        a public bug tracker, and not visible to other users. A report is
+        never posted anywhere public unless you separately choose to open a
+        GitHub issue afterward, which never carries an attachment.
+      </p>
+
+      <h2>Who reads it</h2>
+      <p>
+        Only the Hew maintainer, through a private, access-controlled page.
+        Sending a report also sends the maintainer one email with a summary
+        and a link to it.
+      </p>
+
+      <h2>How long it's kept</h2>
+      <p>
+        Reports are kept for 90 days, then deleted automatically. If you'd
+        like yours deleted sooner, contact the maintainer with your report
+        ID (the <code>HEW-XXXX-XXXX</code> code shown after sending) and ask
+        for it to be removed.
+      </p>
+
+      <h2>What's never stored</h2>
+      <p>
+        Your IP address is never stored. A submission is only checked
+        against a same-day, salted hash of it, so a burst of reports from
+        one source can be rate-limited without keeping the address itself.
+      </p>
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .privacy-page {
+    padding-block: var(--space-2xl) var(--space-3xl);
+  }
+
+  .page-head {
+    max-width: 42rem;
+    margin-bottom: var(--space-xl);
+  }
+
+  .page-head .intro {
+    margin-top: var(--space-sm);
+    font-size: 1.0625rem;
+    color: var(--color-text-muted);
+  }
+
+  .prose {
+    max-width: 42rem;
+  }
+
+  .prose h2 {
+    margin-top: var(--space-xl);
+    font-size: 1.125rem;
+  }
+
+  .prose p {
+    color: var(--color-text-muted);
+    line-height: 1.6;
+  }
+</style>

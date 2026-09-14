@@ -17,6 +17,26 @@
 
 import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
 
+/**
+ * Write `bytes` to `path` via the raw-IPC-body `write_file_bytes` command
+ * (shells/tauri/src-tauri/src/main.rs) instead of `write_file`'s `Vec<u8>`
+ * JSON argument — a JSON number array costs roughly 4 bytes of IPC JSON per
+ * file byte, which for a large export (a bug-report bundle carrying an
+ * imported model easily reaches hundreds of MB) is slow enough to look like
+ * a hang. The path can't ride the invoke's normal argument position — a
+ * raw-body invoke's argument IS the byte buffer, the same reason
+ * `relayClient.ts`'s `relayPut` passes bytes directly rather than under a
+ * named key — so it goes in a `path` request header instead, percent-encoded
+ * since header values are ASCII/Latin-1-only in the browser `Headers` model
+ * `invoke`'s `headers` option goes through (main.rs's `write_file_bytes`
+ * undoes the encoding). Subject to the exact same path-approval check
+ * `write_file` uses.
+ */
+async function writeFileBytes(path: string, bytes: Uint8Array): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('write_file_bytes', bytes as never, { headers: { path: encodeURIComponent(path) } })
+}
+
 /** Extract the basename from a path that may use / or \ separators. */
 function basename(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
@@ -179,17 +199,17 @@ export class TauriFileHost implements FileHost {
     bytes: Uint8Array,
     suggestedName: string,
     fileType: ExportFileType,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const dotExt = '.' + fileType.ext
     const { invoke } = await import('@tauri-apps/api/core')
     const path = await invoke<string | null>('pick_save_path', {
       defaultName: suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt,
       filters: [{ name: fileType.description, extensions: [fileType.ext] }],
     })
-    if (path === null) return false
+    if (path === null) return null
 
-    await invoke('write_file', { path, contents: Array.from(bytes) })
-    return true
+    await writeFileBytes(path, bytes)
+    return path
   }
 
   async openForImport(): Promise<ImportPick | null> {

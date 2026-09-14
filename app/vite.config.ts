@@ -11,9 +11,27 @@ const appVersion = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
 ).version as string
 
-export default defineConfig({
+// Help ▸ Report Bug's web path posts same-origin to `/report/` (docs/design/
+// report-bug.md §8), which only a production `app.hew3d.com` deploy actually
+// serves. Under `vite dev`, set HEW_REPORT_PROXY to a `wrangler dev` URL
+// (e.g. `HEW_REPORT_PROXY=http://127.0.0.1:8788 pnpm dev`) to forward
+// `/report/` there and let the dialog send for real; leave it unset and a
+// dev build behaves like a self-hosted web build (Send report hidden).
+const reportProxyTarget = process.env.HEW_REPORT_PROXY
+
+// The function form of defineConfig — not the plain object literal — is
+// load-bearing: `command` distinguishes `vite build` from `vite dev`/
+// `vite serve`, and `__HEW_REPORT_DEV_PROXY__` MUST be false in every build
+// (`command !== 'serve'`) regardless of whatever HEW_REPORT_PROXY happens to
+// be set in the build environment's shell. Gating only on `Boolean(
+// reportProxyTarget)` (as an earlier version of this file did) bakes
+// whatever that env var was at BUILD time into the production bundle too —
+// a CI/dev machine with the var set for local testing would have shipped a
+// production build that thinks it can send reports off a bare static host.
+export default defineConfig(({ command }) => ({
   define: {
     __HEW_VERSION__: JSON.stringify(appVersion),
+    __HEW_REPORT_DEV_PROXY__: JSON.stringify(command === 'serve' && Boolean(reportProxyTarget)),
   },
   server: {
     // Under `tauri dev` the shell's webview loads the FIXED devUrl from
@@ -24,6 +42,14 @@ export default defineConfig({
     // use"). Plain web dev keeps vite's auto-port behavior: the Tauri CLI
     // sets TAURI_ENV_* only when it spawns the beforeDevCommand.
     strictPort: process.env.TAURI_ENV_PLATFORM !== undefined,
+    proxy: reportProxyTarget
+      ? {
+          '/report/': {
+            target: reportProxyTarget,
+            changeOrigin: true,
+          },
+        }
+      : undefined,
   },
   plugins: [
     react(),
@@ -76,13 +102,21 @@ export default defineConfig({
         // absence of a matching runtimeCaching rule, and keep the SPA
         // navigation fallback away from it too (a navigation to /relay/
         // must reach the server, not resolve to the precached index.html).
+        // The bug-report intake service (workers/bug-intake) is routed at
+        // <origin>/report/ the same way, and its admin pages sit behind
+        // Cloudflare Access: a navigation there answered from the precache
+        // shows this app instead of the Access login or the admin page.
         runtimeCaching: [
           {
             urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith('/relay/'),
             handler: 'NetworkOnly',
           },
+          {
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith('/report/'),
+            handler: 'NetworkOnly',
+          },
         ],
-        navigateFallbackDenylist: [/^\/relay(\/|$)/],
+        navigateFallbackDenylist: [/^\/relay(\/|$)/, /^\/report(\/|$)/],
       },
 
       // Leave the service worker disabled in dev so `pnpm dev` is unaffected.
@@ -91,4 +125,4 @@ export default defineConfig({
       },
     }),
   ],
-})
+}))

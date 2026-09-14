@@ -131,9 +131,8 @@ export function take(): InputEvent[] {
 
 /**
  * Return a COPY of the buffered events WITHOUT clearing the buffer — for a
- * bug report (generateBugReport) that shouldn't disrupt an ongoing
- * recording. Unlike {@link take}, a subsequent take()/peek() still sees the
- * same events.
+ * bug report (reportBundle.ts) that shouldn't disrupt an ongoing recording.
+ * Unlike {@link take}, a subsequent take()/peek() still sees the same events.
  */
 export function peek(): InputEvent[] {
   return events.slice()

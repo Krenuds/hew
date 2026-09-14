@@ -35,8 +35,10 @@ The Debug pane's **Enable Debug Mode** checkbox turns on deeper diagnostics for 
 
 ## Reporting a bug
 
-**Help ▸ Report Bug…** assembles everything a developer needs into a single file: app version and system info, your current model, the recent diagnostic log, and the session's recorded steps. Raw input events are included too, but only if Debug Mode was on. On desktop it's saved to the app's log directory (the confirmation toast shows the exact path); on the web, it downloads. Attach that file to your bug report.
+**Help ▸ Report Bug…** opens a dialog with a description field and a checklist of what it can include: your app version and system details, the session's recorded steps, the files the session took in, your current model, and the recent diagnostic log. Raw input events are listed too, but only when Debug Mode is on. Each row shows its size, and a **Show** link next to it previews exactly what would be sent. Untick anything you'd rather leave out. Recorded steps and the model carry your model's geometry, and imported files are the originals byte for byte: files you imported or opened, such as a `.skp`, and textures and library items you added. Untick all three to send only your description, system details, and the log.
 
-If Hew stops on its error screen, click **Save reproducer** there. It saves a file with the steps that led to the crash, ready to attach to your report. On the web it downloads; on desktop the file's path is shown.
+**Send report** compresses the report and submits it privately to the Hew developer; nothing is posted publicly. The dialog shows how large the upload will be. Past 90 MB compressed it leaves out the model file, then imported files, and marks each one; **Save to file…** always keeps everything you ticked. You get back a short report ID. From there you can optionally open a public GitHub issue too, prefilled with your description, version, and that ID, but never with any attachment. See [what a report contains and how long it's kept](/privacy/bug-reports/).
 
-Hew's kernel is deterministic, so a captured session usually reproduces a bug exactly. Reports with a bundle attached tend to get fixed fast.
+If Hew stops on its error screen, click **Report this crash** there instead — it opens the same dialog, already carrying the steps that led to the crash (the model itself isn't available after a crash). A self-hosted web build, or a plain local dev build, has nowhere to send a report to; there the dialog explains that and offers **Save to file…** instead, so you can attach the file to a GitHub issue by hand.
+
+Hew's kernel is deterministic, so a captured session usually reproduces a bug exactly. Reports with recorded steps attached tend to get fixed fast.

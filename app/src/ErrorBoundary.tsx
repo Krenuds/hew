@@ -14,12 +14,15 @@
  * latter: the tool or undo handler that hit it catches the trap, and the app
  * keeps running on the poisoned instance. So the boundary also listens for the
  * wasm panic hook's `KERNEL_PANIC_EVENT` and stops the app right away, while
- * the recording the hook captured is still in memory for Save reproducer.
+ * the recording the hook captured is still in memory for Report this crash
+ * (docs/design/report-bug.md §2) — the crash screen's `ReportBugDialog`,
+ * rendered here in crash mode since the rest of the app tree is gone.
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { getEntries } from './log/LogStore'
 import { getPanicCapture, KERNEL_PANIC_EVENT } from './log/panicCapture'
-import { saveCrashReproducer } from './log/reproducerDump'
+import { ReportBugDialog } from './panels/ReportBugDialog'
+import type { ReportCrashInfo } from './log/reportBundle'
 
 export const LAST_ERROR_KEY = 'hew:lastError'
 
@@ -47,11 +50,8 @@ interface State {
   /** Brief "Copied" confirmation on the copy-details button, mirroring
    *  LogPanel's own copy-button feedback. */
   copied: boolean
-  /** Save-reproducer button feedback: idle → saving → saved/error. */
-  saveState: 'idle' | 'saving' | 'saved' | 'error'
-  /** The saved file's path (Tauri only — web downloads have no path), shown
-   *  under the buttons after a successful save. */
-  savedPath: string | null
+  /** Whether the "Report this crash" dialog (ReportBugDialog, crash mode) is open. */
+  reportOpen: boolean
 }
 
 export class ErrorBoundary extends Component<Props, State> {
@@ -61,8 +61,7 @@ export class ErrorBoundary extends Component<Props, State> {
     componentStack: '',
     recentErrors: [],
     copied: false,
-    saveState: 'idle',
-    savedPath: null,
+    reportOpen: false,
   }
 
   static getDerivedStateFromError(error: Error): Partial<State> {
@@ -141,33 +140,39 @@ export class ErrorBoundary extends Component<Props, State> {
     window.setTimeout(() => this.setState({ copied: false }), 1200)
   }
 
-  private saveButtonLabel(): string {
-    switch (this.state.saveState) {
-      case 'saving':
-        return 'Saving…'
-      case 'saved':
-        return 'Saved'
-      case 'error':
-        return "Couldn't save"
-      case 'idle':
-        return 'Save reproducer'
+  /** Builds the `ReportBugDialog` crash-mode input: the in-memory panic
+   *  capture when there is one (carries the recording), else the
+   *  localStorage panic record (message only, no recording — survives a
+   *  reload but the poisoned instance doesn't), else this is a plain render
+   *  error with no kernel panic at all, so there's only the caught error
+   *  itself to report. */
+  private crashInfo(): ReportCrashInfo {
+    const capture = getPanicCapture()
+    if (capture !== null) return capture
+    try {
+      const panic = localStorage.getItem('hew:lastPanic')
+      if (panic !== null) {
+        const split = panic.indexOf('\n')
+        return {
+          at: split === -1 ? new Date().toISOString() : panic.slice(0, split),
+          message: split === -1 ? panic : panic.slice(split + 1),
+          recording: null,
+        }
+      }
+    } catch {
+      /* ignore — falls through to the render-error case below */
+    }
+    return {
+      at: new Date().toISOString(),
+      message: this.state.error?.message ?? 'unknown error',
+      recording: null,
     }
   }
 
-  private handleSaveReproducer = () => {
-    if (this.state.saveState === 'saving') return
-    this.setState({ saveState: 'saving', savedPath: null })
-    void saveCrashReproducer().then((result) => {
-      if (result.ok) {
-        this.setState({ saveState: 'saved', savedPath: result.path })
-      } else {
-        this.setState({ saveState: 'error', savedPath: null })
-      }
-    })
-  }
+  private handleOpenReport = () => this.setState({ reportOpen: true })
 
   render() {
-    const { error, source, componentStack, recentErrors, copied, saveState, savedPath } = this.state
+    const { error, source, componentStack, recentErrors, copied, reportOpen } = this.state
     if (error === null) return this.props.children
 
     return (
@@ -227,7 +232,7 @@ export class ErrorBoundary extends Component<Props, State> {
           {copied ? 'Copied' : 'Copy details'}
         </button>
         <button
-          onClick={this.handleSaveReproducer}
+          onClick={this.handleOpenReport}
           style={{
             padding: '6px 16px',
             fontSize: 13,
@@ -239,16 +244,19 @@ export class ErrorBoundary extends Component<Props, State> {
             marginBottom: 16,
           }}
         >
-          {this.saveButtonLabel()}
+          Report this crash
         </button>
-        {saveState === 'saved' && savedPath !== null && (
-          <div style={{ color: 'var(--text-secondary, #bbb)', marginTop: -8, marginBottom: 16 }}>
-            Saved to {savedPath}
-          </div>
-        )}
         <p style={{ color: 'var(--text-secondary, #bbb)', marginTop: 0, marginBottom: 16 }}>
-          Save reproducer writes a file with the steps that led here. Attach it to your bug report.
+          Report this crash sends the steps that led here privately to the Hew developer, or saves them to a file.
         </p>
+        {reportOpen && (
+          <ReportBugDialog
+            scene={null}
+            documentName=""
+            crash={this.crashInfo()}
+            onClose={() => this.setState({ reportOpen: false })}
+          />
+        )}
         {recentErrors.length > 0 && (
           <>
             <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>

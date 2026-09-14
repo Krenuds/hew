@@ -1783,10 +1783,20 @@ export class SceneRenderer {
         // Stored as userData.baseOpacity so isolation dimming multiplies into it
         // instead of clobbering it back to opaque.
         const baseOpacity = info !== undefined ? info.a() / 255 : 1
+        // `color`/`map` are only meaningful with a texture — without one this
+        // material renders from per-vertex colors instead (`vertexColors`
+        // below). Omit both keys entirely rather than passing them as
+        // `undefined`: THREE's `Material.setValues()` (which the constructor
+        // calls) treats a present key with an `undefined` value as a caller
+        // mistake and `console.warn`s for EVERY untextured material — on an
+        // import with hundreds of them, that flooded the diagnostic log's
+        // 200-line tail and pushed everything else out of it. Passing no key
+        // at all leaves the constructor's own default (color white, map
+        // null), identical to what the `undefined` value did once
+        // `setValues` skipped it — no rendering change, just no warning.
         const m = new THREE.MeshPhongMaterial({
           vertexColors: tex === undefined, // use vertex colors when no texture
-          color: tex !== undefined ? color : undefined,
-          map: tex,
+          ...(tex !== undefined ? { color, map: tex } : {}),
           flatShading,
           side,
           transparent: baseOpacity < 1,

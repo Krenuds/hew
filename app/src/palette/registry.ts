@@ -245,7 +245,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'save-to-library-doc', label: 'Save to Library…', description: 'Save the whole document as a library item.', group: 'Actions', synonyms: ['library', 'component', 'model'] },
   { id: 'purge-unused', label: 'Purge Unused…', description: 'Delete every unused palette material and component definition.', group: 'Actions', synonyms: ['cleanup', 'clean up', 'materials', 'components'] },
   { id: 'open-settings', label: 'Settings…', description: 'Open Hew Settings.', group: 'Actions', synonyms: ['preferences'] },
-  { id: 'report-bug', label: 'Report Bug…', description: 'Assemble and save a bug-report bundle.', group: 'Actions' },
+  { id: 'report-bug', label: 'Report Bug…', description: 'Review and send a bug report, or save it to a file.', group: 'Actions' },
   { id: 'open-guide', label: 'Hew Help', description: 'Open the online user guide in your browser.', group: 'Actions', synonyms: ['help', 'guide', 'documentation', 'docs', 'manual', 'learn', 'user guide'] },
 ]
 

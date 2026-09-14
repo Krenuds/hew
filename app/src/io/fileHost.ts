@@ -125,13 +125,17 @@ export interface FileHost {
    *
    * Unlike save/saveAs this is a one-shot "write a copy out" — it never tracks
    * a handle for in-place re-save and carries its own file-type filter.
-   * Returns true on success, false if the user cancels.
+   * Returns where it went on success — the absolute path on desktop, the
+   * file name on web (there is no real filesystem path to report: the File
+   * System Access API's save picker and the anchor-download fallback both
+   * hand control to the browser/OS once the write starts) — or null if the
+   * user cancels the picker.
    */
   exportBinary(
     bytes: Uint8Array,
     suggestedName: string,
     fileType: ExportFileType,
-  ): Promise<boolean>
+  ): Promise<string | null>
 }
 
 /** Describes the file type offered in an export dialog. */

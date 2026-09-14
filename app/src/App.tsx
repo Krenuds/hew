@@ -111,7 +111,7 @@ import { parseCameraJson, parseSectionJson } from './scenes/scenesModel'
 import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
-import { generateBugReport } from './log/reportBug'
+import { ReportBugDialog } from './panels/ReportBugDialog'
 import { TOOLS, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
@@ -1583,23 +1583,13 @@ export default function App() {
     }
   }, [])
 
+  // Help ▸ Report Bug… / palette / native Help menu all just open the
+  // dialog (docs/design/report-bug.md §2) — it reads sceneRef itself at
+  // build time via the scene prop below, so there's nothing else to do here.
+  const [reportBugOpen, setReportBugOpen] = useState(false)
   const handleReportBug = useCallback(() => {
-    const scene = sceneRef.current
-    if (scene === null) {
-      handleToast('Report Bug: the model is still loading — try again in a moment.')
-      return
-    }
-    handleToast('Generating bug report…')
-    void generateBugReport(scene, 'user-report').then((result) => {
-      if (!result.ok) {
-        handleToast('Report Bug failed — see the diagnostic log for details.')
-      } else if (result.path !== null) {
-        handleToast(`Bug report saved: ${result.path}`)
-      } else {
-        handleToast('Bug report downloaded.')
-      }
-    })
-  }, [handleToast])
+    setReportBugOpen(true)
+  }, [])
 
   // Whether this desktop build carries the auto-updater (package-manager
   // builds compile it out — see the shell's `updater` feature). The in-app
@@ -2867,12 +2857,12 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
         description: 'glTF Binary',
         ext: 'glb',
         mime: 'model/gltf-binary',
       })
-      if (ok) {
+      if (exportedTo !== null) {
         handleToast('Exported glTF.')
         LogStore.log.info('app', `Exported glTF (${bytes.length} bytes)`)
       }
@@ -2908,12 +2898,12 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
         description: 'USDZ',
         ext: 'usdz',
         mime: 'model/vnd.usdz+zip',
       })
-      if (ok) {
+      if (exportedTo !== null) {
         handleToast('Exported USDZ.')
         LogStore.log.info('app', `Exported USDZ (${bytes.length} bytes)`)
       }
@@ -2958,12 +2948,12 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
         description: 'STL (Binary)',
         ext: 'stl',
         mime: 'model/stl',
       })
-      if (ok) {
+      if (exportedTo !== null) {
         handleToast('Exported STL.')
         LogStore.log.info('app', `Exported STL (${bytes.length} bytes)`)
       }
@@ -2995,12 +2985,12 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
         description: '3MF',
         ext: '3mf',
         mime: 'model/3mf',
       })
-      if (ok) {
+      if (exportedTo !== null) {
         handleToast('Exported 3MF.')
         LogStore.log.info('app', `Exported 3MF (${bytes.length} bytes)`)
       }
@@ -3660,8 +3650,8 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(bytes, base, { description: 'SVG line drawing', ext: 'svg', mime: 'image/svg+xml' })
-      if (ok) {
+      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, { description: 'SVG line drawing', ext: 'svg', mime: 'image/svg+xml' })
+      if (exportedTo !== null) {
         handleToast('Exported SVG.')
         LogStore.log.info('app', `Exported SVG line drawing (${bytes.length} bytes, ${res.drawing.kinds.length} segments)`)
       }
@@ -6384,7 +6374,13 @@ export default function App() {
           savePdf={(bytes, name) =>
             printRecorderRef.current?.savePdf !== undefined
               ? printRecorderRef.current.savePdf(bytes, name)
-              : fileHostRef.current.exportBinary(bytes, name, { description: 'PDF', ext: 'pdf', mime: 'application/pdf' })
+              : // usePrintController's `savePdf` contract is `Promise<boolean>` — narrower
+                // than exportBinary's now-richer `Promise<string | null>` (the print flow
+                // has no use for the saved location), so this is the one caller that
+                // adapts back down at the boundary rather than widening its own contract.
+                fileHostRef.current
+                  .exportBinary(bytes, name, { description: 'PDF', ext: 'pdf', mime: 'application/pdf' })
+                  .then((result) => result !== null)
           }
           onPagesReady={printRecorderRef.current?.onPages}
           onClose={() => setPrintDialogOpen(false)}
@@ -6401,6 +6397,19 @@ export default function App() {
         <PhoneShareDialog
           getDocument={getPhoneShareDocument}
           onClose={() => setPhoneShareOpen(false)}
+        />
+      )}
+
+      {/* Help ▸ Report Bug… / palette / native Help menu (docs/design/
+          report-bug.md §2). Not the crash-mode dialog — that one renders
+          inside ErrorBoundary, since by the time it's needed this whole
+          tree is gone. */}
+      {reportBugOpen && (
+        <ReportBugDialog
+          scene={sceneRef.current}
+          documentName={documentName(docSession)}
+          crash={null}
+          onClose={() => setReportBugOpen(false)}
         />
       )}
 

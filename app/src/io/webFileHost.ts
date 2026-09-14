@@ -239,7 +239,7 @@ export class WebFileHost implements FileHost {
     bytes: Uint8Array,
     suggestedName: string,
     fileType: ExportFileType,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const dotExt = '.' + fileType.ext
     const name = suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt
     if (hasFSAA()) {
@@ -251,18 +251,20 @@ export class WebFileHost implements FileHost {
           excludeAcceptAllOption: false,
         })
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return false
+        if (err instanceof DOMException && err.name === 'AbortError') return null
         throw err
       }
       const writable = await handle.createWritable()
       await writable.write(new Uint8Array(bytes))
       await writable.close()
-      return true
+      return handle.name
     }
 
-    // Fallback: anchor-download.
+    // Fallback: anchor-download. There is no picker to cancel here, so this
+    // branch always "succeeds" — same as before this method reported where
+    // the file went, just now returning the name instead of `true`.
     anchorDownloadAs(bytes, name, fileType.mime)
-    return true
+    return name
   }
 
   async openForImport(): Promise<ImportPick | null> {

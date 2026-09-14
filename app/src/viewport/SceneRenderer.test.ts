@@ -2263,3 +2263,67 @@ describe('SceneRenderer — isolate fade (setHiddenFaded/tickFades, Shop Mode)',
     }
   })
 })
+
+// Regression: a large SketchUp import painted hundreds of untextured
+// materials, and `_buildMaterialArray` used to pass `color`/`map` as
+// `undefined` for every one of them — a value THREE's `Material.setValues()`
+// treats as a caller mistake and `console.warn`s about, once per key per
+// material. That flooded the diagnostic log's 200-line tail (docs/dev/
+// DIAGNOSTICS.md) and pushed everything else out of it. A minimal fake scene
+// with its own painted (non-SENTINEL, untextured) material, kept separate
+// from `makeScene`/`makeMesh` above rather than extending those shared
+// helpers — every other test in this file relies on their SENTINEL-only mesh.
+describe('SceneRenderer — untextured painted materials', () => {
+  it('never logs a THREE.Material undefined-parameter warning, and still renders via vertex colors', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const paintedMesh = {
+        positions: () => new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+        normals: () => new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: () => new Uint32Array([0, 1, 2]),
+        colors: () => new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1]),
+        uvs: () => new Float32Array([0, 0, 1, 0, 0, 1]),
+        // A real (non-SENTINEL) palette material id, unlike every other
+        // test's mesh in this file.
+        group_material_ids: () => new BigUint64Array([7n]),
+        group_starts: () => new Uint32Array([0]),
+        group_counts: () => new Uint32Array([3]),
+        edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+        watertight: () => true,
+        free: vi.fn(),
+      }
+      const materialInfo = {
+        has_texture: () => false,
+        r: () => 200,
+        g: () => 100,
+        b: () => 50,
+        a: () => 255,
+        free: vi.fn(),
+      }
+      const scene = {
+        object_ids: () => new BigUint64Array([1n]),
+        instance_ids: () => new BigUint64Array(),
+        object_mesh: () => paintedMesh,
+        instance_def: () => undefined,
+        instance_pose: () => undefined,
+        component_member_objects: () => new BigUint64Array(),
+        instance_expanded_members: () => new BigUint64Array(),
+        instance_expanded_local_poses: () => new Float64Array(),
+        component_member_sketches: () => new BigUint64Array(),
+        sketch_ids: () => new BigUint64Array(),
+        guide_ids: () => new BigUint64Array(),
+        material_info: () => materialInfo,
+      } as unknown as WasmScene
+
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+
+      const mat = facesMaterial(renderer.objectsGroup, 'Object_1')
+      expect(mat.vertexColors).toBe(true)
+      expect(mat.map).toBeNull()
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})

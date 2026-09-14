@@ -3,7 +3,6 @@ import * as Diag from './diagnosticLog'
 import {
   registerScene,
   dumpReproducer,
-  saveCrashReproducer,
   installFailureHandlers,
   resetForTest,
   setStoreForTest,
@@ -235,114 +234,6 @@ describe('dumpReproducer', () => {
     resolveWrite('/fake/path/done')
     await inFlight
     expect(writeMock).toHaveBeenCalledOnce()
-  })
-})
-
-describe('saveCrashReproducer', () => {
-  it('prefers the panic capture recording and labels the reason kernel-panic: <first line>', async () => {
-    registerScene(fakeScene())
-    const store = fakeStore()
-    setStoreForTest(store)
-    setPanicCapture({
-      at: '2026-01-01T00:00:00.000Z',
-      message:
-        'panicked at crates/kernel/src/document.rs:42\n' +
-        'reverse of a validated vertex move must re-apply: UnknownVertex',
-      recording: '{"version":2,"calls":[{"stub":true}],"golden_hash":0}',
-    })
-
-    const result = await saveCrashReproducer()
-
-    expect(result.ok).toBe(true)
-    const bundle = JSON.parse(store.calls[0].json)
-    expect(bundle.manifest.reason).toBe('kernel-panic: panicked at crates/kernel/src/document.rs:42')
-    expect(bundle.recording).toBe('{"version":2,"calls":[{"stub":true}],"golden_hash":0}')
-  })
-
-  it('does not call scene.take_recording when a panic capture exists (the scene is presumed poisoned)', async () => {
-    const takeRecording = vi.fn(() => '{"version":2,"calls":[],"golden_hash":0}')
-    registerScene(fakeScene({ take_recording: takeRecording }))
-    setStoreForTest(fakeStore())
-    setPanicCapture({ at: 'x', message: 'm', recording: null })
-
-    await saveCrashReproducer()
-
-    expect(takeRecording).not.toHaveBeenCalled()
-  })
-
-  it('falls back to a "crash-screen" reason and scene.take_recording when there is no panic capture', async () => {
-    registerScene(fakeScene())
-    const store = fakeStore()
-    setStoreForTest(store)
-
-    const result = await saveCrashReproducer()
-
-    expect(result.ok).toBe(true)
-    const bundle = JSON.parse(store.calls[0].json)
-    expect(bundle.manifest.reason).toBe('crash-screen')
-    expect(bundle.recording).toBe('{"version":2,"calls":[],"golden_hash":0}')
-  })
-
-  it("is not blocked by dumpReproducer's auto-dump rate limit", async () => {
-    registerScene(fakeScene())
-    const store = fakeStore()
-    setStoreForTest(store)
-
-    await dumpReproducer('auto-dump-just-now')
-    const result = await saveCrashReproducer()
-
-    expect(result.ok).toBe(true)
-    expect(store.write).toHaveBeenCalledTimes(2)
-  })
-
-  // A click during an auto-dump's write must not read as "Couldn't save".
-  it('waits for a dump already in flight, then saves', async () => {
-    registerScene(fakeScene())
-    const resolvers: Array<(v: string) => void> = []
-    const writeMock = vi.fn(
-      (name: string) =>
-        new Promise<string>((resolve) => resolvers.push(() => resolve(`/fake/path/${name}`))),
-    )
-    setStoreForTest({ write: writeMock })
-
-    const inFlight = dumpReproducer('first')
-    const saving = saveCrashReproducer()
-    await new Promise((r) => setTimeout(r, 0))
-    expect(writeMock).toHaveBeenCalledOnce()
-
-    resolvers[0]('')
-    await inFlight
-    await new Promise((r) => setTimeout(r, 0))
-    expect(writeMock).toHaveBeenCalledTimes(2)
-    resolvers[1]('')
-
-    const result = await saving
-    expect(result.ok).toBe(true)
-    expect(result.path).toMatch(/^\/fake\/path\/reproducer-/)
-  })
-
-  it('still produces a bundle (never throws) with no scene and no panic capture', async () => {
-    const store = fakeStore()
-    setStoreForTest(store)
-
-    const result = await saveCrashReproducer()
-
-    expect(result.ok).toBe(true)
-    const bundle = JSON.parse(store.calls[0].json)
-    expect(bundle.recording).toBeNull()
-    expect(bundle.hew).toBeNull()
-    expect(bundle.manifest.stateHash).toBe('0')
-  })
-
-  it('reports failure when the store write throws', async () => {
-    registerScene(fakeScene())
-    setStoreForTest({
-      write: vi.fn(async () => {
-        throw new Error('disk full')
-      }),
-    })
-
-    await expect(saveCrashReproducer()).resolves.toEqual({ ok: false, path: null })
   })
 })
 
