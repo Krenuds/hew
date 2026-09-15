@@ -697,8 +697,10 @@ below.
   logging and extra internal validation
 - Session recording and replay, so a captured session becomes both a bug
   reproducer and a permanent regression test
-- An in-app "Report Bug" action that bundles logs, the current file, and a
-  session recording for troubleshooting
+- Help ▸ Report Bug: a dialog that previews what a report contains (system
+  details, recorded steps, imported files, the model, and a log tail, each
+  one untickable) and sends it privately to Hew's bug-report intake service
+  (`workers/bug-intake`) or saves it to a file
 - Automated testing at every level — unit, component, and end-to-end — plus
   visual-regression checks against reference renders, run on every change
 - Plain-language error messages: every operation Hew refuses explains what
@@ -771,6 +773,23 @@ below.
   the axis half toward the camera / the anchored side); deferred as too niche
   to hold an early release. An investigation branch characterizing the
   degeneracies exists.
+
+- **Share relay uploads against the Workers Free CPU limit.** The hosted
+  "Open on Phone" relay (`workers/share-relay`) accepts a drop of up to
+  32 MiB in a single `PUT /drop`. The Workers Free plan allows 10 ms of CPU
+  per request, and reading and batching a body that size through one request
+  may exceed it; `workers/bug-intake` uploads in 1.9 MB pieces for exactly
+  this reason. A large relay drop has never been exercised against the limit
+  in production. Revisit if a large "Open on Phone" fails: chunk the upload
+  the way `workers/bug-intake` does, or move the Worker to the Paid plan.
+
+- **Report Bug's pause while gathering after a large import.** Opening
+  Help ▸ Report Bug copies the whole session recording out of the kernel in
+  one `peek_recording` call. After a 59 MiB SketchUp import that is a 211 MB
+  string and a 1.6 s main-thread block, shown under "Gathering details…";
+  the rest of the dialog's work yields to the page. Removing the pause needs
+  a wasm-api change: a chunked or streamed recording export. Revisit on a
+  complaint.
 
 ## Non-goals
 
