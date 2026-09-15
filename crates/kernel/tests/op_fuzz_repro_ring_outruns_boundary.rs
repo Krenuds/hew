@@ -43,6 +43,7 @@ fn split_op(
         face,
         path: vec![point_on(a, ta), point_on(b, tb)],
         restore: None,
+        curves: Vec::new(),
     })
 }
 
@@ -60,7 +61,7 @@ fn imprint_op(object: &Object, face_sel: usize, shrink: f64) -> KernelOp {
         face,
         loop_path,
         restore: None,
-        curve: None,
+        curves: Vec::new(),
     }
 }
 

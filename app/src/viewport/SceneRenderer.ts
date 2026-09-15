@@ -33,6 +33,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
+import { findImprint, imprintSegments, readImprints } from '../tools/imprints'
 import { DEPTH_BIAS } from './depthPolicy'
 import { srgbColorsToLinear } from './colorSpace'
 import { expandByVisibleObject } from './visibleBounds'
@@ -288,6 +289,12 @@ interface ObjectMeshGroup {
   facesMesh: THREE.Mesh
   edgesLines: THREE.LineSegments
   group: THREE.Group
+  /** The object's imprint overlay (imprints.ts): translucent fills over
+   *  its drawn sub-faces plus fat sketch-blue lines over every drawn loop
+   *  and chord run, so a shape drawn on a face reads as "not yet solid"
+   *  exactly like a ground sketch. Rebuilt with the object; null when it
+   *  carries no imprint. */
+  imprints: THREE.Group | null
 }
 
 /**
@@ -590,6 +597,9 @@ export class SceneRenderer {
    *.
    */
   private sketchHighlight: LineSegments2 | null = null
+  /** Selected imprints (imprints.ts refs) and their bright overlay. */
+  private selectedImprints: { object: bigint; kind: 'imprint' | 'imprint-chord'; id: bigint }[] = []
+  private imprintHighlight: LineSegments2 | null = null
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
   /** Currently selected object ids (ordered; may include non-object entities,
@@ -708,6 +718,9 @@ export class SceneRenderer {
     // Re-apply hidden visibility (groups are rebuilt by refresh).
     this._applyHidden()
 
+    // A rebuilt object may have moved or lost its imprints — re-derive
+    // the selected-imprint overlay from the live features.
+    this._rebuildImprintHighlight()
     return new Map(this.watertightMap)
   }
 
@@ -953,6 +966,9 @@ export class SceneRenderer {
     // momentary all-visible default.
     this._resizeSectionWidget()
 
+    // A rebuilt object may have moved or lost its imprints — re-derive
+    // the selected-imprint overlay from the live features.
+    this._rebuildImprintHighlight()
     return new Map(this.watertightMap)
   }
 
@@ -1904,9 +1920,11 @@ export class SceneRenderer {
       group.name = `Object_${objectId}`
       group.add(facesMesh)
       group.add(edgesLines)
+      const imprints = this._buildImprintOverlay(objectId)
+      if (imprints !== null) group.add(imprints)
 
       this.objectsGroup.add(group)
-      this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, group })
+      this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, group, imprints })
 
       // Re-apply the selection highlight to the rebuilt nodes, and put the
       // id back into the renderer's selected list (the removal above pruned
@@ -1935,6 +1953,7 @@ export class SceneRenderer {
     }
     g.edgesLines.geometry.dispose()
     ;(g.edgesLines.material as THREE.Material).dispose()
+    if (g.imprints !== null) this._disposeImprintOverlay(g.imprints)
     this.objectsGroup.remove(g.group)
     this.objectGroups.delete(objectId)
     // Drop any in-flight isolate-fade tween for this id (setHiddenFaded/
@@ -1944,6 +1963,151 @@ export class SceneRenderer {
     this.watertightMap.delete(objectId)
     // If the removed object was selected, drop it from the selection
     this.selectedObjectIds = this.selectedObjectIds.filter((id) => id !== objectId)
+  }
+
+  /**
+   * The imprint overlay for a world object (see `ObjectMeshGroup.imprints`):
+   * one translucent `SKETCH_REGION_COLOR` fill per drawn sub-face (every
+   * hole cut out, so a shape inside a shape reads as two fills, not a
+   * double one, and a boss it was drawn around is not tinted) and one fat `SKETCH_LINE_COLOR`
+   * line batch over every drawn loop and chord run. Both use the sketch
+   * depth biases so they sit in front of the coincident face and native
+   * edges without floating. Null when the object carries no imprint.
+   * Instanced (definition-member) geometry gets no fill overlay in this
+   * version — its selection highlight still poses correctly.
+   */
+  private _buildImprintOverlay(objectId: bigint): THREE.Group | null {
+    const features = readImprints(this.wasmScene, objectId)
+    if (features.length === 0) return null
+    const group = new THREE.Group()
+    group.name = `Imprints_${objectId}`
+    const lines: number[] = []
+    for (const f of features) {
+      const segs = imprintSegments(f)
+      for (let i = 0; i < segs.length; i++) lines.push(segs[i])
+      if (f.kind !== 'sub_face') continue
+      // Every hole is cut out: a nested shape has its own fill, and a boss,
+      // recess, or hole the shape was drawn around is not part of it.
+      const mesh = this._buildPlanarFillMesh(f.loop, f.holes)
+      if (mesh !== null) group.add(mesh)
+    }
+    if (lines.length > 0) {
+      group.add(
+        makeFatSegments(new Float32Array(lines), {
+          color: SKETCH_LINE_COLOR,
+          widthPx: SKETCH_LINE_WIDTH_PX,
+          transparent: true,
+          depthBias: DEPTH_BIAS.SKETCH_LINE,
+        }),
+      )
+    }
+    return group.children.length > 0 ? group : null
+  }
+
+  private _disposeImprintOverlay(group: THREE.Group): void {
+    for (const child of [...group.children]) {
+      if (child instanceof LineSegments2) {
+        disposeFatSegments(child)
+      } else if (child instanceof THREE.Mesh) {
+        child.geometry.dispose()
+        ;(child.material as THREE.Material).dispose()
+      }
+      group.remove(child)
+    }
+  }
+
+  /** A translucent sketch-region fill over the planar polygon `outer` with
+   *  `holes` cut out — `_buildRegionFillMesh`'s triangulation (Newell
+   *  normal, project, ear-clip) lifted out so imprints share it. */
+  private _buildPlanarFillMesh(outer: readonly V3[], holes: readonly V3[][]): THREE.Mesh | null {
+    const n = outer.length
+    if (n < 3) return null
+    const verts3 = outer.map((p) => new THREE.Vector3(p[0], p[1], p[2]))
+    const normal = new THREE.Vector3()
+    for (let i = 0; i < n; i++) {
+      const cur = verts3[i]
+      const nxt = verts3[(i + 1) % n]
+      normal.x += (cur.y - nxt.y) * (cur.z + nxt.z)
+      normal.y += (cur.z - nxt.z) * (cur.x + nxt.x)
+      normal.z += (cur.x - nxt.x) * (cur.y + nxt.y)
+    }
+    if (normal.lengthSq() < 1e-12) return null
+    normal.normalize()
+    const u = new THREE.Vector3()
+    if (Math.abs(normal.z) < 0.9) u.set(0, 0, 1).cross(normal).normalize()
+    else u.set(1, 0, 0).cross(normal).normalize()
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize()
+    const to2 = (p: THREE.Vector3) => new THREE.Vector2(p.dot(u), p.dot(v))
+    const pts2 = verts3.map(to2)
+    const holes3 = holes.filter((h) => h.length >= 3).map((h) => h.map((p) => new THREE.Vector3(p[0], p[1], p[2])))
+    const holes2 = holes3.map((h) => h.map(to2))
+    let tris: number[][]
+    try {
+      tris = THREE.ShapeUtils.triangulateShape(pts2, holes2)
+    } catch {
+      return null
+    }
+    const all3 = verts3.concat(...holes3)
+    const positions: number[] = []
+    for (const tri of tris) {
+      for (const idx of tri) {
+        const p = all3[idx]
+        if (p === undefined) return null
+        positions.push(p.x, p.y, p.z)
+      }
+    }
+    if (positions.length === 0) return null
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+    const mat = new THREE.MeshBasicMaterial({
+      color: SKETCH_REGION_COLOR,
+      transparent: true,
+      opacity: SKETCH_REGION_OPACITY,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: DEPTH_BIAS.REGION_FILL,
+      polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
+    })
+    return new THREE.Mesh(geo, mat)
+  }
+
+  /** Reflect the selected imprints (imprints.ts refs) into a bright overlay
+   *  over their line work — the imprint counterpart of
+   *  `setSelectedSketchIslands`. Posed through `setSelectedSketchInstance`'s
+   *  instance when the owning object is a definition member. */
+  setSelectedImprints(
+    imprints: { object: bigint; kind: 'imprint' | 'imprint-chord'; id: bigint }[],
+  ): void {
+    this.selectedImprints = [...imprints]
+    this._rebuildImprintHighlight()
+  }
+
+  private _rebuildImprintHighlight(): void {
+    if (this.imprintHighlight !== null) {
+      disposeFatSegments(this.imprintHighlight)
+      this.sketchGroup.remove(this.imprintHighlight)
+      this.imprintHighlight = null
+    }
+    if (this.selectedImprints.length === 0) return
+    const pose = this.selectedSketchInstance !== null
+      ? this.wasmScene.instance_pose(this.selectedSketchInstance)
+      : undefined
+    const positions: number[] = []
+    for (const sel of this.selectedImprints) {
+      const feature = findImprint(this.wasmScene, { kind: sel.kind, id: sel.id, object: sel.object })
+      if (feature === null) continue // stale — contributes nothing
+      const segs = imprintSegments(feature, pose)
+      for (let i = 0; i < segs.length; i++) positions.push(segs[i])
+    }
+    if (positions.length === 0) return
+    this.imprintHighlight = makeFatSegments(new Float32Array(positions), {
+      color: EDGE_COLOR_SELECTED,
+      widthPx: SKETCH_HIGHLIGHT_WIDTH_PX,
+      depthTest: false,
+    })
+    this.imprintHighlight.renderOrder = 999
+    this.sketchGroup.add(this.imprintHighlight)
   }
 
   /**
@@ -2928,6 +3092,7 @@ export class SceneRenderer {
     if (this.selectedSketchInstance === instance) return
     this.selectedSketchInstance = instance
     this._rebuildSketchHighlight()
+    this._rebuildImprintHighlight()
   }
 
   /** (Re)build the bright overlay for the selected sketches — solid lines in
@@ -3293,6 +3458,7 @@ export class SceneRenderer {
     hideObj(this.guideHighlight)
     hideObj(this.annotationHighlight)
     hideObj(this.sketchHighlight)
+    hideObj(this.imprintHighlight)
     if (!opts.includeGuides) hideObj(this.guidesGroup)
 
     if (opts.sketchLineWidthPx !== undefined) {

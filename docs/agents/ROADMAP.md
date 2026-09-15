@@ -89,6 +89,38 @@ below.
   whose continuation onto a neighbouring face degenerates to a point (a
   prism resting on a step's top and reaching past the step's far edge)
   still welds watertight
+- Editable shapes on faces (imprints): a shape drawn on a solid's face and
+  not yet pushed or pulled is selectable (click inside it; the object is
+  one click away anywhere else), fills blue like a ground sketch, lists in
+  the Outliner under its object as a named child row (Circle, Rectangle,
+  Shape, Arc shape, Line, Arc, Edge shape), and moves, rotates, scales, and deletes ON its
+  face — Move constrains the drop to the face's plane; an edit that would
+  tilt it off the face, mirror it, stretch it non-uniformly, or slide it
+  off the face refuses with a typed message. Shapes drawn up to a face's
+  edge (chords) select by their line, slide along that edge, and delete
+  the same way. A shape drawn, offset, moved, or scaled all the way around
+  other shapes, bosses, recesses, or holes adopts them — they move with it,
+  and deleting it leaves them on the face — while one that would cross or
+  touch another shape refuses; a shape holding a boss or recess cannot
+  slide until that is undone. Circles and arcs drawn on a face keep their
+  circle on the solid's edges (per-edge `Edge::curve` claims through
+  `split_face_with_curves` / `split_face_inner_with_curves`, an arc's
+  facets claimed and its closing lines plain), offer center and quadrant
+  snaps like curves on the ground, and push or pull into smooth walls
+  exactly as from a ground sketch: every wall-raising path (boss,
+  wall-building push/pull, push-through) stamps a wall PER FACET from its
+  base edge's claim, gated on the edge being a genuine facet rather than a
+  secant (`chord_facet_ok`), so an arc closed by a line raises smooth arc
+  walls and one flat wall; a push carries each claim with the rim it moves
+  and hands it to the fresh rim of a wall it builds; the Offset tool's face
+  commit imprints each offset arc facet with its concentric circle, so a
+  recessed inset's inner curve is smooth too. Recovered structurally from the solid's topology on
+  demand (no file-format change) — `Object::face_features`,
+  `transform_sub_face`, `Document::transform_chord` /
+  `dissolve_imprint`, and the `hew.solid.imprints` / `*_imprint` API
+  commands. Copying an imprint is not yet supported (Move/Rotate/Scale in
+  copy mode refuse with a toast), and instanced geometry gets the
+  selection highlight but no blue fill overlay
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent
@@ -802,4 +834,8 @@ below.
   works in terms of whole, watertight Objects. Direct-pick tools like
   Push/Pull and Paint cover the common editing cases without exposing raw
   mesh topology; an operation that would tear open a solid is refused
-  rather than allowed.
+  rather than allowed. The one sub-element that IS editable is a drawn,
+  unpushed shape on a face (an imprint, see Shipped): every edit it
+  allows is a coplanar surgery that cannot open the shell, and it is
+  still not a general face or edge editor — a boss's wall or a solid's
+  own corner cannot be dragged.

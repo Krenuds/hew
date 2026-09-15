@@ -153,7 +153,7 @@ fn component_subface_push_through_cuts_every_instance_and_replays() {
                     Point3::new(1.0, 1.5, 1.0),
                 ],
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         )
         .expect("imprint member")

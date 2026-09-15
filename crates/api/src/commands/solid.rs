@@ -16,12 +16,37 @@
 //! `commands/sketch.rs`'s face-imprint routing (see that module's doc
 //! comment for the coordinate-frame decision: always the definition's
 //! own frame, never remapped through an instance's pose).
+//!
+//! **Editable imprints** (`imprints`, `move_imprint`, `rotate_imprint`,
+//! `scale_imprint`, `delete_imprint`): a drawn-but-not-yet-pushed shape
+//! ([`kernel::FaceFeature`], recovered structurally, never stored) can be
+//! listed, moved, turned, scaled, or deleted before it is ever pushed —
+//! the API surface over [`kernel::Document::face_features`],
+//! `transform_imprint`, `transform_chord`, and `dissolve_imprint`.
+//! `imprints` is `ReadOnly` (a pure query, like `hew.query.faces`); the
+//! other four are `ModelMutating`, one undo entry each. All four transform
+//! commands share one **imprint locator**: a face locator (§5.2 —
+//! `{object, at}` / `{object, ray}` / `{"$face": …}`) for a sub-face
+//! imprint, OR a point on one of a chord's lines for a chord — see
+//! [`resolve_imprint`], which tries the face reading first (as a
+//! sub-face) and falls back to an edge reading (as a chord) exactly the
+//! way a person's click is ambiguous between "the face I landed on" and
+//! "the line I landed on" until the kernel says which imprint is there.
+//! No face tokens are minted by `imprints`: unlike `extrude`/`push_pull`,
+//! it neither creates nor reshapes a face (§5.4's contract for minting),
+//! and every one of its listed features is already reachable by a plain
+//! point locator — a token would be redundant ergonomics, not a new
+//! capability.
 
 use super::{CmdError, Ctx, Handler};
+use crate::geom;
 use crate::locate;
 use crate::refusal::Refusal;
-use kernel::{DocumentError, EntityRef, FollowMePath, KernelOp, NodeId};
-use serde_json::Value;
+use kernel::{
+    DocumentError, EdgeId, EntityRef, FaceFeature, FaceId, FollowMePath, KernelOp, NodeId,
+    ObjectId, Point3, Transform, Vec3,
+};
+use serde_json::{Value, json};
 
 /// This namespace's slice of the handler table.
 pub fn handler(name: &str) -> Option<Handler> {
@@ -33,6 +58,11 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.solid.intersect" => intersect,
         "hew.solid.slice" => slice,
         "hew.solid.follow_me" => follow_me,
+        "hew.solid.imprints" => imprints,
+        "hew.solid.move_imprint" => move_imprint,
+        "hew.solid.rotate_imprint" => rotate_imprint,
+        "hew.solid.scale_imprint" => scale_imprint,
+        "hew.solid.delete_imprint" => delete_imprint,
         _ => return None,
     })
 }
@@ -378,4 +408,352 @@ pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
             "profile needs a region id or {\"face\": <locator>}".into(),
         ))
     }
+}
+
+// ------------------------------------------------------- editable imprints
+// (module doc comment; docs/agents/HEW_API.md's `hew.solid` semantics notes)
+
+fn point_json(p: Point3) -> Value {
+    json!([p.x, p.y, p.z])
+}
+
+fn midpoint(a: Point3, b: Point3) -> Point3 {
+    Point3::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5)
+}
+
+fn finite_vec3(v: [f64; 3]) -> Result<Vec3, CmdError> {
+    if v.iter().any(|c| !c.is_finite()) {
+        return Err(CmdError::Params("offset components must be finite".into()));
+    }
+    Ok(Vec3::new(v[0], v[1], v[2]))
+}
+
+fn not_an_imprint() -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "not_an_imprint",
+        "That locator names neither an imprinted sub-face (a shape drawn inside a face, not yet \
+         pushed or pulled) nor a chord (a shape drawn up to a face's edge). Only a \
+         drawn-but-unpushed imprint can be moved, turned, scaled, or deleted this way.",
+    ))
+}
+
+/// The face-plane normal of a live face — a sub-face's own plane, or (for
+/// a chord) either of its two faces, which [`kernel::FaceFeature::Chord`]
+/// guarantees are coplanar. `None` only for a face that vanished between
+/// resolution and use (a caller bug this module never triggers itself).
+fn face_normal(ctx: &Ctx, object: ObjectId, face: FaceId) -> Option<Vec3> {
+    Some(ctx.doc.object(object)?.faces().get(face)?.plane.normal())
+}
+
+/// What an imprint locator (module doc comment) resolved to.
+#[derive(Clone, Copy)]
+enum ImprintKind {
+    SubFace(FaceId),
+    Chord(EdgeId),
+}
+
+#[derive(Clone, Copy)]
+struct ImprintTarget {
+    object: ObjectId,
+    /// Precomputed at resolution time (via [`face_normal`]) so
+    /// `rotate_imprint`/`scale_imprint` need not re-walk `face_features`
+    /// for it.
+    normal: Vec3,
+    kind: ImprintKind,
+}
+
+/// Whether `path` (a [`kernel::FaceFeature::Chord`]'s run, first vertex to
+/// last) contains the segment `(a, b)` as one of its consecutive pairs, in
+/// either direction — how [`resolve_imprint`] matches a resolved solid
+/// edge back to the chord run it belongs to. `a`/`b` come from the same
+/// live document read as `path` (no JSON round-trip in between), so a
+/// tight tolerance is appropriate.
+fn chord_path_contains_edge(path: &[Point3], a: Point3, b: Point3) -> bool {
+    path.windows(2).any(|w| {
+        (points_close(w[0], a) && points_close(w[1], b))
+            || (points_close(w[0], b) && points_close(w[1], a))
+    })
+}
+
+fn points_close(p: Point3, q: Point3) -> bool {
+    (p - q).length() <= geom::API_SURFACE_TOL
+}
+
+/// Resolves an **imprint locator** (module doc comment): a face locator
+/// (§5.2) naming a sub-face imprint directly, or — for a chord, which has
+/// no face id of its own — the same locator shape read instead as a point
+/// on one of the chord's lines. Tries the face reading first; ANY failure
+/// or non-imprint success of it falls through to the edge reading, not
+/// only the "resolved but not a sub-face" case, because a chord's shared
+/// edge sits exactly on the boundary between its two coplanar faces,
+/// where `locate::resolve_face`'s strict inside/outside test is
+/// inherently a coin flip (a clean miss, an accidental hit on either
+/// side, or even an ambiguous tie) — robust to whichever way that lands.
+/// A genuine parameter defect from the face reading (an unknown object
+/// id) still surfaces as itself rather than the generic `not_an_imprint`,
+/// since that is real, actionable signal the fallback would otherwise
+/// bury; a locator that merely missed or tied on the face reading, and
+/// then finds no chord either, collapses to the one clear refusal.
+fn resolve_imprint(ctx: &Ctx, locator: &Value) -> Result<ImprintTarget, CmdError> {
+    let face_result = locate::resolve_face(ctx, locator);
+    if let Ok(face_ref) = &face_result {
+        let features = ctx.doc.face_features(face_ref.object).unwrap_or_default();
+        let sub_face = features
+            .iter()
+            .any(|f| matches!(f, FaceFeature::SubFace { face, .. } if *face == face_ref.face));
+        if sub_face && let Some(normal) = face_normal(ctx, face_ref.object, face_ref.face) {
+            return Ok(ImprintTarget {
+                object: face_ref.object,
+                normal,
+                kind: ImprintKind::SubFace(face_ref.face),
+            });
+        }
+    }
+
+    if let Ok(edge_ref) = locate::resolve_edge(ctx, locator) {
+        let features = ctx.doc.face_features(edge_ref.object).unwrap_or_default();
+        let (a, b) = edge_ref.endpoints;
+        for f in features {
+            if let FaceFeature::Chord {
+                edge, faces, path, ..
+            } = f
+                && chord_path_contains_edge(&path, a, b)
+                && let Some(normal) = face_normal(ctx, edge_ref.object, faces[0])
+            {
+                return Ok(ImprintTarget {
+                    object: edge_ref.object,
+                    normal,
+                    kind: ImprintKind::Chord(edge),
+                });
+            }
+        }
+    }
+
+    match face_result {
+        // A genuine identity failure surfaces as itself; only the two
+        // geometry-miss outcomes of a face reading collapse to "not an
+        // imprint" (a chord's shared edge sits ON the boundary between its
+        // two faces, so a face reading there is an honest coin-flip).
+        Err(CmdError::Refusal(r))
+            if matches!(
+                r.name.as_str(),
+                "unknown_entity" | "face_token_unknown" | "face_token_stale"
+            ) =>
+        {
+            Err(CmdError::Refusal(r))
+        }
+        Err(CmdError::Params(msg)) => Err(CmdError::Params(msg)),
+        Err(CmdError::Internal(msg)) => Err(CmdError::Internal(msg)),
+        _ => Err(not_an_imprint()),
+    }
+}
+
+/// Applies `xf` to a resolved imprint (module doc comment) — the shared
+/// tail of `move_imprint`/`rotate_imprint`/`scale_imprint` — routing
+/// through the def-scoped kernel methods when the imprint's object is a
+/// component-definition member, exactly like `push_pull`/the face-imprint
+/// drawing path above.
+fn apply_imprint_op(
+    ctx: &mut Ctx,
+    target: ImprintTarget,
+    xf: Transform,
+) -> Result<Value, CmdError> {
+    let scope = ctx.doc.object_owner_component(target.object);
+    match target.kind {
+        ImprintKind::SubFace(face) => {
+            ctx.doc.transform_imprint(scope, target.object, face, xf)?;
+        }
+        ImprintKind::Chord(edge) => {
+            ctx.doc.transform_chord(scope, target.object, edge, xf)?;
+        }
+    }
+    Ok(json!({ "object_id": public_id_of(ctx, EntityRef::Object(target.object)) }))
+}
+
+pub(super) fn imprints(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        object: String,
+    }
+    let p: P = parse_params(params)?;
+    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(&p.object) else {
+        return Err(unknown_entity(&p.object));
+    };
+    let features = ctx
+        .doc
+        .face_features(object_id)
+        .ok_or_else(|| unknown_entity(&p.object))?;
+
+    let mut list = Vec::with_capacity(features.len());
+    for f in &features {
+        match f {
+            FaceFeature::SubFace {
+                face,
+                loop_path,
+                curve,
+                curves,
+                nested,
+                holes,
+                ..
+            } => {
+                let normal =
+                    face_normal(ctx, object_id, *face).unwrap_or_else(|| Vec3::new(0.0, 0.0, 1.0));
+                // `at`: a point strictly inside the loop, clear of every hole
+                // it holds — a nested imprint, or a boss, recess, or hole the
+                // shape was drawn around (documented choice — module doc comment /
+                // HEW_API.md's imprints semantics note): an interior-point
+                // scanline (`geom::interior_point_of_loops`), not a plain
+                // vertex or area centroid, so the point still names THIS
+                // face — never a nested one — when a centroid would
+                // otherwise land in a hole. Falls back to the outer area
+                // centroid only for a degenerate loop (fewer than 3
+                // points), which cannot arise from live kernel geometry.
+                let at = geom::interior_point_of_loops(loop_path, holes, normal)
+                    .unwrap_or_else(|| geom::face_centroid(loop_path, &[]));
+                list.push(json!({
+                    "kind": "sub_face",
+                    "at": point_json(at),
+                    "loop": loop_path.iter().map(|&p| point_json(p)).collect::<Vec<_>>(),
+                    "curve": curve.map(|c| json!({ "center": point_json(c.center), "radius": c.radius })),
+                    "curves": claims_json(curves),
+                    "nested": nested.len(),
+                }));
+            }
+            FaceFeature::Chord { path, curves, .. } => {
+                // `at`: the midpoint of the run's FIRST segment
+                // (documented choice — module doc comment / HEW_API.md):
+                // always exactly on the chord's own line, and — unlike
+                // the run's own midpoint for a multi-edge run — never
+                // needs arc-length walking to compute.
+                let at = match path.as_slice() {
+                    [a, b, ..] => midpoint(*a, *b),
+                    [a] => *a,
+                    [] => Point3::new(0.0, 0.0, 0.0),
+                };
+                list.push(json!({
+                    "kind": "chord",
+                    "at": point_json(at),
+                    "path": path.iter().map(|&p| point_json(p)).collect::<Vec<_>>(),
+                    "curves": claims_json(curves),
+                }));
+            }
+        }
+    }
+    Ok(json!({ "imprints": list }))
+}
+
+/// Per-edge circle claims of an imprint's loop or run, in edge order:
+/// `{ center, radius }` for an arc's facet, `null` for a plain edge — how a
+/// pie, segment, or edge-to-edge arc reports the arc it keeps.
+fn claims_json(curves: &[Option<kernel::CurveGeom>]) -> Vec<Value> {
+    curves
+        .iter()
+        .map(|c| match c {
+            Some(g) => json!({ "center": point_json(g.center), "radius": g.radius }),
+            None => Value::Null,
+        })
+        .collect()
+}
+
+pub(super) fn move_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        imprint: Value,
+        offset: [f64; 3],
+    }
+    let p: P = parse_params(params)?;
+    let offset = finite_vec3(p.offset)?;
+    let target = resolve_imprint(ctx, &p.imprint)?;
+    apply_imprint_op(ctx, target, Transform::translation(offset))
+}
+
+pub(super) fn rotate_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        imprint: Value,
+        angle: f64,
+        about: Value,
+    }
+    let p: P = parse_params(params)?;
+    if !p.angle.is_finite() {
+        return Err(CmdError::Params("angle must be finite".into()));
+    }
+    // Resolved before the imprint (mirrors `hew.entity.rotate`): a
+    // derived-point locator failure should read as its own error, not get
+    // masked by an unrelated imprint-resolution refusal.
+    let about = locate::resolve_point(ctx, &p.about)?;
+    let target = resolve_imprint(ctx, &p.imprint)?;
+    // The axis is the imprint's own face normal through `about` — this
+    // preserves the imprint's plane for ANY `about` (on-plane or not):
+    // rotation about an axis leaves the component along the axis
+    // unchanged and never mixes it into the perpendicular ones, so the
+    // plane equation `normal·p = d` holds for the rotated points exactly
+    // as it did before, regardless of where along that normal line
+    // `about` sits.
+    let r = Transform::rotation(target.normal, p.angle)
+        .map_err(|_| CmdError::Internal("imprint face normal is degenerate".into()))?;
+    let about_v = about.to_vec();
+    let xf = Transform::translation(-about_v)
+        .then(&r)
+        .then(&Transform::translation(about_v));
+    apply_imprint_op(ctx, target, xf)
+}
+
+pub(super) fn scale_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        imprint: Value,
+        factor: f64,
+        about: Value,
+    }
+    let p: P = parse_params(params)?;
+    if !p.factor.is_finite() || p.factor <= 0.0 {
+        return Err(CmdError::Params(
+            "scale factor must be finite and positive".into(),
+        ));
+    }
+    let about = locate::resolve_point(ctx, &p.about)?;
+    let target = resolve_imprint(ctx, &p.imprint)?;
+    // Uniform scale about `about`; the kernel refuses `not_in_plane` when
+    // `about` is off the imprint's plane (a non-uniform-looking result on
+    // that plane — see `kernel::Object::transform_sub_face`'s doc
+    // comment), so no plane check is duplicated here.
+    let about_v = about.to_vec();
+    let s = Transform::scale(Vec3::new(p.factor, p.factor, p.factor));
+    let xf = Transform::translation(-about_v)
+        .then(&s)
+        .then(&Transform::translation(about_v));
+    apply_imprint_op(ctx, target, xf)
+}
+
+pub(super) fn delete_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        imprint: Value,
+    }
+    let p: P = parse_params(params)?;
+    let target = resolve_imprint(ctx, &p.imprint)?;
+    let object = target.object;
+    let scope = ctx.doc.object_owner_component(object);
+    match target.kind {
+        ImprintKind::SubFace(face) => {
+            ctx.doc.dissolve_imprint(scope, object, face)?;
+        }
+        ImprintKind::Chord(edge) => match scope {
+            Some(component) => {
+                ctx.doc
+                    .apply_def_op(component, object, KernelOp::MergeFaces { edge })?;
+            }
+            None => {
+                ctx.doc
+                    .apply_object_op(object, KernelOp::MergeFaces { edge })?;
+            }
+        },
+    }
+    Ok(json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) }))
 }

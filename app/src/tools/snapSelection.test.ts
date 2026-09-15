@@ -395,3 +395,98 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     expect(resolveSelectableRef(tiedClick, DOWN, deps(descending, []))).toEqual({ kind: 'sketch-edge', id: 40n, sketch: 11n })
   })
 })
+
+describe('resolveSelectableRef — imprint refinement (refineToImprint, docs/design/editable-face-sketches.md §3.1)', () => {
+  const OBJECT = 7n
+
+  /** A minimal `SelectScene` for the imprint-refinement matrix: `pick_face`
+   *  always reports a hit on `OBJECT` at the given face handle; `faceFeatures`
+   *  is the raw `face_features` JSON the object carries (omit the property
+   *  entirely to simulate a host with no imprint support at all); `edgeEndpoints`
+   *  answers `edge_endpoints` for the chord-by-edge-snap route. */
+  function imprintScene(opts: {
+    hitFace?: bigint
+    faceFeatures?: string
+    edgeEndpoints?: (edge: bigint) => number[] | undefined
+  }): SelectScene {
+    return {
+      sketch_curve_chain: () => [],
+      sketch_curve_edges: () => [],
+      sketch_region_island: () => undefined,
+      pick_sketch_region: () => undefined,
+      pick_sketch_edge: () => undefined,
+      pick_face: () => ({
+        object: () => OBJECT,
+        instance: () => undefined,
+        depth: () => 5,
+        face: () => opts.hitFace,
+        free: vi.fn(),
+      }),
+      ...(opts.faceFeatures !== undefined ? { face_features: () => opts.faceFeatures! } : {}),
+      ...(opts.edgeEndpoints
+        ? { edge_endpoints: (_object: bigint, edge: bigint) => opts.edgeEndpoints!(edge) }
+        : {}),
+    } as unknown as SelectScene
+  }
+
+  const subFaceFeatures = (face: number) =>
+    JSON.stringify([{ kind: 'sub_face', face, parent: 1, loop: [0, 0, 0, 1, 0, 0, 1, 1, 0], curve: null, nested: [] }])
+  const chordFeatures = (edge: number, path: number[]) =>
+    JSON.stringify([{ kind: 'chord', edge, faces: [1, 2], path }])
+
+  it('a plain-object pick whose struck face is a sub_face feature resolves to the imprint', () => {
+    const scene = imprintScene({ hitFace: 15n, faceFeatures: subFaceFeatures(15) })
+    const ref = resolveSelectableRef(solidSnap(OBJECT), DOWN, deps(scene, []))
+    expect(ref).toEqual({ kind: 'imprint', id: 15n, object: OBJECT })
+  })
+
+  it('a pick whose struck face is NOT a feature resolves to the plain object', () => {
+    const scene = imprintScene({ hitFace: 15n, faceFeatures: subFaceFeatures(99) })
+    const ref = resolveSelectableRef(solidSnap(OBJECT), DOWN, deps(scene, []))
+    expect(ref).toMatchObject({ kind: 'object', id: OBJECT })
+  })
+
+  it('a group-wrapped object never refines to an imprint, even when the struck face is one', () => {
+    const scene = imprintScene({ hitFace: 15n, faceFeatures: subFaceFeatures(15) })
+    // Simulate the Viewport's resolveObject wrapping the object in its
+    // containing group — refineToImprint only ever refines a pick that
+    // resolved to the OBJECT itself (kind 'object', same id as the hit).
+    const wrapped: ResolveDeps = { ...deps(scene, []), resolveObject: () => ({ kind: 'group', id: 3n }) }
+    const ref = resolveSelectableRef(solidSnap(OBJECT), DOWN, wrapped)
+    expect(ref).toEqual({ kind: 'group', id: 3n })
+  })
+
+  it('an edge snap whose endpoints match a chord run resolves to imprint-chord, by geometry not handle', () => {
+    // The snap names a solid edge handle (99) distinct from the run's own
+    // "first edge" handle (20) — runs are matched by geometry, never by the
+    // snapped edge's own handle (imprints.ts: chordThroughSegment).
+    const scene = imprintScene({
+      hitFace: 15n,
+      faceFeatures: chordFeatures(20, [0, 0, 0, 1, 0, 0]),
+      edgeEndpoints: (edge) => (edge === 99n ? [0, 0, 0, 1, 0, 0] : undefined),
+    })
+    const snap: Snap = { ...base, kind: 'on-edge', elementKind: 'edge', object: OBJECT, element: 99n }
+    const ref = resolveSelectableRef(snap, DOWN, deps(scene, []))
+    expect(ref).toEqual({ kind: 'imprint-chord', id: 20n, object: OBJECT })
+  })
+
+  it('a snap within 2mm of a chord path resolves to it without an exact edge snap', () => {
+    const scene = imprintScene({ hitFace: 15n, faceFeatures: chordFeatures(20, [0, 0, 0, 1, 0, 0]) })
+    const snap: Snap = { ...base, kind: 'on-face', object: OBJECT, x: 0.5, y: 0.0015, z: 0 }
+    const ref = resolveSelectableRef(snap, DOWN, deps(scene, []))
+    expect(ref).toEqual({ kind: 'imprint-chord', id: 20n, object: OBJECT })
+  })
+
+  it('a snap farther than 2mm from every chord segment does not refine', () => {
+    const scene = imprintScene({ hitFace: 15n, faceFeatures: chordFeatures(20, [0, 0, 0, 1, 0, 0]) })
+    const snap: Snap = { ...base, kind: 'on-face', object: OBJECT, x: 0.5, y: 0.5, z: 0 }
+    const ref = resolveSelectableRef(snap, DOWN, deps(scene, []))
+    expect(ref).toMatchObject({ kind: 'object', id: OBJECT })
+  })
+
+  it('nothing refines when the scene double has no face_features at all', () => {
+    const scene = imprintScene({ hitFace: 15n }) // faceFeatures omitted entirely
+    const ref = resolveSelectableRef(solidSnap(OBJECT), DOWN, deps(scene, []))
+    expect(ref).toMatchObject({ kind: 'object', id: OBJECT })
+  })
+})

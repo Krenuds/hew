@@ -37,6 +37,16 @@ use serde::{Deserialize, Serialize};
 /// exact version equality.
 pub const RECORDING_FORMAT_VERSION: u32 = 2;
 
+/// How a loop imprint's per-edge circle claims are logged: a whole-loop or
+/// leading-arc circle (`curve` + `curve_segments`) or an explicit per-edge
+/// list (`curves`). See [`RecordedCall::SplitFaceInner`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LoopClaims {
+    pub curve: Option<[f64; 4]>,
+    pub curve_segments: Option<usize>,
+    pub curves: Option<Vec<Option<[f64; 4]>>>,
+}
+
 /// One committed `Scene` mutation, captured with the exact arguments needed to
 /// re-issue it. `#[serde(tag = "method")]` gives a self-describing JSON object
 /// per call (`{"method":"extrude_region","sketch":…,"region":…,"distance":…}`).
@@ -276,6 +286,17 @@ pub enum RecordedCall {
         face: u64,
         loop_pts: Vec<f64>,
         curve: Option<[f64; 4]>,
+        /// How many leading loop edges are facets of `curve` (a pie or
+        /// segment's arc); absent = every edge (a circle). Additive: older
+        /// recordings carry no field and replay as whole-loop claims.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve_segments: Option<usize>,
+        /// An explicit per-edge claim list (`[cx, cy, cz, r]` or `null` per
+        /// loop edge) for loops whose claims are not one leading arc — the
+        /// Offset tool's face commit, whose inset arcs sit wherever the
+        /// boundary's arcs were. Takes precedence over `curve` on replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curves: Option<Vec<Option<[f64; 4]>>>,
     },
     /// `push_pull(object, face, distance)` — the user-level push/pull of a
     /// solid face. Replay re-issues it and the kernel re-derives the routing
@@ -405,11 +426,19 @@ pub enum RecordedCall {
         face: u64,
         distance: f64,
     },
-    /// `split_face(object, face, path)` — `path` is xyz triples.
+    /// `split_face(object, face, path)` — `path` is xyz triples — or, with
+    /// `curve` set, `split_face_with_arc(…, center, radius, arc_segments)`:
+    /// `curve` is `[center.x, center.y, center.z, radius]` and
+    /// `curve_segments` how many leading path edges are its facets (absent =
+    /// all). Additive fields: older recordings replay unchanged.
     SplitFace {
         object: u64,
         face: u64,
         path: Vec<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve: Option<[f64; 4]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve_segments: Option<usize>,
     },
     /// `merge_faces(object, edge)`.
     MergeFaces { object: u64, edge: u64 },
@@ -781,6 +810,12 @@ pub enum RecordedCall {
         object: u64,
         face: u64,
         path: Vec<f64>,
+        /// See [`RecordedCall::SplitFace`]: a drawn arc's circle and facet
+        /// count (`split_face_with_arc_in_instance`), WORLD-space like `path`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve: Option<[f64; 4]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve_segments: Option<usize>,
     },
     /// `split_face_inner_in_instance(instance, object, face, loop_pts)` /
     /// `split_face_inner_with_curve_in_instance(…, center, radius)` — the
@@ -796,6 +831,9 @@ pub enum RecordedCall {
         loop_pts: Vec<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         curve: Option<[f64; 4]>,
+        /// See [`RecordedCall::SplitFaceInner`]'s `curve_segments`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve_segments: Option<usize>,
     },
     /// `delete_def_member(component, object)`.
     DeleteDefMember { component: u64, object: u64 },
@@ -967,6 +1005,54 @@ pub enum RecordedCall {
         kinds: Vec<u8>,
         ids: Vec<u64>,
         group: Option<u64>,
+    },
+    /// `transform_imprint(object, face, affine)` — slide/turn/scale an
+    /// imprint sub-face on its face (editable imprints). Additive variant
+    /// (the [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; one that edits an imprint fails to parse on older
+    /// builds — loudly, never silently divergent.
+    TransformImprint {
+        object: u64,
+        face: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_imprint_in_instance(instance, object, face, affine)` —
+    /// the definition-member analog; `affine` is the WORLD gesture affine.
+    TransformImprintInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_chord(object, edge, affine)` — move a chord run (merge +
+    /// re-cut as one undo step). Additive variant.
+    TransformChord {
+        object: u64,
+        edge: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_chord_in_instance(instance, object, edge, affine)`.
+    TransformChordInInstance {
+        instance: u64,
+        object: u64,
+        edge: u64,
+        affine: [f64; 12],
+    },
+    /// `dissolve_imprint(object, face)` — Delete on a selected imprint
+    /// (nested ones go too, one undo step). Additive variant.
+    DissolveImprint { object: u64, face: u64 },
+    /// `dissolve_imprint_in_instance(instance, object, face)`.
+    DissolveImprintInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+    },
+    /// `merge_faces_in_instance(instance, object, edge)` — Delete on a
+    /// chord imprint inside a component. Additive variant.
+    MergeFacesInInstance {
+        instance: u64,
+        object: u64,
+        edge: u64,
     },
 }
 

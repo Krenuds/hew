@@ -32,6 +32,8 @@ import {
   type NodeRef,
   type NodeKind,
 } from './treeModel'
+import { readImprints, imprintRef, imprintName, type ImprintFeature } from '../tools/imprints'
+import { isImprintKind } from './treeModel'
 
 interface Props {
   scene: WasmScene
@@ -177,6 +179,28 @@ function isHiddenByAncestor(node: NodeRef, scene: WasmScene, hiddenKeys: Set<str
     parentId = scene.node_parent(1, parentId)
   }
   return false
+}
+
+/** Outliner labels for one object's imprint child rows: `imprintName(feature)`
+ *  as-is, except when more than one imprint on the SAME object shares a name
+ *  ("Circle" + "Circle") — then every one of that group is numbered 1-based
+ *  ("Circle 1", "Circle 2", …), the same 1-based scheme `entityLabel` uses
+ *  for an unnamed node's positional fallback, so a face carrying two circles
+ *  reads unambiguously instead of two identical rows. */
+function numberedImprintLabels(features: readonly ImprintFeature[]): string[] {
+  const counts = new Map<string, number>()
+  for (const f of features) {
+    const name = imprintName(f)
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  const seen = new Map<string, number>()
+  return features.map((f) => {
+    const name = imprintName(f)
+    if ((counts.get(name) ?? 0) <= 1) return name
+    const n = (seen.get(name) ?? 0) + 1
+    seen.set(name, n)
+    return `${name} ${n}`
+  })
 }
 
 export function DocumentTree({
@@ -360,7 +384,8 @@ export function DocumentTree({
         node.kind === 'sketch' ||
         node.kind === 'sketch-island' ||
         node.kind === 'sketch-curve' ||
-        node.kind === 'sketch-edge'
+        node.kind === 'sketch-edge' ||
+        isImprintKind(node.kind)
       ) {
         continue
       }
@@ -438,9 +463,24 @@ export function DocumentTree({
   const [filter, setFilter] = useState('')
   const filterInputRef = useRef<HTMLInputElement>(null)
   const filterResult = useMemo(() => {
+    // Imprint rows filter by the same text they render (an object's
+    // shapes are its children for this walk).
     const getChildren = (node: NodeRef): NodeRef[] =>
-      node.kind === 'group' ? getGroupMembers(node.id) : []
-    return filterTreeKeys(topNodes, getChildren, labelFor, filter)
+      node.kind === 'group'
+        ? getGroupMembers(node.id)
+        : node.kind === 'object'
+          ? readImprints(scene, node.id).map((f) => imprintRef(node.id, f))
+          : []
+    const labelForFiltered = (node: NodeRef): string => {
+      if (isImprintKind(node.kind) && node.object !== undefined) {
+        const features = readImprints(scene, node.object)
+        const labels = numberedImprintLabels(features)
+        const at = features.findIndex((f) => nodeKey(imprintRef(node.object!, f)) === nodeKey(node))
+        return at >= 0 ? labels[at] : ''
+      }
+      return labelFor(node)
+    }
+    return filterTreeKeys(topNodes, getChildren, labelForFiltered, filter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topNodes, filter, scene, docRev])
   const filterActive = filterResult !== null
@@ -1122,6 +1162,16 @@ const NodeRow = memo(function NodeRowInner({
     [node.kind, node.id, scene, docRev, hiddenKeys, ownHidden],
   )
   const hidden = ownHidden || hiddenByParent
+  // Imprints (drawn-but-not-yet-pushed shapes on this object's faces —
+  // imprints.ts) render below as indented, always-visible child rows.
+  // Memoized on the document revision: the read is a kernel topology walk
+  // plus a JSON round-trip, and this row re-renders on every hover state
+  // change — unconditional so the hook order never varies with `kind`.
+  const imprints = useMemo(
+    () => (node.kind === 'object' ? readImprints(scene, node.id) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [node.kind, node.id, scene, docRev],
+  )
   // Whether THIS row is the node a just-closed session frame returned to
   // (see the parent component's `sessionRevealKey` comment) — mutually
   // exclusive with `isPrimary` in practice (a session boundary always clears
@@ -1133,26 +1183,50 @@ const NodeRow = memo(function NodeRowInner({
 
   if (node.kind === 'object') {
     const watertight = watertightMap.get(node.id) ?? true
+    // An object usually carries 0-2 imprints, and objects have no expand
+    // chevron of their own, so there is no collapsed state to hide the
+    // rows behind.
+    const imprintLabels = numberedImprintLabels(imprints)
     return (
-      <Row
-        label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
-        icon={<NodeIcon kind="object" solid={watertight} />}
-        selected={selected}
-        isPrimary={isPrimary}
-        active={active}
-        dimmed={dimmed}
-        hidden={hidden}
-        hiddenByParent={hiddenByParent}
-        indent={depth}
-        rowRef={rowRef}
-        onClick={(additive) => onSelect(node, additive)}
-        onDoubleClick={() => onEnterContext(node)}
-        onToggleHidden={() => onToggleHidden(node)}
-        dropTargetKey={key}
-        isDragSource={dragSourceKeys.has(key)}
-        isDropTarget={dropHighlightKey === key}
-        onRowPointerDown={(e) => onStartDrag(node, e)}
-      />
+      <>
+        <Row
+          label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
+          icon={<NodeIcon kind="object" solid={watertight} />}
+          selected={selected}
+          isPrimary={isPrimary}
+          active={active}
+          dimmed={dimmed}
+          hidden={hidden}
+          hiddenByParent={hiddenByParent}
+          indent={depth}
+          rowRef={rowRef}
+          onClick={(additive) => onSelect(node, additive)}
+          onDoubleClick={() => onEnterContext(node)}
+          onToggleHidden={() => onToggleHidden(node)}
+          dropTargetKey={key}
+          isDragSource={dragSourceKeys.has(key)}
+          isDropTarget={dropHighlightKey === key}
+          onRowPointerDown={(e) => onStartDrag(node, e)}
+        />
+        {imprints.map((feature, i) => {
+          const ref = imprintRef(node.id, feature)
+          const refKey = nodeKey(ref)
+          return (
+            <Row
+              key={refKey}
+              label={imprintLabels[i]}
+              icon={<NodeIcon kind="imprint" />}
+              selected={isSelected(ref)}
+              isPrimary={primaryKey === refKey}
+              active={false}
+              dimmed={dimmed}
+              indent={depth + 1}
+              rowRef={primaryKey === refKey ? selectedRowRef : undefined}
+              onClick={(additive) => onSelect(ref, additive)}
+            />
+          )
+        })}
+      </>
     )
   }
 

@@ -1204,6 +1204,7 @@ fn apply_doc_op(
                     face,
                     path,
                     restore: None,
+                    curves: Vec::new(),
                 },
             );
         }
@@ -1255,7 +1256,7 @@ fn apply_doc_op(
                     face,
                     loop_path,
                     restore: None,
-                    curve: None,
+                    curves: Vec::new(),
                 },
             );
         }

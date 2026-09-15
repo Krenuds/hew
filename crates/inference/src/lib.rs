@@ -957,9 +957,13 @@ impl DefMember {
         let index = DefIndex::build(&points, &segments, &faces);
         // Analytic rims, gated on surviving coverage exactly like the world
         // path (`register`): a vacant rim offers no candidates at all.
-        let rims = object
-            .analytic_rims()
+        // Imprinted circle edges (a circle drawn on a member's face) join the
+        // wall rims, exactly as on the world path.
+        let walls = object.analytic_rims();
+        let drawn = object.edge_curve_rims_with(&walls);
+        let rims = walls
             .into_iter()
+            .chain(drawn)
             .filter(AnalyticRim::has_coverage)
             .collect();
         DefMember {
@@ -1592,8 +1596,14 @@ impl InferenceScene {
         // over the covered angular range, and — when the placement
         // preserves circles — the rim itself for anchor-based tangent
         // resolution at query time.
+        // Circles drawn on a face (imprinted circle edges, `edge_curve_rims`)
+        // offer the same candidates as wall rims: a center, covered quadrants,
+        // and a tangent rim — a drawn circle on a face snaps like one on the
+        // ground.
         let similarity = placement.similarity_scale();
-        for rim in object.analytic_rims() {
+        let walls = object.analytic_rims();
+        let drawn = object.edge_curve_rims_with(&walls);
+        for rim in walls.into_iter().chain(drawn) {
             // A rim with zero surviving arc (a slant-cut station) offers no
             // candidates AT ALL: its center would be the center of no
             // surviving circle, its quadrant set is empty by construction,

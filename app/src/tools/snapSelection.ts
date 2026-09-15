@@ -18,6 +18,7 @@
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
+import { chordNearPoint, chordThroughSegment, imprintRef, readImprints, subFaceImprint } from './imprints'
 
 export type SnapPick =
   | { kind: 'object'; object: bigint; instance?: bigint }
@@ -105,7 +106,16 @@ export interface SelectScene {
   ): { sketch(): bigint; edge(): bigint; depth(): number; free(): void } | undefined
   pick_face(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
-  ): { object(): bigint; instance(): bigint | undefined; depth(): number; free(): void } | undefined
+  ): { object(): bigint; face?(): bigint; instance(): bigint | undefined; depth(): number; free(): void } | undefined
+  /** The object's imprints (imprints.ts); optional so test doubles without
+   *  it simply never resolve an imprint. */
+  face_features?(object: bigint): string
+  /** A solid edge's endpoints, for matching a snapped edge to a chord run. */
+  edge_endpoints?(object: bigint, edge: bigint): Float64Array | number[] | undefined
+  /** The WORLD endpoints of a definition member's edge seen through a placement. */
+  edge_endpoints_in_instance?(instance: bigint, object: bigint, edge: bigint): Float64Array | number[] | undefined
+  /** A placement's 3x4 pose, for posing definition-local chord paths into world. */
+  instance_pose?(instance: bigint): Float64Array | number[] | undefined
 }
 
 /** Everything `resolveSelectableRef` needs from its host, so the resolution is
@@ -122,6 +132,11 @@ export interface ResolveDeps {
   cameraForward: readonly [number, number, number]
   /** The render far plane (meters, AXIAL). Read live from the camera. */
   cameraFar: number
+  /** Whether the shapes drawn on this object's faces may be picked even
+   *  though the object itself resolves to nothing selectable — the entered
+   *  object of an object context (its own face click deselects; its
+   *  imprints still select). Same predicate the draw tools use. */
+  imprintEligible?: (objectId: bigint, instanceId: bigint | undefined) => boolean
 }
 
 /** A drawn sketch region → its island NodeRef (or the whole sketch). */
@@ -263,6 +278,76 @@ function scopedSketchVisible(depth: number, ray: Ray, deps: ResolveDeps): boolea
   }
 }
 
+/** Refine a resolved plain-object pick to the IMPRINT under the cursor, if
+ * the click landed on one (docs/design/editable-face-sketches.md §3.1:
+ * click inside a drawn shape selects the shape; the object is one click
+ * away anywhere else). Only a pick that resolved to the object ITSELF
+ * (`kind === 'object'`, same id as the hit — never a wrapping group or a
+ * non-entered instance) is refined, so grouped/instanced solids keep their
+ * explicit double-click editing step.
+ *
+ * Two routes, edge first: a snap parked on one of the object's edges whose
+ * endpoints match a segment of a chord run selects that run (the drawn
+ * line has no face of its own to hit); otherwise the face the ray struck,
+ * when it is an imprint sub-face, selects that imprint. A snap that is
+ * merely NEAR a chord (within `CHORD_PICK_M` of the resolved point) also
+ * selects it, so a line drawn across a face is clickable without an exact
+ * edge snap. */
+function refineToImprint(
+  resolved: NodeRef | null,
+  hitObject: bigint,
+  hitFace: bigint | undefined,
+  hitInstance: bigint | undefined,
+  snap: Snap | null,
+  deps: ResolveDeps,
+): NodeRef | null {
+  const isPlainObject = resolved !== null && resolved.kind === 'object' && resolved.id === hitObject
+  const isEnteredObject = resolved === null && deps.imprintEligible?.(hitObject, hitInstance) === true
+  if (!isPlainObject && !isEnteredObject) return resolved
+  if (deps.scene.face_features === undefined) return resolved
+  let features = readImprints(deps.scene as { face_features(object: bigint): string }, hitObject)
+  if (features.length === 0) return resolved
+  // A definition member's features answer in DEFINITION-local space; the
+  // snap is in world. Pose the chord paths through the placement so the
+  // click tests below compare like with like.
+  if (hitInstance !== undefined) {
+    const pose = deps.scene.instance_pose?.(hitInstance)
+    if (pose === undefined) return resolved
+    features = features.map((f) => f.kind === 'chord' ? { ...f, path: f.path.map((p) => posePoint(pose, p)) } : f)
+  }
+  if (snap !== null && snap.object === hitObject && snap.elementKind === 'edge' && snap.element !== undefined) {
+    const ends = hitInstance !== undefined
+      ? deps.scene.edge_endpoints_in_instance?.(hitInstance, hitObject, snap.element)
+      : deps.scene.edge_endpoints?.(hitObject, snap.element)
+    if (ends !== undefined && ends.length >= 6) {
+      const run = chordThroughSegment(features, [ends[0], ends[1], ends[2]], [ends[3], ends[4], ends[5]])
+      if (run !== null) return imprintRef(hitObject, run)
+    }
+  }
+  if (snap !== null && snap.object === hitObject) {
+    const run = chordNearPoint(features, [snap.x, snap.y, snap.z], CHORD_PICK_M)
+    if (run !== null) return imprintRef(hitObject, run)
+  }
+  if (hitFace !== undefined) {
+    const sub = subFaceImprint(features, hitFace)
+    if (sub !== null) return imprintRef(hitObject, sub)
+  }
+  return resolved
+}
+
+function posePoint(pose: ArrayLike<number>, p: readonly [number, number, number]): [number, number, number] {
+  return [
+    pose[0] * p[0] + pose[1] * p[1] + pose[2] * p[2] + pose[3],
+    pose[4] * p[0] + pose[5] * p[1] + pose[6] * p[2] + pose[7],
+    pose[8] * p[0] + pose[9] * p[1] + pose[10] * p[2] + pose[11],
+  ]
+}
+
+/** World distance within which a click counts as ON a drawn chord line
+ *  (the face beneath is what the ray actually hits). Millimetre scale, the
+ *  same order as an edge's rendered width at working zoom. */
+const CHORD_PICK_M = 2e-3
+
 /** The VISIBLE solid under the ray (bounded to the far plane), context-scoped,
  * or null. Shared by the `fallback` path, so a click and a drag are bounded
  * alike: a solid beyond the render far plane is not drawn, and selecting an
@@ -270,7 +355,7 @@ function scopedSketchVisible(depth: number, ray: Ray, deps: ResolveDeps): boolea
  * see — as much a trap for a click as for a drag. `pick_face` returns the
  * NEAREST face, so this rejects only when no solid is drawn at that pixel;
  * a click on a visible solid (a nearer face) is never rejected. */
-function solidUnderRay(ray: Ray, deps: ResolveDeps): NodeRef | null {
+function solidUnderRay(ray: Ray, deps: ResolveDeps, snap: Snap | null = null): NodeRef | null {
   const facePick = deps.scene.pick_face(
     ray.origin[0], ray.origin[1], ray.origin[2],
     ray.direction[0], ray.direction[1], ray.direction[2],
@@ -278,7 +363,10 @@ function solidUnderRay(ray: Ray, deps: ResolveDeps): NodeRef | null {
   if (facePick === undefined) return null
   try {
     if (!withinFarPlane(facePick.depth(), ray, deps)) return null
-    return deps.resolveObject(facePick.object(), facePick.instance())
+    const object = facePick.object()
+    const instance = facePick.instance()
+    const resolved = deps.resolveObject(object, instance)
+    return refineToImprint(resolved, object, facePick.face?.(), instance, snap, deps)
   } finally {
     facePick.free()
   }
@@ -344,8 +432,29 @@ export function resolveSelectableRef(
   }
   const pick = classifySnapPick(snap)
   switch (pick.kind) {
-    case 'object':
-      return deps.resolveObject(pick.object, pick.instance)
+    case 'object': {
+      // An object snap (a corner, an edge, a face point) resolves to the
+      // node as before, then refines to the imprint under the cursor — the
+      // ray pick supplies the struck face the snap itself does not carry.
+      const resolved = deps.resolveObject(pick.object, pick.instance)
+      const refinable =
+        (resolved !== null && resolved.kind === 'object' && resolved.id === pick.object) ||
+        (resolved === null && deps.imprintEligible?.(pick.object, pick.instance) === true)
+      if (!refinable) return resolved
+      const facePick = deps.scene.pick_face(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      let hitFace: bigint | undefined
+      if (facePick !== undefined) {
+        try {
+          if (facePick.object() === pick.object) hitFace = facePick.face?.()
+        } finally {
+          facePick.free()
+        }
+      }
+      return refineToImprint(resolved, pick.object, hitFace, pick.instance, snap, deps)
+    }
     case 'sketch-region':
       // A top-level sketch is out of scope inside a context → resolve the
       // in-context thing under the ray (the fallback), never the sketch.
@@ -399,5 +508,5 @@ export function resolveSelectableRef(
       }
     }
   }
-  return solidUnderRay(ray, deps)
+  return solidUnderRay(ray, deps, snap)
 }

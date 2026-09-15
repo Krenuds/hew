@@ -1,10 +1,14 @@
 /**
- * ArcTool — SketchUp-style 2-point arc, drawn as a faceted polyline chain
- *. Mirrors CircleTool: no kernel change, the arc decomposes into N
- * chained `sketch_add_segment` calls (plane mode) or one `split_face` call
- * with the polyline path (face mode — the arc is an OPEN chain, so it uses
- * LineTool's boundary-to-boundary `split_face`, not CircleTool's closed-loop
- * `split_face_inner`).
+ * ArcTool — SketchUp-style 2-point arc, drawn as a faceted polyline chain.
+ * Mirrors CircleTool: the arc decomposes into N chained `sketch_add_segment`
+ * calls (plane mode) or one `split_face_with_arc`/`split_face_inner_with_arc`
+ * call with the polyline path and the arc's analytic circle (face mode —
+ * the arc is an OPEN chain by default, so it uses LineTool's
+ * boundary-to-boundary `split_face_with_arc`, not CircleTool's closed-loop
+ * `split_face_inner_with_arc`, unless a completion mode closes it — see
+ * `_commitFace`). Like plane mode's curve-chain bracket, the circle rides
+ * only the arc's own leading edges; any pie/segment closing edges are plain
+ * lines.
  *
  * Three-click gesture (both modes):
  *   1. Click endpoint A (with inference snapping).
@@ -39,7 +43,9 @@
  *
  * Face mode (an eligible Object face is under the cursor): all three points
  * lie in the picked face's plane via `snapConstraint`; commits imprint the
- * face (`split_face`/`split_face_inner`) instead of drawing into a sketch.
+ * face (`split_face_with_arc`/`split_face_inner_with_arc`, carrying the
+ * arc's analytic circle — see `_commitFace`) instead of drawing into a
+ * sketch.
  *
  * Degenerate guards (constants in arcMath.ts — no inline epsilons):
  *   - zero/short chord (B on A): the B click is ignored.
@@ -1540,29 +1546,44 @@ export class ArcTool implements Tool {
   }
 
   /** Commit the face cut for the current completion mode: an open arc cuts
-   * boundary-to-boundary (`split_face`); pie/segment close into a loop and
-   * imprint like CircleTool (`split_face_inner`). A pie whose center is
-   * unresolvable (degenerate basis — cannot happen when `verts` built) falls
-   * back to the open cut. */
+   * boundary-to-boundary (`split_face_with_arc`); pie/segment close into a
+   * loop and imprint like CircleTool (`split_face_inner_with_arc`). A pie
+   * whose center is unresolvable (degenerate basis — cannot happen when
+   * `verts` built) falls back to the open cut. The arc's own analytic circle
+   * (center via `_faceCenter`, radius the distance from that center to
+   * `verts[0]` — mirrors `_nonGroundChain`) rides the leading
+   * `verts.length - 1` edges of whichever call is made; any pie/segment
+   * closing edges stay plain lines. When the center can't be resolved, the
+   * plain (curve-less) `split_face`/`split_face_inner` calls are used
+   * instead. */
   private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number): boolean {
+    const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
+    const radius = center === null ? 0 : segmentLength(center, verts[0])
+    const arcSegments = verts.length - 1
+
     if (this.completion === 'open') {
-      return this._commitFaceChain(object, face, verts)
+      return this._commitFaceChain(object, face, verts, center, radius, arcSegments)
     }
     let loop = verts
     if (this.completion === 'pie') {
-      const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
       if (center === null) {
-        return this._commitFaceChain(object, face, verts)
+        return this._commitFaceChain(object, face, verts, center, radius, arcSegments)
       }
       loop = verts.concat([center])
     }
-    return this._commitFaceLoop(object, face, loop)
+    return this._commitFaceLoop(object, face, loop, center, radius, arcSegments)
   }
 
   /** Imprint `verts` on `face` as a closed loop (the loop closes implicitly
    * from the last vertex back to the first — same convention as CircleTool's
-   * `split_face_inner` commit). */
-  private _commitFaceLoop(object: bigint, face: bigint, verts: V3[]): boolean {
+   * `split_face_inner` commit). When `center` is resolvable, the loop's
+   * leading `arcSegments` edges carry the arc's analytic circle
+   * (`split_face_inner_with_arc`); otherwise falls back to the plain,
+   * curve-less `split_face_inner`. */
+  private _commitFaceLoop(
+    object: bigint, face: bigint, verts: V3[],
+    center: V3 | null, radius: number, arcSegments: number,
+  ): boolean {
     const loopPts = new Float64Array(verts.length * 3)
     for (let i = 0; i < verts.length; i++) {
       loopPts[i * 3 + 0] = verts[i][0]
@@ -1574,7 +1595,16 @@ export class ArcTool implements Tool {
       // Inside a component instance's editing context (component-edit-
       // parity.md phase A2), `object` is a definition member — route
       // through the instance-aware wrapper.
-      if (this._activeInstance !== null) {
+      if (center !== null) {
+        const centerArr = new Float64Array(center)
+        if (this._activeInstance !== null) {
+          this.wasmScene.split_face_inner_with_arc_in_instance(
+            this._activeInstance, object, face, loopPts, centerArr, radius, arcSegments,
+          )
+        } else {
+          this.wasmScene.split_face_inner_with_arc(object, face, loopPts, centerArr, radius, arcSegments)
+        }
+      } else if (this._activeInstance !== null) {
         this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, loopPts)
       } else {
         this.wasmScene.split_face_inner(object, face, loopPts)
@@ -1591,8 +1621,14 @@ export class ArcTool implements Tool {
   }
 
   /** Cut `face` along the arc polyline (open, boundary-to-boundary — the
-   * same `split_face` call LineTool's face chain commits with). */
-  private _commitFaceChain(object: bigint, face: bigint, verts: V3[]): boolean {
+   * same family `split_face` LineTool's face chain commits with). When
+   * `center` is resolvable, the path's leading `arcSegments` edges carry the
+   * arc's analytic circle (`split_face_with_arc`); otherwise falls back to
+   * the plain, curve-less `split_face`. */
+  private _commitFaceChain(
+    object: bigint, face: bigint, verts: V3[],
+    center: V3 | null, radius: number, arcSegments: number,
+  ): boolean {
     const path = new Float64Array(verts.length * 3)
     for (let i = 0; i < verts.length; i++) {
       path[i * 3 + 0] = verts[i][0]
@@ -1601,7 +1637,18 @@ export class ArcTool implements Tool {
     }
 
     try {
-      if (this._activeInstance !== null) {
+      if (center !== null) {
+        const centerArr = new Float64Array(center)
+        if (this._activeInstance !== null) {
+          const report = this.wasmScene.split_face_with_arc_in_instance(
+            this._activeInstance, object, face, path, centerArr, radius, arcSegments,
+          )
+          report.free()
+        } else {
+          const report = this.wasmScene.split_face_with_arc(object, face, path, centerArr, radius, arcSegments)
+          report.free()
+        }
+      } else if (this._activeInstance !== null) {
         const report = this.wasmScene.split_face_in_instance(this._activeInstance, object, face, path)
         report.free()
       } else {

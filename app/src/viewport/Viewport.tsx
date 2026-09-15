@@ -131,6 +131,7 @@ import {
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
+import { findImprint } from '../tools/imprints'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
@@ -2616,6 +2617,10 @@ export default function Viewport({
       return {
         scene: wasmScene as unknown as SelectScene,
         context: activeContextRef.current,
+        // Inside an entered object (double-click a solid) the object itself
+        // is not click-selectable, but the shapes drawn on it are — the same
+        // eligibility the draw tools use for that context.
+        imprintEligible: faceDrawEligible,
         resolveObject: (objectId, instanceId) => {
           if (instanceId !== undefined && hiddenInstanceIdsRef.current.has(instanceId)) return null
           if (hiddenObjectIdsRef.current.has(objectId)) return null
@@ -4229,6 +4234,10 @@ export default function Viewport({
       for (const node of nodes) {
         if (node.kind === 'object') objectIds.push(node.id)
         else if (node.kind === 'instance') instanceIds.push(node.id)
+        else if ((node.kind === 'imprint' || node.kind === 'imprint-chord') && node.object !== undefined) {
+          // A moved imprint changes only its owning object's geometry.
+          objectIds.push(node.object)
+        }
         else return undefined
       }
       return { objectIds, instanceIds }
@@ -4436,7 +4445,8 @@ export default function Viewport({
         nodes.filter((n) => n.kind === 'sketch').map((n) => n.id),
       )
       const isSub = (n: NodeRef) =>
-        n.kind === 'sketch-edge' || n.kind === 'sketch-curve' || n.kind === 'sketch-island'
+        n.kind === 'sketch-edge' || n.kind === 'sketch-curve' || n.kind === 'sketch-island' ||
+        n.kind === 'imprint' || n.kind === 'imprint-chord'
       const ordered = [...nodes.filter(isSub), ...nodes.filter((n) => !isSub(n))]
       // Editing INSIDE a component instance's own definition (component-
       // edit-parity.md phase A2): every 'object' node in this delete routes
@@ -4473,6 +4483,29 @@ export default function Viewport({
       const worldDeleteIds: bigint[] = []
       for (const n of ordered) {
         try {
+          if ((n.kind === 'imprint' || n.kind === 'imprint-chord') && n.object !== undefined) {
+            // A drawn shape on a face dissolves back into it (imprints.ts):
+            // a sub-face through `dissolve_imprint` (anything inside it stays
+            // on the face), a chord run through the coplanar merge. An object
+            // also in this delete covers it — the node delete takes the
+            // shape with it, and a dissolve first would only churn.
+            if (nodes.some((m) => m.kind === 'object' && m.id === n.object)) continue
+            // An earlier step in this same delete (a chord merge that
+            // re-keys a neighbouring run, an object delete) may already
+            // have consumed this ref — mirror the deletedSketches skip rather than
+            // toast a stale-handle refusal after a successful delete.
+            if (findImprint(wasmScene, n) === null) continue
+            const inInstance = activeComponent !== null && editCtx.kind === 'instance'
+            if (n.kind === 'imprint') {
+              if (inInstance) wasmScene.dissolve_imprint_in_instance(editCtx.id, n.object, n.id)
+              else wasmScene.dissolve_imprint(n.object, n.id)
+            } else if (inInstance) {
+              wasmScene.merge_faces_in_instance(editCtx.id, n.object, n.id)
+            } else {
+              wasmScene.merge_faces(n.object, n.id).free()
+            }
+            continue
+          }
           if (n.kind === 'sketch-island' && n.sketch !== undefined) {
             if (deletedSketches.has(n.sketch)) continue
             removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_island_edges(n.sketch, n.id)))
@@ -9766,6 +9799,7 @@ export default function Viewport({
     const sketchIds: bigint[] = []
     const sketchEdges: { sketch: bigint; edge: bigint }[] = []
     const sketchIslands: { sketch: bigint; island: bigint }[] = []
+    const imprints: { object: bigint; kind: 'imprint' | 'imprint-chord'; id: bigint }[] = []
     const getGroupMembers = (groupId: bigint): NodeRef[] =>
       wasmSceneRef.current.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id }))
     for (const node of selectedIds) {
@@ -9789,6 +9823,10 @@ export default function Viewport({
         sketchEdges.push({ sketch: node.sketch, edge: node.id })
         continue
       }
+      if ((node.kind === 'imprint' || node.kind === 'imprint-chord') && node.object !== undefined) {
+        imprints.push({ object: node.object, kind: node.kind, id: node.id })
+        continue
+      }
       const { objectIds, instanceIds: leafInstanceIds } = collectLeafIds(node, getGroupMembers)
       leafIds.push(...objectIds)
       instanceIds.push(...leafInstanceIds)
@@ -9804,6 +9842,7 @@ export default function Viewport({
     sceneRendererRef.current?.setSelectedSketches(sketchIds)
     sceneRendererRef.current?.setSelectedSketchIslands(sketchIslands)
     sceneRendererRef.current?.setSelectedSketchEdges(sketchEdges)
+    sceneRendererRef.current?.setSelectedImprints(imprints)
     sceneRendererRef.current?.setSelectedSketchInstance(
       activeInstance,
     )

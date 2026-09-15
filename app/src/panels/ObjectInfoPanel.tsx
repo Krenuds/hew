@@ -41,6 +41,7 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
+import { findImprint, imprintName, isImprintRef } from '../tools/imprints'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
 import { formatLength } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
@@ -89,6 +90,7 @@ function kindLabel(kind: NodeRef['kind']): string {
   if (kind === 'sketch' || kind === 'sketch-island') return 'Sketch'
   if (kind === 'sketch-curve') return 'Curve'
   if (kind === 'sketch-edge') return 'Sketch Line'
+  if (kind === 'imprint' || kind === 'imprint-chord') return 'Shape on face'
   return 'Component'
 }
 
@@ -151,6 +153,47 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     const node = selectedIds[0]
     const kind = node.kind
     const id = node.id
+
+    // An imprint (a drawn-but-not-yet-pushed shape on a solid's face —
+    // imprints.ts) has no kernel NodeId, name, tags, or solid state either —
+    // checked BEFORE the sketch-scoped branch below, since a stale imprint
+    // ref still carries `node.sketch === undefined` and would otherwise fall
+    // into that branch's `node.sketch ?? id` and query `sketch_island_ids`
+    // with a FACE handle. Read-only: a plain shape word ("Circle") plus the
+    // owning object's own display name, exactly what the Outliner's child
+    // row and this label agree on. A stale ref (the imprint was pushed into
+    // a boss, dissolved, or a chord was re-cut since selection) shows just
+    // the kind label — the same "minimal entry" the sketch branch below
+    // shows for its own stale cases.
+    if (isImprintRef(node)) {
+      const feature = findImprint(scene, node)
+      const treeIndex = buildTreeIndexMap(
+        scene.top_level_nodes().map(nodeRefFromJs),
+        (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+      )
+      const objIdx = treeIndex.get(nodeKey({ kind: 'object', id: node.object })) ?? 0
+      const objectLabel = resolveLabel(scene.object_name(node.object), undefined, 'object', objIdx)
+      const label = feature === null ? kindLabel(kind) : `${imprintName(feature)} on ${objectLabel}`
+      const points =
+        feature === null ? null : feature.kind === 'sub_face' ? feature.loop.length : feature.path.length
+      return {
+        sketchId: undefined as bigint | undefined,
+        curveId: null as bigint | null,
+        segments: null as number | null,
+        node,
+        kind,
+        id,
+        kindNum: null as number | null,
+        nameFromScene: undefined as string | undefined,
+        defaultLabel: label,
+        tags: [] as string[][],
+        solid: null as boolean | null,
+        defId: null as bigint | null,
+        defName: undefined as string | undefined,
+        instanceIds: [] as bigint[],
+        points,
+      }
+    }
 
     // A sketch is a thin selectable (a drawn line) with no kernel NodeId, name,
     // tags, or solid state — show a minimal read-only entry and never call the
@@ -221,6 +264,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         defId: null as bigint | null,
         defName: undefined as string | undefined,
         instanceIds: [] as bigint[],
+        points: null as number | null,
       }
     }
 
@@ -287,6 +331,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
       defId,
       defName,
       instanceIds,
+      points: null as number | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, selectedIds])
@@ -761,6 +806,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
           )}
         </div>
       </div>
+
+      {/* Points — an imprint only (imprints.ts): the loop's (sub-face) or
+       * path's (chord) vertex count. Read-only, unlike Segments below — an
+       * imprint has no facet density to edit, just the shape as drawn. */}
+      {nodeInfo.points !== null && (
+        <div>
+          <div style={LABEL_STYLE}>Points</div>
+          <div style={VALUE_STYLE}>{nodeInfo.points}</div>
+        </div>
+      )}
 
       {/* Segments — a drawn circle only. Editing it re-facets that circle in
        * place (one undo step); the circle itself, its centre and its radius

@@ -42,14 +42,15 @@ use crate::camera::CameraState;
 use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{
-    AnnotationId, ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
+    AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId,
+    SketchId,
 };
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::{FaceMaterial, Material, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{
-    BooleanError, BooleanOp, ExtrudeError, FollowMeError, LoopImprintPlan, Operand, SliceError,
-    StickyError,
+    BooleanError, BooleanOp, ExtrudeError, FaceFeature, FaceSplitReport, FollowMeError,
+    LoopImprintPlan, Operand, SliceError, StickyError, TransformSubFaceReport,
 };
 use crate::serialize::{
     DocSaveData, LoadError, NodeRefDto, RawAnchor, RawAnnotation, decode_document_raw,
@@ -2814,6 +2815,16 @@ pub struct LoopImprintReport {
     pub region: FaceId,
     pub other: FaceId,
     pub route: LoopImprintRoute,
+}
+
+/// What [`Document::transform_chord`] produced: the moved run, re-keyed the
+/// way [`FaceFeature::Chord`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformChordReport {
+    /// The re-cut run's first edge (in `faces[0]`'s outer-loop order).
+    pub edge: EdgeId,
+    /// The two faces the run now separates, lower key first.
+    pub faces: [FaceId; 2],
 }
 
 /// What [`Document::purge_unused`] removed.
@@ -9683,14 +9694,79 @@ impl Document {
         loop_path: Vec<Point3>,
         curve: Option<crate::sketch::CurveGeom>,
     ) -> Result<(LoopImprintReport, DocChange), DocumentError> {
-        let plan = self
+        let curves = curve
+            .map(|g| vec![Some(g); loop_path.len()])
+            .unwrap_or_default();
+        self.imprint_loop_on_face_with_curves(scope, object, face, loop_path, curves)
+    }
+
+    /// [`Document::imprint_loop_on_face`] with a per-edge analytic claim:
+    /// `curves[k]` is the circle loop edge `k` (`loop_path[k]` →
+    /// `loop_path[k+1]`, the last closing the loop) is a chord facet of, or
+    /// `None` for a plain edge — how a pie or segment (an arc closed by
+    /// lines) keeps its arc, whether it lands as a sub-face or, drawn up to
+    /// the boundary, as chords (each chord takes the claims of the loop
+    /// edges it is made of). Empty `curves` claims nothing.
+    pub fn imprint_loop_on_face_with_curves(
+        &mut self,
+        scope: Option<ComponentId>,
+        object: ObjectId,
+        face: FaceId,
+        loop_path: Vec<Point3>,
+        curves: Vec<Option<crate::sketch::CurveGeom>>,
+    ) -> Result<(LoopImprintReport, DocChange), DocumentError> {
+        if !curves.is_empty() && curves.len() != loop_path.len() {
+            return Err(DocumentError::Op(KernelOpError::Sticky(
+                StickyError::CurveClaimOffLoop,
+            )));
+        }
+        let obj = &self
             .objects
             .get(object)
             .filter(|r| !r.hidden)
             .ok_or(DocumentError::UnknownObject)?
-            .object
-            .plan_loop_imprint(face, &loop_path)
-            .map_err(|e| DocumentError::Op(KernelOpError::Sticky(e)))?;
+            .object;
+        // A loop drawn AROUND the shape under its first click — a circle or
+        // polygon whose center lands inside an existing shape, a rectangle
+        // started inside one — does not fit that shape's face but does fit a
+        // coplanar face the shape sits on. Walk up the imprint parents to the
+        // first face that holds the loop, so enclosing works whichever click
+        // started the shape. A loop the clicked face holds, or one running
+        // along its boundary, keeps the clicked face (nesting still works),
+        // and a loop no ancestor holds reports the clicked face's own refusal.
+        let fits = |f: FaceId| -> Option<LoopImprintPlan> {
+            match obj.plan_loop_imprint(f, &loop_path) {
+                Ok(LoopImprintPlan::Inner(p))
+                    if obj.check_loop_strictly_inside(f, &p, None).is_ok() =>
+                {
+                    Some(LoopImprintPlan::Inner(p))
+                }
+                Ok(plan @ LoopImprintPlan::Chords(_)) => Some(plan),
+                _ => None,
+            }
+        };
+        let (face, plan) = match fits(face) {
+            Some(plan) => (face, plan),
+            None => {
+                let mut found = None;
+                let mut f = face;
+                while let Some((parent, _)) = obj.imprint_parent(f) {
+                    if let Some(plan) = fits(parent) {
+                        found = Some((parent, plan));
+                        break;
+                    }
+                    f = parent;
+                }
+                match found {
+                    Some(hit) => hit,
+                    None => (
+                        face,
+                        obj.plan_loop_imprint(face, &loop_path)
+                            .map_err(|e| DocumentError::Op(KernelOpError::Sticky(e)))?,
+                    ),
+                }
+            }
+        };
         let apply = |doc: &mut Document, op: KernelOp| match scope {
             Some(component) => doc.apply_def_op(component, object, op),
             None => doc.apply_object_op(object, op),
@@ -9706,7 +9782,7 @@ impl Document {
                         face,
                         loop_path,
                         restore: None,
-                        curve,
+                        curves,
                     },
                 )?;
                 let KernelOpReport::FaceSplitInner(r) = report else {
@@ -9742,12 +9818,28 @@ impl Document {
                 let mut region = face;
                 let mut other = face;
                 for chord in &chords {
+                    // A chord is a run of consecutive loop edges (the planner
+                    // copies the loop's points exactly): its claims are the
+                    // loop's, starting at the edge whose ends the chord's
+                    // first two points are. A chord that cannot be placed on
+                    // the loop claims nothing (drop, never misattribute).
+                    let n = loop_path.len();
+                    let chord_curves: Vec<Option<crate::sketch::CurveGeom>> = (0..n)
+                        .find(|&i| loop_path[i] == chord[0] && loop_path[(i + 1) % n] == chord[1])
+                        .filter(|_| !curves.is_empty())
+                        .map(|start| {
+                            (0..chord.len() - 1)
+                                .map(|j| curves[(start + j) % n])
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let (report, change) = match apply(
                         self,
                         KernelOp::SplitFace {
                             face: current_face,
                             path: chord.clone(),
                             restore: None,
+                            curves: chord_curves,
                         },
                     ) {
                         Ok(v) => v,
@@ -9793,6 +9885,199 @@ impl Document {
                 ))
             }
         }
+    }
+
+    /// The drawn-but-unpushed shapes `object` carries
+    /// ([`Object::face_features`]), or `None` for an unknown/hidden object.
+    /// Pure. A definition member answers in definition-local space.
+    pub fn face_features(&self, object: ObjectId) -> Option<Vec<FaceFeature>> {
+        self.objects
+            .get(object)
+            .filter(|r| !r.hidden)
+            .map(|r| r.object.face_features())
+    }
+
+    /// Dissolves the imprint `face` of `object` back into its parent — the
+    /// user's Delete on a selected imprint — as one undo entry labeled
+    /// "Delete imprint". Anything the shape encloses (shapes drawn inside it,
+    /// or a boss, recess, or hole it was drawn around) is handed back to the
+    /// parent face: deleting a shape never deletes what is inside it.
+    ///
+    /// `scope`: `None` for a world object, `Some(component)` for a
+    /// definition member (the def-scoped [`Document::apply_def_op`] path).
+    ///
+    /// # Errors
+    /// [`StickyError::NotAnInnerFace`] when `face` is not an imprint, with the
+    /// object untouched.
+    pub fn dissolve_imprint(
+        &mut self,
+        scope: Option<ComponentId>,
+        object: ObjectId,
+        face: FaceId,
+    ) -> Result<DocChange, DocumentError> {
+        let obj = &self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden)
+            .ok_or(DocumentError::UnknownObject)?
+            .object;
+        if obj.imprint_parent(face).is_none() {
+            return Err(DocumentError::Op(KernelOpError::Sticky(
+                StickyError::NotAnInnerFace,
+            )));
+        }
+        let op = KernelOp::MergeInnerFace { sub_face: face };
+        let (_, change) = match scope {
+            Some(component) => self.apply_def_op(component, object, op)?,
+            None => self.apply_object_op(object, op)?,
+        };
+        Ok(change)
+    }
+
+    /// Slides, turns, or scales an imprint sub-face on its face
+    /// ([`Object::transform_sub_face`]) as one recorded, undoable step.
+    /// `scope` as for [`Document::dissolve_imprint`]; for a definition
+    /// member `xf` is definition-local.
+    pub fn transform_imprint(
+        &mut self,
+        scope: Option<ComponentId>,
+        object: ObjectId,
+        face: FaceId,
+        xf: Transform,
+    ) -> Result<(TransformSubFaceReport, DocChange), DocumentError> {
+        let op = KernelOp::TransformSubFace {
+            sub_face: face,
+            xf,
+            pinned: Vec::new(),
+        };
+        let (report, change) = match scope {
+            Some(component) => self.apply_def_op(component, object, op)?,
+            None => self.apply_object_op(object, op)?,
+        };
+        let KernelOpReport::TransformSubFace(r) = report else {
+            unreachable!("TransformSubFace reports TransformSubFace");
+        };
+        Ok((r, change))
+    }
+
+    /// Moves a chord feature ([`FaceFeature::Chord`], a shape drawn up to a
+    /// face's edge) by `xf`: the run is dissolved (`MergeFaces`) and the
+    /// merged face re-cut along the transformed path (`SplitFace`), as ONE
+    /// undo entry labeled "Move imprint". Both endpoints of the moved path
+    /// must still lie on the merged face's boundary — sliding a rectangle
+    /// along the edge it was drawn from works; anything that would leave
+    /// the boundary refuses typed through `split_face`'s own gates
+    /// (`EndpointNotOnBoundary`, `PathNotSimple`) and the document is
+    /// restored exactly. Returns the re-cut run's first edge (handles are
+    /// re-minted by the split) and the two faces it now separates.
+    ///
+    /// # Errors
+    /// [`StickyError::NotAChord`] when `edge` is not a chord feature, plus
+    /// everything the two ops refuse.
+    pub fn transform_chord(
+        &mut self,
+        scope: Option<ComponentId>,
+        object: ObjectId,
+        edge: EdgeId,
+        xf: Transform,
+    ) -> Result<(TransformChordReport, DocChange), DocumentError> {
+        let features = self
+            .face_features(object)
+            .ok_or(DocumentError::UnknownObject)?;
+        let (path, curves) = features
+            .into_iter()
+            .find_map(|f| match f {
+                FaceFeature::Chord {
+                    edge: e,
+                    path,
+                    curves,
+                    ..
+                } if e == edge => Some((path, curves)),
+                _ => None,
+            })
+            .ok_or(DocumentError::Op(KernelOpError::Sticky(
+                StickyError::NotAChord,
+            )))?;
+        let moved: Vec<Point3> = path.iter().map(|&p| xf.apply_point(p)).collect();
+        // An arc's circle rides the similarity with its facets (center
+        // mapped, radius scaled); a run with no claims carries none.
+        let moved_curves: Vec<Option<crate::sketch::CurveGeom>> =
+            if curves.iter().all(Option::is_none) {
+                Vec::new()
+            } else {
+                let scale =
+                    xf.similarity_scale()
+                        .ok_or(DocumentError::Op(KernelOpError::Sticky(
+                            StickyError::NotInPlane,
+                        )))?;
+                curves
+                    .iter()
+                    .map(|c| {
+                        c.map(|g| crate::sketch::CurveGeom {
+                            center: xf.apply_point(g.center),
+                            radius: g.radius * scale,
+                        })
+                    })
+                    .collect()
+            };
+        let apply = |doc: &mut Document, op: KernelOp| match scope {
+            Some(component) => doc.apply_def_op(component, object, op),
+            None => doc.apply_object_op(object, op),
+        };
+        let txn = self.begin_transaction();
+        let run = |doc: &mut Document| -> Result<(FaceSplitReport, DocChange), DocumentError> {
+            let (report, c1) = apply(doc, KernelOp::MergeFaces { edge })?;
+            let KernelOpReport::FaceMerge(m) = report else {
+                unreachable!("MergeFaces reports FaceMerge");
+            };
+            let (report, c2) = apply(
+                doc,
+                KernelOp::SplitFace {
+                    face: m.merged_face,
+                    path: moved.clone(),
+                    restore: None,
+                    curves: moved_curves.clone(),
+                },
+            )?;
+            let KernelOpReport::FaceSplit(s) = report else {
+                unreachable!("SplitFace reports FaceSplit");
+            };
+            let mut change = c1;
+            merge_doc_change(&mut change, c2);
+            Ok((s, change))
+        };
+        let (split, change) = match run(self) {
+            Ok(v) => v,
+            Err(e) => {
+                self.abort_transaction(txn);
+                return Err(e);
+            }
+        };
+        self.commit_transaction(
+            txn,
+            CompoundMeta {
+                label: "Move imprint".to_string(),
+                origin: HistoryOrigin::User,
+            },
+        )?;
+        // Report the run as `face_features` will key it: first edge in the
+        // lower-keyed face's outer-loop order.
+        let obj = &self.objects[object].object;
+        let mut faces = split.new_faces;
+        if faces[1] < faces[0] {
+            faces.swap(0, 1);
+        }
+        let edge = obj
+            .face_features()
+            .into_iter()
+            .find_map(|f| match f {
+                FaceFeature::Chord {
+                    edge, faces: fs, ..
+                } if fs == faces => Some(edge),
+                _ => None,
+            })
+            .unwrap_or(split.new_edges[0]);
+        Ok((TransformChordReport { edge, faces }, change))
     }
 
     pub fn apply_object_op(
@@ -15655,9 +15940,13 @@ impl Document {
             Some(KernelOp::SplitFace { .. }) | Some(KernelOp::SplitFaceInner { .. }) => {
                 "Draw on face".to_string()
             }
+            // A user reaches these only by deleting a drawn shape on a face
+            // (an imprint sub-face, or a chord run); the boolean cleanup's
+            // coplanar merges never record ops.
             Some(KernelOp::MergeFaces { .. }) | Some(KernelOp::MergeInnerFace { .. }) => {
-                "Merge faces".to_string()
+                "Delete imprint".to_string()
             }
+            Some(KernelOp::TransformSubFace { .. }) => "Move imprint".to_string(),
             None => "Edit face".to_string(),
         }
     }

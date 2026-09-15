@@ -1107,6 +1107,20 @@ export interface SketchOffsetResult {
 }
 
 /**
+ * `hew.solid.delete_imprint` (v1) — Delete an imprint (sub-face or chord), dissolving it back into its face.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
+ */
+export interface SolidDeleteImprintParams {
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  imprint: UnspecifiedShape
+}
+
+export interface SolidDeleteImprintResult {
+  object_id: string
+}
+
+/**
  * `hew.solid.extrude` (v1) — Extrude a region into a new Object, consuming the profile.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: distance_too_small, degenerate_geometry, unknown_region, unknown_entity
@@ -1135,6 +1149,19 @@ export interface SolidFollowMeResult {
 }
 
 /**
+ * `hew.solid.imprints` (v1) — List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_object, unknown_entity
+ */
+export interface SolidImprintsParams {
+  object: string
+}
+
+export interface SolidImprintsResult {
+  imprints: ({ at: [number, number, number]; curve?: UnspecifiedShape; curves?: unknown[]; kind: "sub_face" | "chord"; loop?: unknown[][]; nested?: number; path?: unknown[][] })[]
+}
+
+/**
  * `hew.solid.intersect` (v1) — Boolean intersection of two solids.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
@@ -1148,6 +1175,21 @@ export interface SolidIntersectParams {
 
 export interface SolidIntersectResult {
   result: string
+}
+
+/**
+ * `hew.solid.move_imprint` (v1) — Slide an imprint (sub-face or chord) on its face by a translation.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
+ */
+export interface SolidMoveImprintParams {
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  imprint: UnspecifiedShape
+  offset: [number, number, number]
+}
+
+export interface SolidMoveImprintResult {
+  object_id: string
 }
 
 /**
@@ -1166,6 +1208,40 @@ export interface SolidPushPullResult {
   object_id?: string
   /** a through-cut's resulting pieces, replacing the source object */
   object_ids?: string[]
+}
+
+/**
+ * `hew.solid.rotate_imprint` (v1) — Turn an imprint on its face about the face normal through a pivot point.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
+ */
+export interface SolidRotateImprintParams {
+  about: [number, number, number] | UnspecifiedShape
+  /** radians */
+  angle: number
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  imprint: UnspecifiedShape
+}
+
+export interface SolidRotateImprintResult {
+  object_id: string
+}
+
+/**
+ * `hew.solid.scale_imprint` (v1) — Uniformly scale an imprint on its face about an anchor point.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
+ */
+export interface SolidScaleImprintParams {
+  about: [number, number, number] | UnspecifiedShape
+  /** uniform scale factor */
+  factor: number
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  imprint: UnspecifiedShape
+}
+
+export interface SolidScaleImprintResult {
+  object_id: string
 }
 
 /**
@@ -1532,10 +1608,15 @@ export class HewApiClient {
   }
 
   readonly solid = {
+    deleteImprint: (params: SolidDeleteImprintParams): Promise<SolidDeleteImprintResult> => this.mutate('hew.solid.delete_imprint', params),
     extrude: (params: SolidExtrudeParams): Promise<SolidExtrudeResult> => this.mutate('hew.solid.extrude', params),
     followMe: (params: SolidFollowMeParams): Promise<SolidFollowMeResult> => this.mutate('hew.solid.follow_me', params),
+    imprints: (params: SolidImprintsParams): Promise<SolidImprintsResult> => this.call('hew.solid.imprints', params),
     intersect: (params: SolidIntersectParams): Promise<SolidIntersectResult> => this.mutate('hew.solid.intersect', params),
+    moveImprint: (params: SolidMoveImprintParams): Promise<SolidMoveImprintResult> => this.mutate('hew.solid.move_imprint', params),
     pushPull: (params: SolidPushPullParams): Promise<SolidPushPullResult> => this.mutate('hew.solid.push_pull', params),
+    rotateImprint: (params: SolidRotateImprintParams): Promise<SolidRotateImprintResult> => this.mutate('hew.solid.rotate_imprint', params),
+    scaleImprint: (params: SolidScaleImprintParams): Promise<SolidScaleImprintResult> => this.mutate('hew.solid.scale_imprint', params),
     slice: (params: SolidSliceParams): Promise<SolidSliceResult> => this.mutate('hew.solid.slice', params),
     subtract: (params: SolidSubtractParams): Promise<SolidSubtractResult> => this.mutate('hew.solid.subtract', params),
     union: (params: SolidUnionParams): Promise<SolidUnionResult> => this.mutate('hew.solid.union', params),

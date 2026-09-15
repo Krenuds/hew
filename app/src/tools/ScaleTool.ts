@@ -68,6 +68,7 @@ import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
+import { findImprint, imprintSegments } from './imprints'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
@@ -649,6 +650,17 @@ export class ScaleTool implements Tool {
       if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
         continue // not transformable — contributes nothing to the box
       }
+      if (node.kind === 'imprint' || node.kind === 'imprint-chord') {
+        // A drawn shape on a face: its own line work bounds the gizmo.
+        const feature = findImprint(this.wasmScene, node)
+        if (feature === null) continue // stale — nothing to bound
+        const segs = imprintSegments(feature, activePose)
+        for (let i = 0; i + 2 < segs.length; i += 3) {
+          pt.set(segs[i], segs[i + 1], segs[i + 2])
+          box.expandByPoint(pt)
+        }
+        continue
+      }
       if (node.kind === 'sketch-island' && node.sketch !== undefined) {
         let lines: Float32Array
         try {
@@ -1153,7 +1165,11 @@ export class ScaleTool implements Tool {
    *  records nothing and opens nothing). */
   private _commitAndArm(spec: RetypeSpec): void {
     const genBefore = this.wasmScene.history_generation()
-    if (this._commit(spec.nodes, spec.pivot, spec.factors)) this.retype.armFrom(spec, genBefore)
+    // No typed-size window for a moved chord: its run is re-cut on every
+    // commit and on the window's own undo (see MoveTool).
+    if (this._commit(spec.nodes, spec.pivot, spec.factors) && !spec.nodes.some((n) => n.kind === 'imprint-chord')) {
+      this.retype.armFrom(spec, genBefore)
+    }
   }
 
   /**
@@ -1208,11 +1224,15 @@ export class ScaleTool implements Tool {
   private _commit(nodes: NodeRef[], pivot: Vec3, factors: Vec3): boolean {
     const isIdentity =
       Math.abs(factors[0] - 1) < 1e-9 && Math.abs(factors[1] - 1) < 1e-9 && Math.abs(factors[2] - 1) < 1e-9
+    // A chord imprint's move re-cuts its run (fresh edge handles), so the
+    // commit hands back the re-keyed selection; everything else is the same
+    // node it was.
+    let committed: NodeRef[] = nodes
     if (!isIdentity) {
       try {
         const affine = nonUniformScaleAboutPivot(factors[0], factors[1], factors[2], pivot)
         const affineF64 = affineToFloat64(affine)
-        commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
+        committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -1221,11 +1241,12 @@ export class ScaleTool implements Tool {
         return false
       }
     }
-    this.onCommit(nodes)
+    this.onCommit(committed)
     // Redraw the gizmo at the (possibly new) size so a follow-up grip can be
     // grabbed right away — handles stay stable through a transform (kernel
-    // strong guarantee), so `nodes` is still valid.
-    if (nodes.length > 0) this._showGizmo(nodes)
+    // strong guarantee; a re-cut chord is re-keyed above), so `committed`
+    // is still valid.
+    if (committed.length > 0) this._showGizmo(committed)
     return !isIdentity
   }
 

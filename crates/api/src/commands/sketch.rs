@@ -251,11 +251,19 @@ fn public_id_of(ctx: &Ctx, entity: EntityRef) -> String {
 /// `split_face`). Mints two face tokens, `"a"`/`"b"`, naming the two
 /// faces the cut produced — cheap, since
 /// [`kernel::FaceSplitReport::new_faces`] names them directly.
-fn draw_chain_on_face(ctx: &mut Ctx, face: FaceRef, path: Vec<Point3>) -> Result<Value, CmdError> {
+/// `curves[k]` is the circle path edge `k` is a chord facet of (an open arc
+/// claims every edge of its chain), or `None`; empty claims nothing.
+fn draw_chain_on_face(
+    ctx: &mut Ctx,
+    face: FaceRef,
+    path: Vec<Point3>,
+    curves: Vec<Option<CurveGeom>>,
+) -> Result<Value, CmdError> {
     let op = KernelOp::SplitFace {
         face: face.face,
         path,
         restore: None,
+        curves,
     };
     let report = apply_face_op(ctx, face.object, op)?;
     let KernelOpReport::FaceSplit(r) = report else {
@@ -284,13 +292,33 @@ fn draw_loop_on_face(
     loop_path: Vec<Point3>,
     curve: Option<CurveGeom>,
 ) -> Result<Value, CmdError> {
+    let curves = curve
+        .map(|g| vec![Some(g); loop_path.len()])
+        .unwrap_or_default();
+    draw_loop_on_face_with_curves(ctx, face, loop_path, curves)
+}
+
+/// [`draw_loop_on_face`] with a per-edge claim (`curves[k]` for loop edge
+/// `k`, the last closing the loop): a pie or segment claims its arc's edges
+/// and leaves the closing lines plain, so the shape keeps its arc on the
+/// face exactly as it does in a ground sketch.
+fn draw_loop_on_face_with_curves(
+    ctx: &mut Ctx,
+    face: FaceRef,
+    loop_path: Vec<Point3>,
+    curves: Vec<Option<CurveGeom>>,
+) -> Result<Value, CmdError> {
     // `Document::imprint_loop_on_face` routes a loop clear of the boundary
     // to a sub-face and one running along part of it to chord splits, and
     // reports the face carrying the drawn region either way.
     let scope = ctx.doc.object_owner_component(face.object);
-    let (report, _change) =
-        ctx.doc
-            .imprint_loop_on_face(scope, face.object, face.face, loop_path, curve)?;
+    let (report, _change) = ctx.doc.imprint_loop_on_face_with_curves(
+        scope,
+        face.object,
+        face.face,
+        loop_path,
+        curves,
+    )?;
     ctx.mint_face_token("face", face.object, report.region);
     ctx.mint_face_token("parent", face.object, report.other);
     Ok(face_imprint_result(ctx, face.object))
@@ -441,7 +469,7 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         .collect::<Result<_, _>>()?;
 
     if let PlaneTarget::Face(face_ref) = target {
-        return draw_chain_on_face(ctx, face_ref, pts);
+        return draw_chain_on_face(ctx, face_ref, pts, Vec::new());
     }
     let (sketch, _plane) = commit_target(ctx, target)?;
 
@@ -699,18 +727,26 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
             pts.pop(); // last point coincides with the first at a full turn
             return draw_loop_on_face(ctx, face_ref, pts, Some(geom));
         }
+        // The arc's own edges carry its circle (the first `n` edges of the
+        // chain or loop); the closing edges of a pie or segment are plain
+        // lines — exactly the sketch-mode `curveSegments` split below, so
+        // the shape keeps its arc on a face as it does on the ground.
+        let arc_claims = |edges: usize| -> Vec<Option<CurveGeom>> {
+            (0..edges).map(|k| (k < n).then_some(geom)).collect()
+        };
         return match close {
-            // Open, boundary-to-boundary — unchanged from before this
-            // param existed.
-            ArcClose::Open => draw_chain_on_face(ctx, face_ref, pts),
-            // A closed loop strictly inside the face — `draw_loop_on_face`
-            // closes the implicit last→first edge for us, which for a
-            // segment IS the chord (arc-end → arc-start). No analytic
-            // curve claim travels: a partial arc's chords are not a full
-            // circle (matches the open-arc case's own `None`).
+            // Open, boundary-to-boundary.
+            ArcClose::Open => {
+                let claims = arc_claims(pts.len() - 1);
+                draw_chain_on_face(ctx, face_ref, pts, claims)
+            }
+            // A closed loop strictly inside the face — the implicit
+            // last→first edge is the closing chord (arc-end → arc-start),
+            // a plain line.
             ArcClose::Segment => {
                 require_strictly_inside_face(ctx, face_ref, plane.normal(), &pts)?;
-                draw_loop_on_face(ctx, face_ref, pts, None)
+                let claims = arc_claims(pts.len());
+                draw_loop_on_face_with_curves(ctx, face_ref, pts, claims)
             }
             // Same, plus the two explicit radii: append the exact same
             // `center` value used to build the arc's own points (no
@@ -733,7 +769,8 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
                 // false "Ok". Checked here, before dispatch, with a
                 // tolerance-aware test the kernel's has none of.
                 require_strictly_inside_face(ctx, face_ref, plane.normal(), &pts)?;
-                draw_loop_on_face(ctx, face_ref, pts, None)
+                let claims = arc_claims(pts.len());
+                draw_loop_on_face_with_curves(ctx, face_ref, pts, claims)
             }
         };
     }

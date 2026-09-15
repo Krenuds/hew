@@ -56,6 +56,35 @@ describe('nodeEq / nodeKey — sketch-edge scoping', () => {
   })
 })
 
+describe('nodeEq / nodeKey — imprint object scoping', () => {
+  it('two imprints with the same face id on DIFFERENT objects are distinct', () => {
+    const a: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const b: NodeRef = { kind: 'imprint', id: 10n, object: 2n }
+    expect(nodeEq(a, b)).toBe(false)
+    expect(nodeKey(a)).not.toBe(nodeKey(b))
+  })
+
+  it('the same imprint equals itself and keys stably', () => {
+    const a: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const b: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    expect(nodeEq(a, b)).toBe(true)
+    expect(nodeKey(a)).toBe(nodeKey(b))
+  })
+
+  it('an imprint-chord never equals an imprint with the same id/object (kind differs)', () => {
+    const subFace: NodeRef = { kind: 'imprint', id: 5n, object: 1n }
+    const chord: NodeRef = { kind: 'imprint-chord', id: 5n, object: 1n }
+    expect(nodeEq(subFace, chord)).toBe(false)
+    expect(nodeKey(subFace)).not.toBe(nodeKey(chord))
+  })
+
+  it('an imprint never equals a plain object with the same id (object-scoped vs unscoped keys differ)', () => {
+    const imprint: NodeRef = { kind: 'imprint', id: 5n, object: 1n }
+    expect(nodeEq(imprint, { kind: 'object', id: 5n })).toBe(false)
+    expect(nodeKey(imprint)).not.toBe(nodeKey({ kind: 'object', id: 5n }))
+  })
+})
+
 describe('stripTagSuffix', () => {
   it('returns the name unchanged when there is no tag suffix', () => {
     expect(stripTagSuffix('Counter Base')).toBe('Counter Base')
@@ -839,6 +868,71 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
   it('an empty selection passes through untouched', () => {
     const sel: NodeRef[] = []
     expect(pruneDeadSelection(view({}), sel)).toBe(sel)
+  })
+})
+
+describe('pruneDeadSelection — imprint liveness', () => {
+  /** A liveness view carrying live objects plus each one's `face_features`
+   *  JSON (imprints.ts), mirroring the kernel's own contract: an imprint is
+   *  alive exactly while its object still lists its handle. */
+  function view(objects: bigint[], faceFeatures: Record<string, string> = {}) {
+    return {
+      object_ids: () => objects,
+      group_ids: () => [],
+      instance_ids: () => [],
+      sketch_ids: () => [],
+      sketch_edge_island: () => undefined,
+      sketch_curve_chain: () => [],
+      sketch_island_edges: () => [],
+      face_features: (object: bigint) => faceFeatures[object.toString()] ?? '[]',
+    }
+  }
+
+  const subFaceFeature = (face: number) =>
+    JSON.stringify([{ kind: 'sub_face', face, parent: 1, loop: [0, 0, 0, 1, 0, 0, 1, 1, 0], curve: null, nested: [] }])
+  const chordFeature = (edge: number) =>
+    JSON.stringify([{ kind: 'chord', edge, faces: [1, 2], path: [0, 0, 0, 1, 0, 0] }])
+
+  it('keeps a live sub_face imprint whose face handle is still listed', () => {
+    const v = view([1n], { '1': subFaceFeature(10) })
+    const sel: NodeRef[] = [{ kind: 'imprint', id: 10n, object: 1n }]
+    expect(pruneDeadSelection(v, sel)).toBe(sel)
+  })
+
+  it('keeps a live chord imprint whose first-edge handle is still listed', () => {
+    const v = view([1n], { '1': chordFeature(5) })
+    const sel: NodeRef[] = [{ kind: 'imprint-chord', id: 5n, object: 1n }]
+    expect(pruneDeadSelection(v, sel)).toBe(sel)
+  })
+
+  it('drops an imprint whose handle is no longer in face_features (pushed into a boss, or a chord re-cut)', () => {
+    const v = view([1n], { '1': subFaceFeature(10) })
+    const sel: NodeRef[] = [
+      { kind: 'imprint', id: 10n, object: 1n },
+      { kind: 'imprint', id: 999n, object: 1n }, // no longer listed
+    ]
+    expect(pruneDeadSelection(v, sel)).toEqual([{ kind: 'imprint', id: 10n, object: 1n }])
+  })
+
+  it('drops an imprint whose owning object is gone', () => {
+    const v = view([], { '1': subFaceFeature(10) })
+    const sel: NodeRef[] = [{ kind: 'imprint', id: 10n, object: 1n }]
+    expect(pruneDeadSelection(v, sel)).toEqual([])
+  })
+
+  it('drops every imprint when the scene double lacks face_features entirely', () => {
+    const bare = {
+      object_ids: () => [1n],
+      group_ids: () => [],
+      instance_ids: () => [],
+      sketch_ids: () => [],
+      sketch_edge_island: () => undefined,
+      sketch_curve_chain: () => [],
+      sketch_island_edges: () => [],
+      // face_features intentionally omitted.
+    }
+    const sel: NodeRef[] = [{ kind: 'imprint', id: 10n, object: 1n }]
+    expect(pruneDeadSelection(bare, sel)).toEqual([])
   })
 })
 

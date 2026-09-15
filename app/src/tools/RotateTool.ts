@@ -126,6 +126,7 @@ import {
 } from './transformMath'
 import { rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
+import { imprintNodes } from './imprints'
 import { clearPreview } from './transformPreview'
 import {
   commitSelectionTransform,
@@ -958,6 +959,12 @@ export class RotateTool implements Tool {
           n.kind === 'sketch-edge' ||
           n.kind === 'sketch-curve',
       )
+      if (this.copyMode && imprintNodes(nodes).length > 0) {
+        // A shape drawn on a face has no copy path yet; refuse rather than
+        // silently ROTATE the shape the user asked to copy (MoveTool's rule).
+        this.onToast("Shapes drawn on a face can't be copied yet — rotate them, or redraw the copy.")
+        return false
+      }
       if (this.copyMode && (copyables.length > 0 || sketchSources.length > 0)) {
         // Copy mode: duplicate at the rotated pose instead of rotating. Each
         // copy is the same kind as its source; the copies become the
@@ -1003,9 +1010,13 @@ export class RotateTool implements Tool {
         }
         this.retype.armFrom({ nodes, pivot, axis, theta, copy: true }, genAtStart)
       } else {
-        commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
-        this.onCommit(nodes)
-        this.retype.armFrom({ nodes, pivot, axis, theta, copy: false }, genAtStart)
+        const committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
+        this.onCommit(committed)
+        // No typed-angle window for a moved chord: its run is re-cut on
+        // every commit and on the window's own undo (see MoveTool).
+        if (!committed.some((n) => n.kind === 'imprint-chord')) {
+          this.retype.armFrom({ nodes: committed, pivot, axis, theta, copy: false }, genAtStart)
+        }
       }
       return true
     } catch (err) {

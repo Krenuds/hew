@@ -50,6 +50,7 @@ fn split_then_push_pull_keeps_valid_topology() {
                 face,
                 path: vec![point_on(2, 0.25), point_on(3, 0.25)],
                 restore: None,
+                curves: Vec::new(),
             },
         )
         .expect("split is valid");

@@ -42,11 +42,13 @@ use crate::math::{Point3, Vec3};
 use crate::ops::{
     CollapseSubFaceReport, FaceAttrsAt, FaceMergeInnerReport, FaceMergeReport,
     FaceSplitInnerReport, FaceSplitReport, PushPullError, PushPullReport, StickyError,
+    TransformSubFaceReport,
 };
 use crate::sketch::CurveGeom;
 use crate::tol;
 use crate::topo::FaceAttrs;
 use crate::topo::Object;
+use crate::transform::Transform;
 
 /// A replayable, invertible mutation of one Object. Plain data — serializable
 /// later for crash recovery without redesign.
@@ -91,6 +93,11 @@ pub enum KernelOp {
         path: Vec<Point3>,
         /// Attribute snapshots to restore onto the result faces (undo path).
         restore: Option<[Option<FaceAttrsAt>; 2]>,
+        /// Per path edge (`path[k]` → `path[k+1]`), the analytic circle it is
+        /// a chord facet of, stamped onto the cut's edges so an arc drawn
+        /// edge to edge keeps its circle on the solid; empty claims nothing.
+        /// The undo of a merge carries the dissolved run's claims here.
+        curves: Vec<Option<CurveGeom>>,
     },
     /// `Object::merge_faces(edge)`.
     MergeFaces {
@@ -110,12 +117,14 @@ pub enum KernelOp {
         loop_path: Vec<Point3>,
         /// Attribute snapshot to restore onto the sub-face (undo path).
         restore: Option<FaceAttrs>,
-        /// The analytic circle the loop's edges are chord facets of, stamped
-        /// onto the imprinted edges so a later push-through re-attributes the
-        /// tunnel walls (the true-curves design, playtest fix C3). `None`
-        /// for straight/unknown loops and for the undo-of-merge re-imprint
-        /// (the dissolved edge's claim is not snapshotted — map-or-drop).
-        curve: Option<CurveGeom>,
+        /// Per loop edge (`loop_path[k]` → `loop_path[k+1]`, the last closing
+        /// the loop), the analytic circle it is a chord facet of, stamped
+        /// onto the imprinted edges so a later push or push-through
+        /// attributes the walls (the true-curves design, playtest fix C3): a
+        /// drawn circle claims every edge, a pie or segment only its arc.
+        /// Empty for straight loops. The undo of a dissolve carries the
+        /// dissolved loop's claims here.
+        curves: Vec<Option<CurveGeom>>,
     },
     /// `Object::merge_inner_face(sub_face)` — dissolve an imprinted sub-face.
     MergeInnerFace {
@@ -133,6 +142,21 @@ pub enum KernelOp {
     CollapseSubFace {
         /// The raised sub-face to flatten.
         sub_face: FaceId,
+    },
+    /// `Object::transform_sub_face(sub_face, xf)` — slide, turn, or scale
+    /// an imprint on its face in place. Its own inverse with the inverse
+    /// transform, pinning whatever the forward move adopted; no heuristic
+    /// guards.
+    TransformSubFace {
+        /// The imprint sub-face to move (handle-stable across the op).
+        sub_face: FaceId,
+        /// An in-plane similarity of the parent face.
+        xf: Transform,
+        /// Rings (vertex positions) of holes inside the shape that stay put
+        /// and are re-homed afterwards — the shapes, bosses, or holes a
+        /// forward move adopted, pinned by its inverse so undo hands them
+        /// back. Empty for a user move.
+        pinned: Vec<Vec<Point3>>,
     },
 }
 
@@ -155,6 +179,8 @@ pub enum KernelOpReport {
     ExtrudeSubFace(PushPullReport),
     /// Result of flattening a raised sub-face.
     CollapseSubFace(CollapseSubFaceReport),
+    /// Result of moving an imprint on its face.
+    TransformSubFace(TransformSubFaceReport),
 }
 
 /// An op that failed to apply. Wraps the op-specific error unchanged.
@@ -324,11 +350,12 @@ impl History {
     ) -> Result<KernelOpReport, KernelOpError> {
         // For MergeFaces, capture the cut-path geometry BEFORE the op runs,
         // because the edge chain's vertices may be healed away during the merge.
-        let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &op {
-            Some(reconstruct_merge_path(object, *edge))
-        } else {
-            None
-        };
+        let pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)> =
+            if let KernelOp::MergeFaces { edge } = &op {
+                Some(reconstruct_merge_path(object, *edge))
+            } else {
+                None
+            };
 
         // Capture the rule-9 proof for the eventual undo: the state the
         // recorded inverse must restore is the one this op is about to leave.
@@ -371,11 +398,12 @@ impl History {
             .map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces in the inverse, capture path before dispatch.
-        let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &inverse {
-            Some(reconstruct_merge_path(object, *edge))
-        } else {
-            None
-        };
+        let pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)> =
+            if let KernelOp::MergeFaces { edge } = &inverse {
+                Some(reconstruct_merge_path(object, *edge))
+            } else {
+                None
+            };
 
         // Run the inverse on a clone, guard-exempt. A dispatch error is a
         // kernel bug surfaced as InverseFailed; a result that fails the
@@ -429,11 +457,12 @@ impl History {
             re_anchor(object, &rec.op, &rec.anchor).map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces, capture path before dispatch.
-        let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &redo_op {
-            Some(reconstruct_merge_path(object, *edge))
-        } else {
-            None
-        };
+        let pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)> =
+            if let KernelOp::MergeFaces { edge } = &redo_op {
+                Some(reconstruct_merge_path(object, *edge))
+            } else {
+                None
+            };
 
         // Run the redo on a clone, guard-exempt, and hold it to the recorded
         // proof exactly as `undo` does; pop only after both succeed so a
@@ -495,6 +524,34 @@ impl History {
 #[derive(Debug, Clone)]
 struct StateProof {
     faces: Vec<FaceProof>,
+    /// Every edge carrying an analytic circle claim or the soft flag, by its
+    /// endpoints. Not part of the geometric MATCH (claims ride on geometry the
+    /// face rings already fingerprint), but restored on alignment: a claim
+    /// decides what a later op does with the edge (a drawn circle's walls
+    /// stamp as a cylinder, its imprint reads as a Circle, its center snaps),
+    /// so a replay that re-created an edge without its claim must come back
+    /// carrying exactly the claims the recorded state had — the same "the
+    /// aligned state IS the accepted state" rule the face surface follows.
+    edges: Vec<EdgeClaimProof>,
+}
+
+/// One claimed or soft edge of a [`StateProof`].
+#[derive(Debug, Clone)]
+struct EdgeClaimProof {
+    a: Point3,
+    b: Point3,
+    curve: Option<CurveGeom>,
+    soft: bool,
+}
+
+/// An undirected edge's exact endpoint bits, ordered — the lookup key the
+/// claim restore uses. Alignment writes the recorded positions verbatim, so
+/// an aligned candidate's endpoints are bit-identical to the recorded ones.
+fn edge_bits_key(a: Point3, b: Point3) -> [u64; 6] {
+    let bits = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+    let (ka, kb) = (bits(a), bits(b));
+    let (lo, hi) = if ka <= kb { (ka, kb) } else { (kb, ka) };
+    [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]]
 }
 
 /// One face's fingerprint: outer ring and hole rings as position cycles,
@@ -546,6 +603,23 @@ impl StateProof {
                         .collect(),
                     plane: face.plane,
                     surface: face.surface,
+                })
+                .collect(),
+            edges: object
+                .edges()
+                .keys()
+                .filter_map(|e| {
+                    let edge = &object.edges()[e];
+                    if edge.curve.is_none() && !edge.soft {
+                        return None;
+                    }
+                    let (a, b) = object.edge_endpoints(e)?;
+                    Some(EdgeClaimProof {
+                        a,
+                        b,
+                        curve: edge.curve,
+                        soft: edge.soft,
+                    })
                 })
                 .collect(),
         }
@@ -713,6 +787,46 @@ impl StateProof {
             // the aligned face IS the recorded face, cylinder claim included.
             candidate.faces[f].surface = surface;
         }
+        // Fast path: neither the recorded state nor the candidate carries a
+        // single claimed or soft edge (the common case for objects with no
+        // drawn circles or sweeps), so there is nothing to restore or clear.
+        let candidate_has_claims = candidate
+            .edges()
+            .values()
+            .any(|e| e.curve.is_some() || e.soft);
+        if !self.edges.is_empty() || candidate_has_claims {
+            // Restore every edge's circle claim and soft flag to the recorded
+            // state (see `StateProof::edges`): claimed edges get their claim back,
+            // every other edge carries none. A recorded claim with no matching
+            // edge means the replay did not reproduce the recorded edges — a kernel
+            // bug by definition, refused rather than guessed.
+            let mut recorded: std::collections::BTreeMap<
+                [u64; 6],
+                (Option<CurveGeom>, bool, bool),
+            > = self
+                .edges
+                .iter()
+                .map(|e| (edge_bits_key(e.a, e.b), (e.curve, e.soft, false)))
+                .collect();
+            let edge_ids: Vec<EdgeId> = candidate.edges().keys().collect();
+            for e in edge_ids {
+                let Some((a, b)) = candidate.edge_endpoints(e) else {
+                    continue;
+                };
+                let (curve, soft) = match recorded.get_mut(&edge_bits_key(a, b)) {
+                    Some(entry) => {
+                        entry.2 = true;
+                        (entry.0, entry.1)
+                    }
+                    None => (None, false),
+                };
+                candidate.edges[e].curve = curve;
+                candidate.edges[e].soft = soft;
+            }
+            if recorded.values().any(|entry| !entry.2) {
+                return false;
+            }
+        }
         // The aligned state is the recorded accepted state; hold it to the
         // full validator anyway (typed refusal beats trusting the alignment).
         candidate.validate().is_ok()
@@ -748,7 +862,8 @@ fn anchor_of(object: &Object, op: &KernelOp) -> Anchor {
         | KernelOp::SplitFaceInner { face, .. }
         | KernelOp::MergeInnerFace { sub_face: face }
         | KernelOp::ExtrudeSubFace { sub_face: face, .. }
-        | KernelOp::CollapseSubFace { sub_face: face } => {
+        | KernelOp::CollapseSubFace { sub_face: face }
+        | KernelOp::TransformSubFace { sub_face: face, .. } => {
             let f = &object.faces()[*face];
             Anchor::Face {
                 verts: object.loop_positions(f.outer_loop).collect(),
@@ -835,21 +950,27 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             walls: walls.clone(),
             distance: *distance,
         }),
-        KernelOp::SplitFace { path, restore, .. } => Ok(KernelOp::SplitFace {
+        KernelOp::SplitFace {
+            path,
+            restore,
+            curves,
+            ..
+        } => Ok(KernelOp::SplitFace {
             face: face(unknown_face_sticky)?,
             path: path.clone(),
             restore: *restore,
+            curves: curves.clone(),
         }),
         KernelOp::SplitFaceInner {
             loop_path,
             restore,
-            curve,
+            curves,
             ..
         } => Ok(KernelOp::SplitFaceInner {
             face: face(unknown_face_sticky)?,
             loop_path: loop_path.clone(),
             restore: *restore,
-            curve: *curve,
+            curves: curves.clone(),
         }),
         KernelOp::MergeInnerFace { .. } => Ok(KernelOp::MergeInnerFace {
             sub_face: face(unknown_face_sticky)?,
@@ -860,6 +981,11 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
         }),
         KernelOp::CollapseSubFace { .. } => Ok(KernelOp::CollapseSubFace {
             sub_face: face(unknown_face_pp)?,
+        }),
+        KernelOp::TransformSubFace { xf, pinned, .. } => Ok(KernelOp::TransformSubFace {
+            sub_face: face(unknown_face_sticky)?,
+            xf: *xf,
+            pinned: pinned.clone(),
         }),
         KernelOp::MergeFaces { .. } => match anchor {
             Anchor::Edge { a, b } => resolve_edge(object, *a, *b)
@@ -885,6 +1011,14 @@ fn dispatch_replay(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport,
             .extrude_sub_face_replay(*sub_face, *distance)
             .map(KernelOpReport::ExtrudeSubFace)
             .map_err(KernelOpError::PushPull),
+        KernelOp::TransformSubFace {
+            sub_face,
+            xf,
+            pinned,
+        } => object
+            .transform_sub_face_pinned(*sub_face, xf, pinned, false)
+            .map(KernelOpReport::TransformSubFace)
+            .map_err(KernelOpError::Sticky),
         _ => dispatch(object, op),
     }
 }
@@ -908,8 +1042,9 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             face,
             path,
             restore,
+            curves,
         } => object
-            .split_face_with_attrs(*face, path, *restore)
+            .split_face_impl(*face, path, *restore, curves)
             .map(KernelOpReport::FaceSplit)
             .map_err(KernelOpError::Sticky),
         KernelOp::MergeFaces { edge } => object
@@ -920,9 +1055,9 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             face,
             loop_path,
             restore,
-            curve,
+            curves,
         } => object
-            .split_face_inner_impl(*face, loop_path, *restore, *curve)
+            .split_face_inner_impl(*face, loop_path, *restore, curves)
             .map(KernelOpReport::FaceSplitInner)
             .map_err(KernelOpError::Sticky),
         KernelOp::MergeInnerFace { sub_face } => object
@@ -937,6 +1072,14 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             .collapse_sub_face(*sub_face)
             .map(KernelOpReport::CollapseSubFace)
             .map_err(KernelOpError::PushPull),
+        KernelOp::TransformSubFace {
+            sub_face,
+            xf,
+            pinned,
+        } => object
+            .transform_sub_face_pinned(*sub_face, xf, pinned, true)
+            .map(KernelOpReport::TransformSubFace)
+            .map_err(KernelOpError::Sticky),
     }
 }
 
@@ -947,7 +1090,7 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
 fn derive_inverse(
     op: &KernelOp,
     report: &KernelOpReport,
-    pre_merge_path: Option<Vec<Point3>>,
+    pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)>,
 ) -> KernelOp {
     match (op, report) {
         (KernelOp::PushPull { distance, .. }, KernelOpReport::PushPull(r)) => {
@@ -981,14 +1124,20 @@ fn derive_inverse(
         (KernelOp::SplitFace { .. }, KernelOpReport::FaceSplit(r)) => KernelOp::MergeFaces {
             edge: r.new_edges[0],
         },
-        (KernelOp::MergeFaces { .. }, KernelOpReport::FaceMerge(r)) => KernelOp::SplitFace {
-            face: r.merged_face,
-            path: pre_merge_path
-                .expect("pre_merge_path must be provided for MergeFaces inverse derivation"),
-            // Give each side back exactly the attribute state the merge
-            // report snapshotted — never re-derived from the merged face.
-            restore: Some(r.prior_attrs),
-        },
+        (KernelOp::MergeFaces { .. }, KernelOpReport::FaceMerge(r)) => {
+            let (path, curves) = pre_merge_path
+                .expect("pre_merge_path must be provided for MergeFaces inverse derivation");
+            KernelOp::SplitFace {
+                face: r.merged_face,
+                path,
+                // Give each side back exactly the attribute state the merge
+                // report snapshotted — never re-derived from the merged face —
+                // and the run's edges their circle claims (a dissolved arc
+                // comes back an arc).
+                restore: Some(r.prior_attrs),
+                curves,
+            }
+        }
         (KernelOp::SplitFaceInner { .. }, KernelOpReport::FaceSplitInner(r)) => {
             KernelOp::MergeInnerFace {
                 sub_face: r.sub_face,
@@ -1002,9 +1151,10 @@ fn derive_inverse(
                 face: r.parent,
                 loop_path: r.loop_path.clone(),
                 restore: Some(r.sub_face_attrs),
-                // The dissolved edges' circle claim was not snapshotted by the
-                // merge report; the re-imprint drops it (map-or-drop).
-                curve: None,
+                // The dissolved loop's per-edge circle claims, snapshotted by
+                // the merge report, so a deleted drawn circle or arc comes
+                // back as one.
+                curves: r.curves.clone(),
             }
         }
         (KernelOp::ExtrudeSubFace { .. }, KernelOpReport::ExtrudeSubFace(r)) => {
@@ -1014,6 +1164,16 @@ fn derive_inverse(
             KernelOp::ExtrudeSubFace {
                 sub_face: r.sub_face,
                 distance: r.distance,
+            }
+        }
+        (KernelOp::TransformSubFace { .. }, KernelOpReport::TransformSubFace(r)) => {
+            // Its own inverse: the same in-place move by the exact inverse
+            // transform (the sub-face handle survives the op), holding every
+            // hole the forward move adopted in place so it is handed back.
+            KernelOp::TransformSubFace {
+                sub_face: r.sub_face,
+                xf: r.inverse,
+                pinned: r.adopted.clone(),
             }
         }
         _ => panic!("derive_inverse: op and report type mismatch — kernel bug"),
@@ -1028,18 +1188,20 @@ fn derive_inverse(
 /// - Boundary-healing may also remove the chain-endpoint vertices if they
 ///   become collinear (scar vertices), so we must capture them here.
 ///
-/// The returned `Vec<Point3>` is the path as `split_face` expects it:
+/// The returned path is as `split_face` expects it:
 /// `[chain_start_vertex, interior_vertices..., chain_end_vertex]`, ordered
-/// along the shared chain from face_a's perspective.
+/// along the shared chain from face_a's perspective, paired with each chain
+/// edge's circle claim in the same order (so the undo re-cut restores an
+/// arc's identity, not just its facets).
 ///
 /// If `edge` is not valid (stale or boundary), returns an empty vec; the
 /// subsequent `merge_faces` call will produce a `StickyError` and the empty
 /// path will never reach `derive_inverse`.
-fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
+fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> (Vec<Point3>, Vec<Option<CurveGeom>>) {
     // Look up the edge.
     let edge_data = match object.edges().get(edge) {
         Some(e) => *e,
-        None => return Vec::new(), // stale edge — merge will error; path won't be used
+        None => return (Vec::new(), Vec::new()), // stale edge — merge will error; path won't be used
     };
 
     let he_id = edge_data.half_edge;
@@ -1050,13 +1212,13 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
 
     let twin_he_id = match edge_data.twin_half_edge {
         Some(t) => t,
-        None => return Vec::new(), // boundary edge — merge will error
+        None => return (Vec::new(), Vec::new()), // boundary edge — merge will error
     };
     let loop_b = object.half_edges()[twin_he_id].loop_id;
     let face_b = object.loops()[loop_b].face;
 
     if face_a == face_b {
-        return Vec::new(); // SameFaceOnBothSides — merge will error
+        return (Vec::new(), Vec::new()); // SameFaceOnBothSides — merge will error
     }
 
     // Collect all half-edges on outer_a.
@@ -1080,7 +1242,7 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
         .collect();
 
     if shared_set_a.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Find the start of the chain: a shared half-edge whose prev is NOT shared.
@@ -1089,17 +1251,19 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
         !shared_set_a.contains(&prev)
     }) {
         Some(h) => h,
-        None => return Vec::new(),
+        None => return (Vec::new(), Vec::new()),
     };
 
     // Walk the chain along outer_a, collecting ordered vertex positions.
     // The path is: origin(chain[0]), origin(chain[1]), ..., origin(chain[n]),
     // then the destination of the last segment = origin(next(chain[n])).
     let mut path: Vec<Point3> = Vec::new();
+    let mut curves: Vec<Option<CurveGeom>> = Vec::new();
     let mut cur = chain_start;
     loop {
         let origin_v = object.half_edges()[cur].origin;
         path.push(object.vertices()[origin_v].position);
+        curves.push(object.edges()[object.half_edges()[cur].edge].curve);
         let nxt = object.half_edges()[cur].next;
         if shared_set_a.contains(&nxt) {
             cur = nxt;
@@ -1128,10 +1292,11 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
                 == std::cmp::Ordering::Less;
         if reversed {
             path.reverse();
+            curves.reverse();
         }
     }
 
-    path
+    (path, curves)
 }
 
 // ================================================================= unit tests
@@ -1398,6 +1563,7 @@ mod tests {
                     face: top,
                     path,
                     restore: None,
+                    curves: Vec::new(),
                 },
             )
             .unwrap();
@@ -1523,7 +1689,7 @@ mod tests {
                     face: top,
                     loop_path: rect,
                     restore: None,
-                    curve: None,
+                    curves: Vec::new(),
                 },
             )
             .unwrap();
@@ -1564,7 +1730,7 @@ mod tests {
                     face: top,
                     loop_path: rect,
                     restore: None,
-                    curve: None,
+                    curves: Vec::new(),
                 },
             )
             .unwrap();

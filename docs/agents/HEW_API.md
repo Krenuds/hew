@@ -657,7 +657,7 @@ for, not shipped.
 | `hew.doc` | `attach`, `transact`, `new`, `open`, `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry) | Required (`import`, `purge_unused` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` | Required |
-| `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me` | Required (`follow_me` Standard) |
+| `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn-but-not-yet-pushed shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one before it is ever pushed/pulled) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` Standard) |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
@@ -736,6 +736,45 @@ Semantics notes, normative:
   or a sketch curve id — validated for connectivity and refused typed
   where the tool itself refuses (branching selections, bends tighter
   than the profile). Exact schema in the registry.
+- **Editable imprints**: a drawn-but-not-yet-pushed shape (an *imprint* —
+  a coplanar sub-face clear of its parent face's boundary, or a *chord*,
+  one or more boundary-to-boundary splits, per the face-mode bullet
+  above) is recovered structurally from a solid's topology rather than
+  stored, and can be listed, moved, turned, scaled, or deleted before it
+  is ever pushed/pulled. `hew.solid.imprints {object}` lists every one on
+  an object — `{kind: "sub_face", at, loop, curve, curves, nested}` or
+  `{kind: "chord", at, path, curves}` — where `curves` is the per-edge
+  circle each loop or run edge is a facet of (`{center, radius}` or
+  `null`; an arc drawn on a face keeps its circle, so a pie, segment, or
+  edge-to-edge arc reports it here while `curve` names only a whole drawn
+  circle), and `at` is the **locator** to pass back to the
+  four commands below: for a sub-face, a point strictly inside its loop
+  (clear of any nested imprint); for a chord, the midpoint of its run's
+  first segment. `hew.solid.move_imprint`/`rotate_imprint`/
+  `scale_imprint`/`delete_imprint` all take `{imprint: <locator>, …}`,
+  where the locator is a face locator (§5.2) for a sub-face — resolved
+  the same way a click on the shape would be — or, for a chord (which has
+  no face of its own), the same locator shape read instead as a point on
+  one of its lines: a chord's shared edge sits exactly on the boundary
+  between its two coplanar faces, so the face reading is tried first and
+  a miss or a non-imprint hit falls back to an edge reading; a locator
+  that names neither refuses `not_an_imprint`. `move_imprint` takes an
+  `offset` translation; `rotate_imprint` an `angle` (radians) about the
+  imprint's own face normal through a pivot point; `scale_imprint` a
+  uniform `factor` about an anchor point — every point parameter
+  accepting a derived-point locator (§5.3). Moving or scaling a sub-face
+  off its plane (or mirroring or stretching it) refuses `not_in_plane`,
+  and a move that would carry it past the face's edge, across or inside
+  another imprint refuses `loop_not_strictly_inside`. A sub-face drawn or
+  moved all the way AROUND other imprints, bosses, recesses, or holes
+  adopts them as its own holes (they move with it from then on); a chord has no plane gate of
+  its own — its run is re-cut through the face's own gates, so a move
+  whose endpoints leave the boundary refuses `endpoint_not_on_boundary`
+  and one that crosses it `path_not_simple`. A hole of a sub-face holding
+  a raised boss or recess (not a further flat imprint) refuses
+  `nested_not_flat` before anything moves. `delete_imprint` dissolves a
+  sub-face back into its parent — anything it held stays on the face — or
+  merges a chord's two faces back into one; either way, one undo entry.
 - The transform commands are contract-shaped as: `move` takes a
   translation vector or a from→to point pair; `rotate` takes a pivot
   point, an axis direction, and an angle; `scale` takes an anchor point

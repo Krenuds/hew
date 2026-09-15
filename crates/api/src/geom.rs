@@ -155,6 +155,111 @@ pub fn point_segment_distance(p: Point3, a: Point3, b: Point3) -> (f64, f64) {
     ((p - nearest).length(), t)
 }
 
+/// Two points closer than this ordinate gap (or interval width) are
+/// treated as coincident by [`interior_point_of_loops`] — points fed to it
+/// come straight from kernel storage (never JSON round-tripped), so a
+/// tolerance far tighter than [`API_SURFACE_TOL`] is appropriate.
+const INTERIOR_POINT_TOL: f64 = 1e-9;
+
+/// A point strictly inside a planar polygon-with-holes: inside `outer`,
+/// outside every ring in `holes`. The API-side counterpart of the
+/// kernel's crate-internal `geom2d::interior_point_of_loops` (`pub(crate)`,
+/// not reachable from here) — duplicated rather than exposed, per this
+/// module's own charter of small geometry helpers the kernel does not
+/// export.
+///
+/// Scanline method: pick the plane-axis-horizontal line whose ordinate is
+/// the midpoint of the widest gap between distinct vertex ordinates
+/// (maximally far from every vertex, so no edge is grazed), intersect it
+/// with every ring, and take the midpoint of the widest inside interval
+/// under the even-odd rule. Deterministic, and correct for a concave
+/// outer ring or an off-center hole — unlike an area centroid
+/// ([`face_centroid`]), which can land outside the ring or inside a hole.
+/// `None` for a degenerate outer ring (fewer than 3 points) or one with no
+/// interior at the chosen scanline.
+pub fn interior_point_of_loops(
+    outer: &[Point3],
+    holes: &[Vec<Point3>],
+    normal: Vec3,
+) -> Option<Point3> {
+    if outer.len() < 3 {
+        return None;
+    }
+    // Project onto the two kept axes of `drop_axis`, the same 2-D
+    // reduction `ring_contains` already uses; the dropped axis's
+    // coordinate is reconstructed below from the plane equation, since
+    // (unlike an orthonormal plane basis) it is not directly one of the
+    // two kept values.
+    let (ua, va) = drop_axis(normal);
+    let da = (0..3).find(|a| *a != ua && *a != va)?;
+    let n = [normal.x, normal.y, normal.z];
+    let p0 = outer[0];
+    let d = n[0] * p0.x + n[1] * p0.y + n[2] * p0.z;
+
+    let mut ys: Vec<f64> = outer.iter().map(|&p| pick(p, va)).collect();
+    let outer_min = ys.iter().copied().fold(f64::INFINITY, f64::min);
+    let outer_max = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    for h in holes {
+        ys.extend(h.iter().map(|&p| pick(p, va)));
+    }
+    ys.sort_by(f64::total_cmp);
+    ys.dedup_by(|a, b| (*a - *b).abs() <= INTERIOR_POINT_TOL);
+
+    // Widest vertex-free ordinate band, clamped to the outer loop's range
+    // so the scanline is guaranteed to cross it.
+    let mut band: Option<(f64, f64)> = None; // (gap, midpoint)
+    for pair in ys.windows(2) {
+        let (lo, hi) = (pair[0].max(outer_min), pair[1].min(outer_max));
+        let gap = hi - lo;
+        if gap > INTERIOR_POINT_TOL && band.is_none_or(|(g, _)| gap > g) {
+            band = Some((gap, (lo + hi) * 0.5));
+        }
+    }
+    let (_, y_star) = band?;
+
+    // Every crossing of the scanline with every ring edge, in plane-x.
+    let mut xs: Vec<f64> = Vec::new();
+    let mut collect = |lp: &[Point3]| {
+        let n = lp.len();
+        for i in 0..n {
+            let (a, b) = (lp[i], lp[(i + 1) % n]);
+            let (ax, ay) = (pick(a, ua), pick(a, va));
+            let (bx, by) = (pick(b, ua), pick(b, va));
+            if (ay > y_star) != (by > y_star) {
+                xs.push(ax + (bx - ax) * (y_star - ay) / (by - ay));
+            }
+        }
+    };
+    collect(outer);
+    for h in holes {
+        collect(h);
+    }
+    if xs.len() < 2 {
+        return None;
+    }
+    xs.sort_by(f64::total_cmp);
+
+    // Even-odd: intervals (xs[0], xs[1]), (xs[2], xs[3]), … are material.
+    let mut best: Option<(f64, f64)> = None; // (width, midpoint)
+    for pair in xs.chunks_exact(2) {
+        let width = pair[1] - pair[0];
+        if width > INTERIOR_POINT_TOL && best.is_none_or(|(g, _)| width > g) {
+            best = Some((width, (pair[0] + pair[1]) * 0.5));
+        }
+    }
+    let (_, x_star) = best?;
+
+    // Reconstruct the dropped axis's coordinate from the plane equation
+    // n·p = d — every ring point shares the same offset since they're
+    // coplanar. `drop_axis` always drops the LARGEST-magnitude component
+    // of `normal`, so the division below never sees a near-zero divisor.
+    let mut coords = [0.0_f64; 3];
+    coords[ua] = x_star;
+    coords[va] = y_star;
+    coords[da] = (d - n[ua] * x_star - n[va] * y_star) / n[da];
+    Some(Point3::new(coords[0], coords[1], coords[2]))
+}
+
 /// Axis-aligned bounding box over points.
 pub fn bbox(points: impl Iterator<Item = Point3>) -> Option<(Point3, Point3)> {
     let mut min: Option<Point3> = None;
@@ -201,6 +306,51 @@ mod tests {
         // Hole below-left of center pushes the centroid up-right.
         let c = face_centroid(&outer, &[hole]);
         assert!(c.x > 1.0 && c.y > 1.0);
+    }
+
+    #[test]
+    fn interior_point_avoids_a_hole_centered_on_the_outer_rings_own_centroid() {
+        // A hole exactly centered on the square's own area centroid — a
+        // plain centroid (`face_centroid`) would land inside it; the
+        // scanline method must not.
+        let outer = square();
+        let hole = vec![
+            Point3::new(0.9, 0.9, 0.0),
+            Point3::new(1.1, 0.9, 0.0),
+            Point3::new(1.1, 1.1, 0.0),
+            Point3::new(0.9, 1.1, 0.0),
+        ];
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let p = interior_point_of_loops(&outer, std::slice::from_ref(&hole), normal)
+            .expect("a square with a small centered hole still has interior material");
+        assert!(ring_contains(&outer, normal, p), "inside the outer ring");
+        assert!(!ring_contains(&hole, normal, p), "clear of the hole");
+    }
+
+    #[test]
+    fn interior_point_of_a_concave_l_shape_lands_inside_the_material() {
+        // An L-shape (a 2x2 square with its top-right 1x1 corner notched
+        // out) — concave enough that a naive centroid can miss the
+        // polygon entirely.
+        let l_shape = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(2.0, 1.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+            Point3::new(0.0, 2.0, 0.0),
+        ];
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let p = interior_point_of_loops(&l_shape, &[], normal)
+            .expect("a non-degenerate L-shape has interior material");
+        assert!(ring_contains(&l_shape, normal, p));
+    }
+
+    #[test]
+    fn interior_point_of_a_degenerate_loop_is_none() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let degenerate = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)];
+        assert!(interior_point_of_loops(&degenerate, &[], normal).is_none());
     }
 
     #[test]

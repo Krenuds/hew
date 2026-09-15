@@ -46,8 +46,12 @@ export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint 
     kind === 'sketch' ||
     kind === 'sketch-island' ||
     kind === 'sketch-curve' ||
-    kind === 'sketch-edge'
+    kind === 'sketch-edge' ||
+    kind === 'imprint' ||
+    kind === 'imprint-chord'
   ) {
+    // An imprint (a drawn shape on a solid's face) gets the sketch verb
+    // set too: same drawing-scoped actions (erase, move), finer target.
     return 'sketch'
   }
   return kind

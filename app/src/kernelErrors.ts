@@ -171,6 +171,12 @@ const DESCRIPTIONS: Record<string, string> = {
     "The shape's outline crosses itself. Draw a simple, non-crossing outline.",
   NotAnInnerFace:
     'Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.',
+  NotInPlane:
+    'A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.',
+  NestedNotFlat:
+    'Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.',
+  NotAChord:
+    'That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.',
   WouldCorrupt:
     'That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.',
   BadLoop: 'The outline needs at least three points.',

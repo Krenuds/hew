@@ -427,6 +427,59 @@ impl Object {
     /// has nothing to do with the circle. Dropping degrades gracefully to
     /// flat facets; a stale claim is never kept. The predicate is exactly the
     /// validator's edge-curve check, so anything kept here passes validation.
+    /// The map half of map-or-drop for [`Edge::curve`](crate::topo::Edge::curve)
+    /// under a rigid translate of a vertex subset: an edge whose endpoints were
+    /// both carried by `sweep` is a chord of the same circle moved by `sweep`,
+    /// so its claim moves with it. "Carried" is proven per endpoint, not
+    /// inferred: the vertex is in `moved`, existed in `before` (the object
+    /// prior to the op), and now sits at its `before` position plus `sweep`.
+    /// A vertex the op left behind (a wall's bottom edge keeps the moved
+    /// face's original ids at their original positions) or re-created fails
+    /// the proof. The translated circle must also hold for both endpoints.
+    /// Anything not mapped is left for
+    /// [`drop_stale_edge_curves`](Object::drop_stale_edge_curves) to judge, so
+    /// this never writes a claim the validator would reject.
+    pub(crate) fn map_translated_edge_curves(
+        &mut self,
+        before: &Object,
+        moved: &std::collections::BTreeSet<VertexId>,
+        sweep: crate::math::Vec3,
+    ) {
+        let tol = self.planarity_tol;
+        let mapped: Vec<(EdgeId, crate::sketch::CurveGeom)> = self
+            .edges
+            .iter()
+            .filter_map(|(id, edge)| {
+                let g = edge.curve?;
+                let h = self.half_edges[edge.half_edge];
+                let (va, vb) = (h.origin, self.half_edges[h.next].origin);
+                let carried = |v: VertexId| {
+                    moved.contains(&v)
+                        && before.vertices.get(v).is_some_and(|b| {
+                            (self.vertices[v].position - (b.position + sweep)).length() <= tol
+                        })
+                };
+                if !(carried(va) && carried(vb)) {
+                    return None;
+                }
+                let center = g.center + sweep;
+                let on = |v: VertexId| {
+                    ((self.vertices[v].position - center).length() - g.radius).abs() <= tol
+                };
+                (on(va) && on(vb)).then_some((
+                    id,
+                    crate::sketch::CurveGeom {
+                        center,
+                        radius: g.radius,
+                    },
+                ))
+            })
+            .collect();
+        for (id, g) in mapped {
+            self.edges[id].curve = Some(g);
+        }
+    }
+
     pub(crate) fn drop_stale_edge_curves(&mut self) {
         let tol = self.planarity_tol;
         let stale: Vec<crate::ids::EdgeId> = self

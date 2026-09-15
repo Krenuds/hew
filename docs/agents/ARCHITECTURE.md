@@ -113,6 +113,23 @@ anything visible in the whole scene (another Object's edge, a guide, an
 axis), because snapping is a read-only query, not a mutation. Only the
 merging of geometry into a single mesh is confined to the active Object.
 
+A shape drawn on a face and not yet pushed or pulled — an **imprint** — is
+real topology (a coplanar sub-face twinned with a hole in its parent, or a
+run of edges between two coplanar faces), never a separate overlay
+entity: that is what lets every operation (move, push/pull of the parent,
+slice, booleans) carry it along with no special code. Its editability is
+recovered the same way a sketch's islands are: derived on demand from the
+mesh, keyed by the sub-face's face handle or the run's first edge, never
+stored. An imprint selects, fills blue, lists in the outliner under its
+object, and slides, turns, scales, and deletes ON its face — each edit a
+coplanar surgery (an in-place vertex move of the loop, a dissolve, a
+merge-and-recut of a run) that cannot open the shell, refusing typed when
+it would leave the face or tilt off it. A shape drawn or moved all the
+way around others adopts them as its own holes, and deleting it hands
+them back to the face; only crossing or touching one refuses. The moment
+it is pushed or pulled
+it is solid geometry again and stops being an imprint.
+
 ### 2.5 Editing context, not selection, determines stickiness
 
 Which Object a new stroke joins is determined by an editing context — the
@@ -179,7 +196,13 @@ and deletes as a unit). A curve chain also carries the analytic circle it
 was drawn from (center + radius), and extrusion stamps each side wall with
 the cylinder it is a chord facet of — durable metadata over the faceted
 carrier, propagated under a strict map-or-drop contract and held honest by
-the validator. Push/pull on a stamped wall facet acts on the *logical
+the validator. The same identity follows a curve onto a solid's face: a
+circle or arc imprinted there stamps its facets' circle onto the solid's
+edges (`Edge::curve`, one claim per edge, so a pie or segment claims only
+its arc), every wall-raising path — boss, wall-building push/pull,
+push-through — stamps a wall per facet from its base edge's claim (gated
+on the edge being a genuine facet, never a secant), and a push carries a
+claim with the rim it moves. Push/pull on a stamped wall facet acts on the *logical
 wall*: an exact radial offset of every facet claiming that cylinder,
 derived from the stored axis and radius rather than from any facet's
 plane, refusing typed where a neighbor would bend.
@@ -248,7 +271,11 @@ is designed so that watertightness can never be broken as a side effect:
   unsupported: allowing it would let a watertight solid become a leaky shell
   through an everyday action, reintroducing the exact failure mode the data
   model exists to prevent. Removing material or punching an opening always
-  routes through push-through instead.
+  routes through push-through instead. The one sub-element a user can
+  delete is an imprint (2.4): dissolving a drawn shape merges two coplanar
+  faces back into one, which leaves the shell closed by construction, so
+  the kernel accepts exactly that and still refuses any merge across
+  non-coplanar faces.
 
 ### 2.11 The session model: editing containers with the unmodified tool set
 

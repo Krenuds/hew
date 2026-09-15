@@ -2887,6 +2887,7 @@ fn split_painted_extruded_box_face_propagates_material() {
                 face: top,
                 path: vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
                 restore: None,
+                curves: Vec::new(),
             },
         )
         .expect("split the painted extruded top");
@@ -3501,6 +3502,7 @@ fn replace_material_undo_refuses_whole_batch_when_a_recorded_face_goes_stale() {
             face: f0,
             path,
             restore: None,
+            curves: Vec::new(),
         },
     )
     .expect("split applies");
@@ -5150,7 +5152,7 @@ fn replacing_ops_refuse_a_grouped_leaf_and_leave_the_document_untouched() {
                     Point3::new(1.5, 2.5, 1.0),
                 ],
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         )
         .expect("imprint sub-face")
@@ -5229,7 +5231,7 @@ fn push_through_sub_face_punches_hole_and_round_trips() {
                     Point3::new(1.5, 2.5, 1.0),
                 ],
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         )
         .expect("imprint sub-face")

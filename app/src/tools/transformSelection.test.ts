@@ -8,6 +8,7 @@
  * kernel op with an all-first validation pass.
  */
 import { describe, it, expect, vi } from 'vitest'
+import * as THREE from 'three'
 import {
   commitSelectionTransform,
   duplicateSketchSelection,
@@ -15,6 +16,7 @@ import {
   duplicateSketchSelectionByAffineArray,
   planSketchTransforms,
   resolveSketchIsland,
+  buildNodePreview,
 } from './transformSelection'
 import { affineToFloat64, rotateAboutPivotAxis } from './transformMath'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -807,5 +809,147 @@ describe('duplicateSketchSelectionByAffine — data-driven plane routing', () =>
       { kind: 'sketch-island', id: 77n, sketch: 900n },
       { kind: 'sketch-island', id: 77n, sketch: 900n },
     ])
+  })
+})
+
+describe('commitSelectionTransform — imprints (drawn shapes on a solid face)', () => {
+  const AFFINE2 = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+
+  interface ImprintFakeOpts {
+    /** When set, `check_transform_imprint`/`_in_instance` THROWS the given
+     *  refusal (the real typed pre-check contract — see
+     *  `commitSelectionTransform`'s doc comment) instead of succeeding. */
+    checkThrows?: Error
+  }
+
+  function makeImprintScene(opts: ImprintFakeOpts = {}) {
+    const checkImpl = opts.checkThrows !== undefined ? () => { throw opts.checkThrows } : () => undefined
+    const scene = {
+      check_transform_imprint: vi.fn(checkImpl),
+      transform_imprint: vi.fn(),
+      check_transform_imprint_in_instance: vi.fn(checkImpl),
+      transform_imprint_in_instance: vi.fn(),
+      transform_chord: vi.fn(() => 77n),
+      transform_chord_in_instance: vi.fn(() => 78n),
+      transform_selection: vi.fn(),
+      sketch_island_ids: vi.fn(() => []),
+      sketch_edge_island: vi.fn(() => undefined),
+      can_transform_sketch_island: vi.fn(() => true),
+      transform_sketch_island: vi.fn(),
+      transform_def_selection: vi.fn(),
+    }
+    return { scene: scene as unknown as WasmScene, raw: scene }
+  }
+
+  it('commits a sub-face imprint through transform_imprint, pre-checked with check_transform_imprint', () => {
+    const { scene, raw } = makeImprintScene()
+    const node: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    commitSelectionTransform(scene, [node], AFFINE2)
+    expect(raw.check_transform_imprint).toHaveBeenCalledWith(1n, 10n, AFFINE2)
+    expect(raw.transform_imprint).toHaveBeenCalledWith(1n, 10n, AFFINE2)
+    expect(raw.transform_selection).not.toHaveBeenCalled()
+  })
+
+  it('commits a chord run through transform_chord — no check_transform_imprint pre-check (sub-face only)', () => {
+    const { scene, raw } = makeImprintScene()
+    const node: NodeRef = { kind: 'imprint-chord', id: 5n, object: 1n }
+    const committed = commitSelectionTransform(scene, [node], AFFINE2)
+    expect(raw.transform_chord).toHaveBeenCalledWith(1n, 5n, AFFINE2)
+    expect(raw.check_transform_imprint).not.toHaveBeenCalled()
+    expect(raw.transform_selection).not.toHaveBeenCalled()
+    // The run was re-cut: the returned selection carries the NEW edge handle
+    // the kernel handed back, so the moved chord stays selected.
+    expect(committed).toEqual([{ kind: 'imprint-chord', id: 77n, object: 1n }])
+  })
+
+  it('an imprint-only selection inside an instance never calls transform_def_selection with empty arrays', () => {
+    const { scene, raw } = makeImprintScene()
+    const sub: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    commitSelectionTransform(scene, [sub], AFFINE2, 99n)
+    expect(raw.transform_imprint_in_instance).toHaveBeenCalledWith(99n, 1n, 10n, AFFINE2)
+    expect(raw.transform_def_selection).not.toHaveBeenCalled()
+  })
+
+  it('a refusal after an imprint already moved retracts that move (one scene_undo per landed step)', () => {
+    const { scene, raw } = makeImprintScene()
+    ;(raw as unknown as { scene_undo: unknown }).scene_undo = vi.fn(() => ({ free: vi.fn() }))
+    raw.transform_chord = vi.fn(() => { throw new Error('EndpointNotOnBoundary: off the edge') })
+    const sub: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const chord: NodeRef = { kind: 'imprint-chord', id: 5n, object: 1n }
+    expect(() => commitSelectionTransform(scene, [sub, chord], AFFINE2)).toThrow(/EndpointNotOnBoundary/)
+    expect(raw.transform_imprint).toHaveBeenCalledTimes(1)
+    expect((raw as unknown as { scene_undo: ReturnType<typeof vi.fn> }).scene_undo).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns the selection unchanged apart from re-keyed chords', () => {
+    const { scene } = makeImprintScene()
+    const obj: NodeRef = { kind: 'object', id: 3n }
+    const sub: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const chord: NodeRef = { kind: 'imprint-chord', id: 5n, object: 1n }
+    const committed = commitSelectionTransform(scene, [obj, sub, chord], AFFINE2)
+    expect(committed).toEqual([obj, sub, { kind: 'imprint-chord', id: 77n, object: 1n }])
+  })
+
+  it('routes both imprint kinds through the _in_instance variants when activeInstance is given', () => {
+    const { scene, raw } = makeImprintScene()
+    const subFace: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const chord: NodeRef = { kind: 'imprint-chord', id: 5n, object: 2n }
+    commitSelectionTransform(scene, [subFace, chord], AFFINE2, 99n)
+    expect(raw.check_transform_imprint_in_instance).toHaveBeenCalledWith(99n, 1n, 10n, AFFINE2)
+    expect(raw.transform_imprint_in_instance).toHaveBeenCalledWith(99n, 1n, 10n, AFFINE2)
+    expect(raw.transform_chord_in_instance).toHaveBeenCalledWith(99n, 2n, 5n, AFFINE2)
+    expect(raw.transform_imprint).not.toHaveBeenCalled()
+    expect(raw.transform_chord).not.toHaveBeenCalled()
+    expect(raw.check_transform_imprint).not.toHaveBeenCalled()
+  })
+
+  it('a check_transform_imprint refusal throws before anything commits', () => {
+    const { scene, raw } = makeImprintScene({ checkThrows: new Error('NotInPlane') })
+    const a: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const b: NodeRef = { kind: 'imprint', id: 11n, object: 1n }
+    expect(() => commitSelectionTransform(scene, [a, b], AFFINE2)).toThrow('NotInPlane')
+    expect(raw.transform_imprint).not.toHaveBeenCalled()
+  })
+
+  it("excludes imprints from transform_selection's kinds/ids — only the plain object rides through it", () => {
+    const { scene, raw } = makeImprintScene()
+    const object: NodeRef = { kind: 'object', id: 3n }
+    const imprint: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    commitSelectionTransform(scene, [object, imprint], AFFINE2)
+    expect(raw.transform_selection).toHaveBeenCalledWith(
+      new Uint8Array([0]),
+      new BigUint64Array([3n]),
+      new BigUint64Array([]),
+      AFFINE2,
+    )
+    expect(raw.transform_imprint).toHaveBeenCalledWith(1n, 10n, AFFINE2)
+  })
+})
+
+describe('buildNodePreview — imprint ghost', () => {
+  function sceneWithFeatures(json: string): WasmScene {
+    return { face_features: () => json } as unknown as WasmScene
+  }
+
+  it('returns a LineSegments ghost built from a live imprint\'s line work', () => {
+    const json = JSON.stringify([
+      { kind: 'sub_face', face: 10, parent: 1, loop: [0, 0, 0, 1, 0, 0, 1, 1, 0], curve: null, nested: [] },
+    ])
+    const node: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+    const preview = buildNodePreview(sceneWithFeatures(json), null, null, node)
+    expect(preview).toBeInstanceOf(THREE.LineSegments)
+  })
+
+  it('returns a LineSegments ghost for a chord run too', () => {
+    const json = JSON.stringify([{ kind: 'chord', edge: 5, faces: [1, 2], path: [0, 0, 0, 1, 0, 0] }])
+    const node: NodeRef = { kind: 'imprint-chord', id: 5n, object: 1n }
+    const preview = buildNodePreview(sceneWithFeatures(json), null, null, node)
+    expect(preview).toBeInstanceOf(THREE.LineSegments)
+  })
+
+  it('returns null for a stale imprint ref — nothing to preview', () => {
+    const node: NodeRef = { kind: 'imprint', id: 999n, object: 1n }
+    const preview = buildNodePreview(sceneWithFeatures('[]'), null, null, node)
+    expect(preview).toBeNull()
   })
 })

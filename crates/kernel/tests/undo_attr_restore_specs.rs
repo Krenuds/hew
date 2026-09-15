@@ -87,7 +87,7 @@ fn undo_of_merge_inner_face_does_not_resurrect_a_dropped_surface() {
                 face: wall,
                 loop_path,
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         )
         .unwrap();
@@ -215,7 +215,7 @@ fn undo_of_merge_inner_face_restores_the_sub_faces_own_paint() {
                 face: top,
                 loop_path,
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         )
         .unwrap();
@@ -294,6 +294,7 @@ fn undo_of_merge_faces_restores_each_sides_own_paint() {
                 face: top,
                 path: vec![Point3::new(1.0, 0.0, 1.0), Point3::new(1.0, 2.0, 1.0)],
                 restore: None,
+                curves: Vec::new(),
             },
         )
         .unwrap();
@@ -390,6 +391,7 @@ fn undo_of_merge_faces_round_trips_wall_attribution() {
                 face: wall,
                 path: vec![m0, m1],
                 restore: None,
+                curves: Vec::new(),
             },
         )
         .unwrap();

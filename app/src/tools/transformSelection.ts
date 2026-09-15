@@ -38,6 +38,7 @@ import {
   buildInstanceMemberPreviewClone,
   buildSketchPreviewClone,
 } from './transformPreview'
+import { findImprint, imprintNodes, imprintSegments } from './imprints'
 
 /** The island a sketch-geometry selection transforms as: the node's own
  * island, or the owning island of a selected edge/curve (a drawn curve's
@@ -116,19 +117,91 @@ export function commitSelectionTransform(
   selection: readonly NodeRef[],
   affineF64: Float64Array,
   activeInstance?: bigint | null,
-): void {
+): NodeRef[] {
+  // The post-commit selection: every node as it was, except a chord
+  // imprint, whose run is RE-CUT by its move (fresh edge handles) and so is
+  // re-keyed to the edge the kernel hands back — the caller re-selects
+  // exactly these, so a moved chord stays selected.
+  const committed: NodeRef[] = [...selection]
+  // Validate everything that CAN be validated up front (sub-face imprints,
+  // sketch islands), and make the whole commit atomic: every kernel step
+  // that lands is counted, and a later refusal retracts exactly those
+  // steps through scene_undo — no half-moved selections, the posture
+  // `duplicateSketchSelection` already takes.
+  let landed = 0
+  const retract = () => {
+    while (landed > 0) {
+      wasmScene.scene_undo().free()
+      landed -= 1
+    }
+  }
+  const { sketches, islands } = planSketchTransforms(wasmScene, selection)
+  for (const { sketch, island } of islands) {
+    if (!wasmScene.can_transform_sketch_island(sketch, island, affineF64)) {
+      throw new Error('WouldRetopologize: the move would land a shape on other geometry')
+    }
+  }
+  // Imprints (drawn shapes on a solid's face — imprints.ts) move on their
+  // face through their own kernel ops: a sub-face slides in place (handle
+  // kept), a chord run is re-cut (fresh handle, returned). They commit
+  // FIRST: each is a single validated kernel op that refuses typed and
+  // leaves the object untouched (`NotInPlane` off the face, the imprint
+  // gates when it would leave the face), so a refusal aborts before any
+  // node below has moved — no half-moved selections. A sub-face is
+  // pre-checked (`check_transform_imprint`, which throws the real typed
+  // refusal) so a multi-imprint selection refuses whole rather than
+  // moving some.
+  const imprints = imprintNodes(selection)
+  if (imprints.length > 0) {
+    for (const node of imprints) {
+      if (node.kind !== 'imprint') continue
+      if (activeInstance != null) {
+        wasmScene.check_transform_imprint_in_instance(activeInstance, node.object, node.id, affineF64)
+      } else {
+        wasmScene.check_transform_imprint(node.object, node.id, affineF64)
+      }
+    }
+    try {
+      for (const node of imprints) {
+        if (node.kind === 'imprint') {
+          if (activeInstance != null) {
+            wasmScene.transform_imprint_in_instance(activeInstance, node.object, node.id, affineF64)
+          } else {
+            wasmScene.transform_imprint(node.object, node.id, affineF64)
+          }
+          landed += 1
+          continue
+        }
+        const edge = activeInstance != null
+          ? wasmScene.transform_chord_in_instance(activeInstance, node.object, node.id, affineF64)
+          : wasmScene.transform_chord(node.object, node.id, affineF64)
+        landed += 1
+        const at = committed.findIndex((n) => n === node)
+        if (at >= 0) committed[at] = { kind: 'imprint-chord', id: edge, object: node.object }
+      }
+    } catch (err) {
+      retract()
+      throw err
+    }
+  }
   if (activeInstance != null) {
-    const { sketches, islands } = planSketchTransforms(wasmScene, selection)
     const objects = selection.filter((node) => node.kind === 'object').map((node) => node.id)
-    wasmScene.transform_def_selection(
-      activeInstance,
-      new BigUint64Array(objects),
-      new BigUint64Array(sketches),
-      new BigUint64Array(islands.map(({ sketch }) => sketch)),
-      new BigUint64Array(islands.map(({ island }) => island)),
-      affineF64,
-    )
-    return
+    if (objects.length > 0 || sketches.length > 0 || islands.length > 0) {
+      try {
+        wasmScene.transform_def_selection(
+          activeInstance,
+          new BigUint64Array(objects),
+          new BigUint64Array(sketches),
+          new BigUint64Array(islands.map(({ sketch }) => sketch)),
+          new BigUint64Array(islands.map(({ island }) => island)),
+          affineF64,
+        )
+      } catch (err) {
+        retract()
+        throw err
+      }
+    }
+    return committed
   }
   const kinds: number[] = []
   const ids: bigint[] = []
@@ -141,30 +214,32 @@ export function commitSelectionTransform(
     ) {
       continue // handled by the sketch plan below
     }
+    if (node.kind === 'imprint' || node.kind === 'imprint-chord') {
+      continue // committed above
+    }
     kinds.push(nodeKindToNumber(node.kind))
     ids.push(node.id)
   }
-  const { sketches, islands } = planSketchTransforms(wasmScene, selection)
-  // Islands transform one-by-one, but VALIDATE all of them first so one
-  // refused landing aborts the whole move before anything commits — no
-  // half-moved selections. (Single-threaded: nothing mutates between the
-  // validation pass and the commits.)
-  for (const { sketch, island } of islands) {
-    if (!wasmScene.can_transform_sketch_island(sketch, island, affineF64)) {
-      throw new Error('WouldRetopologize: the move would land a shape on other geometry')
+  // Islands were validated above (one refused landing aborts before
+  // anything commits); a refusal from here on retracts what landed.
+  try {
+    for (const { sketch, island } of islands) {
+      wasmScene.transform_sketch_island(sketch, island, affineF64)
+      landed += 1
     }
+    if (kinds.length > 0 || sketches.length > 0) {
+      wasmScene.transform_selection(
+        new Uint8Array(kinds),
+        new BigUint64Array(ids),
+        new BigUint64Array(sketches),
+        affineF64,
+      )
+    }
+  } catch (err) {
+    retract()
+    throw err
   }
-  for (const { sketch, island } of islands) {
-    wasmScene.transform_sketch_island(sketch, island, affineF64)
-  }
-  if (kinds.length > 0 || sketches.length > 0) {
-    wasmScene.transform_selection(
-      new Uint8Array(kinds),
-      new BigUint64Array(ids),
-      new BigUint64Array(sketches),
-      affineF64,
-    )
-  }
+  return committed
 }
 
 /**
@@ -921,6 +996,13 @@ export function buildNodePreview(
   }
   if (node.kind === 'sketch') {
     return poseDefinitionPreview(buildSketchPreviewClone(wasmScene.sketch_lines(node.id)))
+  }
+  if (node.kind === 'imprint' || node.kind === 'imprint-chord') {
+    // A drawn shape on a face: the ghost is its own line work (posed when
+    // the object is a definition member edited through an instance).
+    const feature = findImprint(wasmScene, node)
+    if (feature === null) return null // stale — nothing to preview
+    return poseDefinitionPreview(buildSketchPreviewClone(imprintSegments(feature)))
   }
   if (
     node.kind === 'sketch-island' ||

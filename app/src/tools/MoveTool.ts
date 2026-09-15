@@ -66,8 +66,10 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext } from './types'
+import type { Tool, Snap, EditContext, SnapConstraint } from './types'
 import { editContextEq } from './types'
+import { findImprint, imprintFace, imprintNodes } from './imprints'
+import { worldFacePlane } from './faceDraw'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { getDrawingAxes } from './drawingAxes'
@@ -299,15 +301,47 @@ export class MoveTool implements Tool {
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
 
-  snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null {
+  snapConstraint(): SnapConstraint | null {
     if (this.stage.kind !== 'base') return null
-    const result: { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } = {
+    const result: SnapConstraint = {
       anchor: this.stage.base,
     }
     if (this.lockAxis !== null) {
       result.lockAxis = this.lockAxis
     }
+    // A selection of imprints on one face slides ON that face: constrain
+    // the destination snap to the face's plane so a corner snapped on some
+    // other face never lands the shape off its own (which the kernel would
+    // refuse `NotInPlane`). Mixed selections and imprints on different
+    // faces stay unconstrained — the kernel still refuses honestly.
+    const plane = this._imprintPlane(this.selection)
+    if (plane !== null) result.constraintPlane = plane
     return result
+  }
+
+  /** The one world plane every imprint in `nodes` lies on, when the
+   *  selection is imprints only and they share it; else null. */
+  private _imprintPlane(nodes: readonly NodeRef[]): { point: [number, number, number]; normal: [number, number, number] } | null {
+    const imprints = imprintNodes(nodes)
+    if (imprints.length === 0 || imprints.length !== nodes.length) return null
+    let plane: { point: [number, number, number]; normal: [number, number, number] } | null = null
+    for (const node of imprints) {
+      const feature = findImprint(this.wasmScene, node)
+      if (feature === null) return null
+      const p = worldFacePlane(this.wasmScene, node.object, imprintFace(feature), this._activeInstance)
+      if (p === null) return null
+      if (plane === null) {
+        plane = p
+        continue
+      }
+      const dot = plane.normal[0] * p.normal[0] + plane.normal[1] * p.normal[1] + plane.normal[2] * p.normal[2]
+      const off =
+        (p.point[0] - plane.point[0]) * plane.normal[0] +
+        (p.point[1] - plane.point[1]) * plane.normal[1] +
+        (p.point[2] - plane.point[2]) * plane.normal[2]
+      if (dot < 1 - 1e-9 || Math.abs(off) > 1e-6) return null
+    }
+    return plane
   }
 
   capturingInput(): boolean {
@@ -683,6 +717,13 @@ export class MoveTool implements Tool {
    *  Opens the retype window on the result either way it commits — a plain
    *  move or a copy (whose array window opens alongside). */
   private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): boolean {
+    if (this.copyMode && imprintNodes(nodes).length > 0) {
+      // A shape drawn on a face has no copy path yet (it would need an
+      // on-face replay of its loop); refuse rather than silently MOVE the
+      // shape the user asked to copy.
+      this.onToast("Shapes drawn on a face can't be copied yet — move them, or redraw the copy.")
+      return false
+    }
     try {
       const genBefore = this.wasmScene.history_generation()
       this.arrayLast = null
@@ -756,9 +797,14 @@ export class MoveTool implements Tool {
         }
         this.retype.armFrom({ nodes, vector: [tx, ty, tz], copy: true }, genBefore)
       } else {
-        commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
-        this.onCommit(nodes)
-        this.retype.armFrom({ nodes, vector: [tx, ty, tz], copy: false }, genBefore)
+        const committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
+        this.onCommit(committed)
+        // A moved chord's run is re-cut on every commit AND on the undo the
+        // retype window would run first, so its handle cannot survive a
+        // re-commit — no typed-distance window for a selection holding one.
+        if (!committed.some((n) => n.kind === 'imprint-chord')) {
+          this.retype.armFrom({ nodes: committed, vector: [tx, ty, tz], copy: false }, genBefore)
+        }
       }
       return true
     } catch (err) {

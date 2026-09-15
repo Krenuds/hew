@@ -130,6 +130,10 @@ pub struct FaceSplitInnerReport {
     pub parent: FaceId,
     /// The loop's new edges (each shared by `sub_face` and the parent's hole).
     pub new_edges: Vec<EdgeId>,
+    /// Holes of the parent the loop fully enclosed — shapes, bosses, recesses,
+    /// or holes drawn earlier — now holes of the new sub-face (a shape drawn
+    /// around another adopts it). Empty for a loop drawn clear of them.
+    pub adopted_holes: Vec<LoopId>,
 }
 
 /// A face's restorable attribute state pinned to a point strictly inside
@@ -180,6 +184,90 @@ pub struct FaceMergeInnerReport {
     /// analytic claim the sub-face had legitimately lost (or lose its own
     /// paint).
     pub sub_face_attrs: crate::topo::FaceAttrs,
+    /// The analytic circle each dissolved loop edge was a chord facet of
+    /// ([`Edge::curve`](crate::topo::Edge::curve)), in `loop_path` edge order
+    /// (`curves[k]` is the edge `loop_path[k]` → `loop_path[k+1]`); `None`
+    /// per plain edge. Undo re-imprints with them, so deleting a drawn circle
+    /// or an arc-and-line shape and undoing gives the curve back, not a plain
+    /// polygon that would boss into faceted walls.
+    pub curves: Vec<Option<crate::sketch::CurveGeom>>,
+}
+
+/// A drawn-but-not-yet-pushed shape recovered structurally from a solid's
+/// topology — the user-facing "imprint" ([`Object::face_features`]). Derived
+/// on demand, never stored: exactly the way sketch islands are derived from
+/// sketch edges. A shape drawn clear of a face's boundary is a
+/// [`FaceFeature::SubFace`]; one drawn up to the boundary is one or more
+/// [`FaceFeature::Chord`]s.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FaceFeature {
+    /// A coplanar sub-face whose outer loop is entirely twinned with one
+    /// hole loop of one coplanar parent — what `split_face_inner` makes.
+    /// Holes are allowed: a nested imprint's outer is itself a feature, and
+    /// `nested` lists the direct nested imprints (the holes whose twin face
+    /// is coplanar and flat). A raised boss or recess is NOT a feature.
+    SubFace {
+        /// The sub-face (handle-stable across [`Object::transform_sub_face`]).
+        face: FaceId,
+        /// The face carrying the loop as a hole.
+        parent: FaceId,
+        /// The outer loop's positions in cycle order (CCW seen from the normal).
+        loop_path: Vec<Point3>,
+        /// The analytic circle every loop edge is a chord facet of, when the
+        /// whole loop was one drawn circle ([`Edge::curve`]); `None` for a
+        /// polygon, an arc-and-line shape, or a mixed loop.
+        curve: Option<crate::sketch::CurveGeom>,
+        /// Per loop edge (`loop_path[k]` → `loop_path[k+1]`), the circle it
+        /// is a chord facet of, or `None`: an arc-and-line shape (a pie or
+        /// segment) reports its arc here while `curve` stays `None`.
+        curves: Vec<Option<crate::sketch::CurveGeom>>,
+        /// Direct nested imprint faces inside this one.
+        nested: Vec<FaceId>,
+        /// Every hole ring of this imprint, in loop order — nested imprints,
+        /// and any boss, recess, or hole it was drawn around (a shape drawn
+        /// around another adopts it). A renderer cuts these out of the fill.
+        holes: Vec<Vec<Point3>>,
+    },
+    /// A single connected run of edges separating two coplanar, identically
+    /// attributed faces — what `split_face` makes. Reported once per face
+    /// pair and only when `merge_faces` could dissolve it (one run, covering
+    /// neither face's whole boundary).
+    Chord {
+        /// The run's first edge in `faces[0]`'s outer-loop order — the handle
+        /// `merge_faces` / [`crate::Document::transform_chord`] take.
+        edge: EdgeId,
+        /// The two faces the run separates; `faces[0]` has the smaller key.
+        faces: [FaceId; 2],
+        /// The run's vertex positions from its first to its last vertex, in
+        /// `faces[0]`'s outer-loop order (both endpoints lie on the merged
+        /// region's boundary).
+        path: Vec<Point3>,
+        /// Per run edge (`path[k]` → `path[k+1]`), the circle it is a chord
+        /// facet of ([`Edge::curve`](crate::topo::Edge::curve)), or `None`:
+        /// an arc drawn edge to edge reports its circle here.
+        curves: Vec<Option<crate::sketch::CurveGeom>>,
+    },
+}
+
+/// What `transform_sub_face` changed: an imprint slid, turned, or scaled on
+/// its face in place. (`xf` carries f64s, so `PartialEq` but not `Eq`.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformSubFaceReport {
+    /// The moved sub-face (handle unchanged).
+    pub sub_face: FaceId,
+    /// Its parent (handle unchanged).
+    pub parent: FaceId,
+    /// The transform applied.
+    pub xf: Transform,
+    /// The exact inverse, computed before the move — applying it restores
+    /// the prior loop positions up to floating-point round-trip noise
+    /// (which undo's rule-9 alignment then erases).
+    pub inverse: Transform,
+    /// The rings (vertex positions) of the holes the move ADOPTED — shapes,
+    /// bosses, recesses, or holes on the parent that the moved shape came to
+    /// enclose. The inverse move pins exactly these, so undo slides the
+    /// shape back and leaves them where they are.
+    pub adopted: Vec<Vec<Point3>>,
 }
 
 /// What `collapse_sub_face` changed: a raised sub-face flattened back, its walls
@@ -427,6 +515,21 @@ pub enum StickyError {
     /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
     /// not a single closed loop twinned entirely with one parent's hole loop).
     NotAnInnerFace,
+    /// `transform_sub_face`: the transform is not an in-plane similarity of
+    /// the parent face — it tilts the imprint off its face, mirrors it,
+    /// scales it non-uniformly, or is singular. An imprint only slides,
+    /// turns, and scales ON the face it was drawn on.
+    NotInPlane,
+    /// `transform_sub_face`: a hole of the imprint is not itself a flat
+    /// nested imprint (a boss or recess was raised inside it), so the loop
+    /// cannot move without dragging solid walls along. Flatten or undo the
+    /// boss first.
+    NestedNotFlat,
+    /// `transform_chord`: the edge is not a chord feature — a single
+    /// connected run of edges between two coplanar, identically painted
+    /// faces that covers neither face's whole boundary
+    /// ([`FaceFeature::Chord`]).
+    NotAChord,
     /// The operation's result failed topology validation. The object is left
     /// exactly as it was (strong guarantee). This is the release-safe backstop:
     /// the debug validator (`check_invariants`) is compiled out of release
@@ -608,6 +711,18 @@ impl std::fmt::Display for StickyError {
             StickyError::NotAnInnerFace => {
                 write!(f, "face is not an imprinted sub-face")
             }
+            StickyError::NotInPlane => {
+                write!(f, "transform is not an in-plane similarity of the face")
+            }
+            StickyError::NestedNotFlat => {
+                write!(
+                    f,
+                    "a hole of the imprint holds raised geometry, not a flat imprint"
+                )
+            }
+            StickyError::NotAChord => {
+                write!(f, "edge is not a chord between two coplanar faces")
+            }
             StickyError::WouldCorrupt => {
                 write!(f, "operation would produce invalid topology")
             }
@@ -616,6 +731,26 @@ impl std::fmt::Display for StickyError {
 }
 
 impl std::error::Error for StickyError {}
+
+/// Whether two rings hold the same positions up to reordering, each matched
+/// within [`tol::POINT_MERGE`] — greedy pairwise, not sort-and-zip, since
+/// round-trip noise near a coordinate boundary flips a lexicographic order.
+fn same_ring_positions(a: &[Point3], b: &[Point3]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut unmatched: Vec<Point3> = b.to_vec();
+    for p in a {
+        let Some(i) = unmatched
+            .iter()
+            .position(|q| p.approx_eq(*q, tol::POINT_MERGE))
+        else {
+            return false;
+        };
+        unmatched.swap_remove(i);
+    }
+    true
+}
 
 impl std::fmt::Display for BooleanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2742,6 +2877,13 @@ impl Object {
                 );
             }
         }
+        // Walls raised along a drawn circle's rim are chord facets of its
+        // cylinder: stamp them so they shade smooth, snap at the circle's
+        // center and quadrants, and push as one wall — exactly as a boss
+        // raised from the circle itself does.
+        if !created_faces.is_empty() {
+            stamp_circle_walls(&mut obj, &created_faces, face_normal);
+        }
         // The moved face left its plane: an analytic surface claim on it no
         // longer holds (map-or-drop, the true-curves design). Stretched
         // transverse walls keep theirs — their planes are unchanged and they
@@ -2749,10 +2891,16 @@ impl Object {
         if let Some(f) = obj.faces.get_mut(face) {
             f.surface = None;
         }
-        // A moved subset of vertices may carry an imprinted circle's endpoints
-        // off its stored center (a hole ring pushed to thicken the solid); drop
-        // any per-edge claim that no longer holds so a stale one never trips the
-        // validator (map-or-drop for Edge::curve).
+        // A moved subset of vertices carries an imprinted circle's endpoints
+        // off its stored center (a pushed circle's rim, or a hole ring pushed
+        // to thicken the solid). Map-or-drop for Edge::curve: an edge the
+        // push translated whole (same vertices, moved by the sweep) still is
+        // a chord of that circle moved with it, so its claim moves too and the
+        // rim keeps its center and quadrant snaps. A rim the wall-building
+        // path re-created on fresh vertices got its claim from
+        // `stamp_circle_walls` above. Any claim that still no longer holds is
+        // dropped so a stale one never trips the validator.
+        obj.map_translated_edge_curves(self, &moved_vertices, sweep);
         obj.drop_stale_edge_curves();
 
         // Step 6: Validate (debug) and the always-on release-safe backstop
@@ -2826,6 +2974,12 @@ impl Object {
             .filter(|&w| self.faces.contains_key(w))
             .collect();
 
+        let moved_vertices: std::collections::BTreeSet<VertexId> = boundary_loops
+            .iter()
+            .flat_map(|&l| self.loop_half_edges(l))
+            .map(|h| self.half_edges[h].origin)
+            .collect();
+
         let mut obj = self.clone();
         let plans = find_unbuild_plans(&obj, &boundary_loops, &wall_set, sweep);
         // Every recorded wall must resolve to exactly one plan; otherwise the
@@ -2850,9 +3004,9 @@ impl Object {
         // claim panics `check_invariants` in debug / false-refuses in release).
         // `unbuild_push_pull` was authored on the pushpull branch before
         // `Edge::curve` existed and was the one push/pull path missing this.
-        // (Reinstating a claim the forward push dropped is the same deferred
-        // "rigid-translate mapping" polish curves leaves for every push/pull
-        // move, universal to the family, not specific to this inverse.)
+        // An edge the inverse translated whole carries its claim back with it,
+        // exactly as the forward push carried it.
+        obj.map_translated_edge_curves(self, &moved_vertices, sweep);
         obj.drop_stale_edge_curves();
 
         obj.check_invariants();
@@ -3212,9 +3366,11 @@ impl Object {
     /// the other), so the mesh stays manifold and watertight. The sub-face shares
     /// the parent's plane and outward normal.
     ///
-    /// v1 requires a simple loop **strictly interior** to the face (on its plane,
-    /// inside the outer boundary, clear of holes); loops touching the boundary or
-    /// self-intersecting refuse cleanly.
+    /// Requires a simple loop **strictly interior** to the face (on its plane,
+    /// inside the outer boundary). A loop that fully encloses existing holes —
+    /// shapes, bosses, recesses, or holes drawn earlier — adopts them as holes
+    /// of the new sub-face; a loop touching the boundary, crossing or touching
+    /// a hole, or self-intersecting refuses cleanly.
     ///
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
@@ -3335,7 +3491,7 @@ impl Object {
         face: FaceId,
         loop_path: &[Point3],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, None)
+        self.split_face_inner_impl(face, loop_path, None, &[])
     }
 
     /// [`Object::split_face_inner`] carrying the analytic circle the imprinted
@@ -3343,8 +3499,10 @@ impl Object {
     /// the tunnel walls as [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef)
     /// instead of losing the circle at the imprint (the true-curves design,
     /// playtest fix C3). `curve` is stamped onto every edge of the new loop —
-    /// correct because a drawn circle/arc imprint is a chain of chord facets
-    /// of ONE circle. `None` behaves exactly like [`Object::split_face_inner`].
+    /// correct for a drawn circle, a closed chain of chord facets of ONE
+    /// circle. `None` behaves exactly like [`Object::split_face_inner`]. A
+    /// loop that is only partly a curve (a pie or segment: an arc closed by
+    /// lines) uses [`Object::split_face_inner_with_curves`].
     ///
     /// The caller owns the truth: `curve.center`/`radius` must be the circle
     /// the `loop_path` vertices actually lie on (the drawing tool computed it).
@@ -3356,7 +3514,30 @@ impl Object {
         loop_path: &[Point3],
         curve: Option<crate::sketch::CurveGeom>,
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, curve)
+        let curves = curve
+            .map(|g| vec![Some(g); loop_path.len()])
+            .unwrap_or_default();
+        self.split_face_inner_impl(face, loop_path, None, &curves)
+    }
+
+    /// [`Object::split_face_inner`] with a per-edge analytic claim: `curves[k]`
+    /// is the circle loop edge `k` (`loop_path[k]` → `loop_path[k+1]`, the
+    /// last closing back to the first) is a chord facet of, or `None` for a
+    /// plain edge. This is how an arc closed by lines (a pie or segment) keeps
+    /// its arc on a face exactly as the same shape keeps it in a ground
+    /// sketch. Empty `curves` claims nothing.
+    ///
+    /// # Errors
+    /// [`StickyError::CurveClaimOffLoop`] when `curves` is neither empty nor
+    /// one entry per edge, or a claimed edge's endpoints are not on its
+    /// circle; plus everything [`Object::split_face_inner`] refuses.
+    pub fn split_face_inner_with_curves(
+        &mut self,
+        face: FaceId,
+        loop_path: &[Point3],
+        curves: &[Option<crate::sketch::CurveGeom>],
+    ) -> Result<FaceSplitInnerReport, StickyError> {
+        self.split_face_inner_impl(face, loop_path, None, curves)
     }
 
     /// [`Object::split_face_inner`] with explicit attributes for the created
@@ -3374,7 +3555,7 @@ impl Object {
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, restore, None)
+        self.split_face_inner_impl(face, loop_path, restore, &[])
     }
 
     /// Shared body of the [`Object::split_face_inner`] family. `restore` is
@@ -3387,7 +3568,7 @@ impl Object {
         face: FaceId,
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
-        curve: Option<crate::sketch::CurveGeom>,
+        curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<FaceSplitInnerReport, StickyError> {
         // ---- validation (no mutation) ----
         if !self.faces.contains_key(face) {
@@ -3395,6 +3576,9 @@ impl Object {
         }
         if loop_path.len() < 3 {
             return Err(StickyError::PathTooShort);
+        }
+        if !curves.is_empty() && curves.len() != loop_path.len() {
+            return Err(StickyError::CurveClaimOffLoop);
         }
         let face_plane = self.faces[face].plane;
         let normal = face_plane.normal();
@@ -3407,64 +3591,43 @@ impl Object {
             }
         }
 
-        // Every vertex on the plane and strictly inside the face region.
-        let outer_pts: Vec<Point3> = self.loop_positions(self.faces[face].outer_loop).collect();
-        let hole_pts: Vec<Vec<Point3>> = self.faces[face]
-            .inner_loops
-            .iter()
-            .map(|&il| self.loop_positions(il).collect())
-            .collect();
-        for (index, &p) in loop_path.iter().enumerate() {
-            if face_plane.signed_distance(p).abs() > tol::PLANE_DIST {
-                return Err(StickyError::PointNotOnFace { index });
-            }
-            if !point_inside_polygon(p, &outer_pts, normal)
-                || hole_pts.iter().any(|h| point_inside_polygon(p, h, normal))
-            {
-                return Err(StickyError::LoopNotStrictlyInside { index });
-            }
-        }
-
-        // Simple closed polygon.
-        if !polygon_is_simple(loop_path) {
-            return Err(StickyError::LoopSelfIntersects);
-        }
-
-        // The loop's enclosed REGION must avoid existing holes entirely, not
-        // just its vertices: a loop that encircles an existing hole (or
-        // crosses/touches its ring) would claim area already belonging to
-        // another sub-face — an unrepresentable nesting whose merge could
-        // never be undone (the enclosed hole's re-imprint would no longer be
-        // strictly inside the parent).
-        for hole in &hole_pts {
-            if hole
-                .iter()
-                .any(|&hp| point_inside_polygon(hp, loop_path, normal))
-                || boundaries_contact(loop_path, hole)
-            {
-                return Err(StickyError::LoopNotStrictlyInside { index: 0 });
-            }
-        }
+        // Every vertex on the plane and strictly inside the face region, the
+        // loop simple, its edges clear of the boundary and of every hole ring;
+        // holes it fully encloses come back to be adopted by the sub-face.
+        let adopted = self.check_loop_strictly_inside(face, loop_path, None)?;
 
         // Normalise winding to CCW seen from the face normal, so the sub-face
         // faces the same way as the parent.
         let mut pts = loop_path.to_vec();
-        if signed_area_on_plane(&pts, normal) < 0.0 {
+        let reversed = signed_area_on_plane(&pts, normal) < 0.0;
+        if reversed {
             pts.reverse();
         }
+        // Per-edge claims follow the winding: edge `i` of the reversed loop
+        // (`pts[i]` → `pts[i+1]`) is edge `n-2-i` (mod n) of the caller's.
+        let curves: Vec<Option<crate::sketch::CurveGeom>> = if curves.is_empty() {
+            vec![None; n]
+        } else if reversed {
+            (0..n).map(|i| curves[(2 * n - 2 - i) % n]).collect()
+        } else {
+            curves.to_vec()
+        };
 
         // The caller owns the analytic truth: a supplied circle claim must
-        // describe the loop it is stamped onto (every vertex a chord facet
-        // endpoint, i.e. on the circle). Reject a mismatch up front with a
+        // describe the edge it is stamped onto (both endpoints chord facet
+        // endpoints, i.e. on the circle). Reject a mismatch up front with a
         // typed error — the kernel never fits a circle to the points and
         // never commits stale metadata (map-or-drop; the same invariant the
         // validator enforces, checked here before any surgery so a wrong
         // claim is a clean refusal, not a corruption backstop).
-        if let Some(g) = curve {
+        for (k, g) in curves.iter().enumerate() {
+            let Some(g) = g else {
+                continue;
+            };
             if !g.radius.is_finite() || g.radius <= tol::POINT_MERGE {
                 return Err(StickyError::CurveClaimOffLoop);
             }
-            for &p in &pts {
+            for p in [pts[k], pts[(k + 1) % n]] {
                 if ((p - g.center).length() - g.radius).abs() > self.planarity_tol {
                     return Err(StickyError::CurveClaimOffLoop);
                 }
@@ -3546,13 +3709,13 @@ impl Object {
 
             obj.half_edges[h_sub[k]].twin = Some(h_hole[k]);
             obj.half_edges[h_hole[k]].twin = Some(h_sub[k]);
-            // Every edge of a drawn circle/arc imprint is a chord facet of the
-            // same circle: stamp the caller's analytic claim so a later
-            // push-through re-attributes the tunnel walls (true-curves C3).
+            // Each edge of a drawn circle or arc is a chord facet of its
+            // circle: stamp the caller's per-edge claim so a later push or
+            // push-through attributes the walls (true-curves C3).
             let edge = obj.edges.insert(Edge {
                 half_edge: h_sub[k],
                 twin_half_edge: Some(h_hole[k]),
-                curve,
+                curve: curves[k],
                 soft: false,
             });
             obj.half_edges[h_sub[k]].edge = edge;
@@ -3564,6 +3727,15 @@ impl Object {
         obj.loops[sub_loop].first_half_edge = h_sub[0];
         obj.loops[hole_loop].first_half_edge = h_hole[0];
         obj.faces[face].inner_loops.push(hole_loop);
+        // The loop was drawn AROUND these holes: they now belong to the new
+        // sub-face. Their rings, twins, and vertices are untouched — only the
+        // owning face changes — so whatever sits across each hole (a nested
+        // shape, a boss's walls) is carried along unchanged.
+        for &il in &adopted {
+            obj.faces[face].inner_loops.retain(|&l| l != il);
+            obj.faces[sub_face].inner_loops.push(il);
+            obj.loops[il].face = sub_face;
+        }
 
         // The sub-face joins the parent's shell.
         let shell = obj
@@ -3584,13 +3756,17 @@ impl Object {
             sub_face,
             parent: face,
             new_edges,
+            adopted_holes: adopted,
         })
     }
 
     /// Inverse of [`split_face_inner`]: dissolves an imprinted `sub_face` back
     /// into its parent, removing the loop and the parent's hole. Deletes the
     /// sub-face, its loop, the parent's matching hole loop, and the shared edges,
-    /// half-edges, and vertices.
+    /// half-edges, and vertices. Holes the sub-face carried — nested shapes, or
+    /// a boss, recess, or hole it was drawn around — are handed back to the
+    /// parent, never deleted; undo re-imprints the same loop, which adopts them
+    /// again.
     ///
     /// # Errors
     /// [`StickyError::UnknownFace`] for a stale handle, [`StickyError::NotAnInnerFace`]
@@ -3602,9 +3778,6 @@ impl Object {
     ) -> Result<FaceMergeInnerReport, StickyError> {
         if !self.faces.contains_key(sub_face) {
             return Err(StickyError::UnknownFace);
-        }
-        if !self.faces[sub_face].inner_loops.is_empty() {
-            return Err(StickyError::NotAnInnerFace);
         }
         let sub_loop = self.faces[sub_face].outer_loop;
         let h_sub: Vec<HalfEdgeId> = self.loop_half_edges(sub_loop).collect();
@@ -3640,11 +3813,23 @@ impl Object {
         // Snapshot the sub-face's attribute state so undo restores exactly
         // what it carried — see FaceMergeInnerReport::sub_face_attrs.
         let sub_face_attrs = self.faces[sub_face].attrs();
+        // ...and each loop edge's circle claim, for the same reason.
+        let curves: Vec<Option<crate::sketch::CurveGeom>> = h_sub
+            .iter()
+            .map(|&h| self.edges[self.half_edges[h].edge].curve)
+            .collect();
 
         // ---- removal surgery on a clone ----
         let mut obj = self.clone();
         let verts: Vec<VertexId> = h_sub.iter().map(|&h| obj.half_edges[h].origin).collect();
         obj.faces[parent].inner_loops.retain(|&l| l != hole_loop);
+        // Whatever the sub-face encloses goes back to the parent: dissolving a
+        // shape never deletes what was drawn or built inside it.
+        let sub_holes = std::mem::take(&mut obj.faces[sub_face].inner_loops);
+        for il in sub_holes {
+            obj.loops[il].face = parent;
+            obj.faces[parent].inner_loops.push(il);
+        }
         for &h in &h_sub {
             obj.edges.remove(obj.half_edges[h].edge);
         }
@@ -3669,7 +3854,27 @@ impl Object {
             parent,
             loop_path,
             sub_face_attrs,
+            curves,
         })
+    }
+
+    /// The one analytic circle every edge of `loop_id` claims, or `None`
+    /// when any edge carries no claim or a different one — the test that
+    /// decides whether a loop IS a drawn circle (shared by the feature
+    /// query and the dissolve snapshot).
+    fn uniform_loop_curve(&self, loop_id: LoopId) -> Option<crate::sketch::CurveGeom> {
+        let mut curve: Option<crate::sketch::CurveGeom> = None;
+        for h in self.loop_half_edges(loop_id) {
+            let c = self.edges[self.half_edges[h].edge].curve?;
+            match curve {
+                None => curve = Some(c),
+                Some(a)
+                    if a.center.approx_eq(c.center, tol::POINT_MERGE)
+                        && (a.radius - c.radius).abs() <= tol::POINT_MERGE => {}
+                Some(_) => return None,
+            }
+        }
+        curve
     }
 
     /// Whether `face` is a flat imprinted sub-face (its boundary entirely twinned
@@ -3716,6 +3921,494 @@ impl Object {
         Some((parent, hole_loop, h_sub, h_hole))
     }
 
+    /// `(parent, hole_loop)` if `face` is an imprint: its outer loop entirely
+    /// twinned to one Inner loop of one other face facing the same way.
+    /// Unlike [`flat_sub_face`](Self::flat_sub_face) this allows the face
+    /// to carry holes of its own (nested imprints), so a nested imprint's
+    /// outer is itself an imprint.
+    pub(crate) fn imprint_parent(&self, face: FaceId) -> Option<(FaceId, LoopId)> {
+        let f = self.faces.get(face)?;
+        let mut hole_loop: Option<LoopId> = None;
+        let mut count = 0usize;
+        for h in self.loop_half_edges(f.outer_loop) {
+            let t = self.half_edges[h].twin?;
+            let l = self.half_edges[t].loop_id;
+            match hole_loop {
+                None => hole_loop = Some(l),
+                Some(hl) if hl == l => {}
+                Some(_) => return None,
+            }
+            count += 1;
+        }
+        let hole_loop = hole_loop?;
+        if count < 3 || self.loops[hole_loop].kind != LoopKind::Inner {
+            return None;
+        }
+        let parent = self.loops[hole_loop].face;
+        if parent == face {
+            return None;
+        }
+        let same_way =
+            (self.faces[parent].plane.normal() - f.plane.normal()).length() < tol::NORMAL_DIRECTION;
+        same_way.then_some((parent, hole_loop))
+    }
+
+    /// The faces across each hole of `face`, each tagged `true` when it is a
+    /// flat nested imprint (its outer loop is exactly this hole, and it faces
+    /// the same way) and `false` otherwise (a tunnel, a boss, a recess). A
+    /// hole with no face across it at all (an open shell's bare rim) is
+    /// reported as `(None, false)` so nothing treats it as movable.
+    fn holes_across(&self, face: FaceId) -> Vec<(LoopId, Option<FaceId>, bool)> {
+        let Some(f) = self.faces.get(face) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for &il in &f.inner_loops {
+            let mut across: Option<FaceId> = None;
+            let mut flat = true;
+            for h in self.loop_half_edges(il) {
+                let Some(t) = self.half_edges[h].twin else {
+                    flat = false;
+                    continue;
+                };
+                let l = self.half_edges[t].loop_id;
+                let g = self.loops[l].face;
+                match across {
+                    None => across = Some(g),
+                    Some(prev) if prev == g => {}
+                    Some(_) => flat = false,
+                }
+                if self.loops[l].kind != LoopKind::Outer {
+                    flat = false;
+                }
+            }
+            let Some(g) = across else {
+                out.push((il, None, false));
+                continue;
+            };
+            if flat {
+                flat = self
+                    .imprint_parent(g)
+                    .is_some_and(|(p, hl)| p == face && hl == il);
+            }
+            out.push((il, Some(g), flat));
+        }
+        out
+    }
+
+    /// Every imprint nested inside `face` that moves with it, innermost first
+    /// (post-order), or [`StickyError::NestedNotFlat`] if any hole of `face`
+    /// or of a nested imprint holds something other than a flat imprint. A
+    /// hole in `pinned` (and everything inside it) is skipped: it stays put.
+    pub(crate) fn imprint_descendants(
+        &self,
+        face: FaceId,
+        pinned: &[LoopId],
+    ) -> Result<Vec<FaceId>, StickyError> {
+        let mut out = Vec::new();
+        for (il, g, flat) in self.holes_across(face) {
+            if pinned.contains(&il) {
+                continue;
+            }
+            let (Some(g), true) = (g, flat) else {
+                return Err(StickyError::NestedNotFlat);
+            };
+            out.extend(self.imprint_descendants(g, pinned)?);
+            out.push(g);
+        }
+        Ok(out)
+    }
+
+    /// The drawn-but-unpushed shapes this object carries
+    /// ([`FaceFeature`]): every imprint sub-face, and every chord run
+    /// between two coplanar identically attributed faces. Pure, derived from
+    /// topology on every call, in slotmap (deterministic) order.
+    pub fn face_features(&self) -> Vec<FaceFeature> {
+        let mut out = Vec::new();
+        for (fid, f) in &self.faces {
+            if let Some((parent, _)) = self.imprint_parent(fid) {
+                let loop_path: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+                // The whole loop is one drawn circle exactly when every edge
+                // carries the same claim.
+                let curve = self.uniform_loop_curve(f.outer_loop);
+                let curves = self
+                    .loop_half_edges(f.outer_loop)
+                    .map(|h| self.edges[self.half_edges[h].edge].curve)
+                    .collect();
+                let nested = self
+                    .holes_across(fid)
+                    .into_iter()
+                    .filter_map(|(_, g, flat)| if flat { g } else { None })
+                    .collect();
+                let holes = f
+                    .inner_loops
+                    .iter()
+                    .map(|&il| self.loop_positions(il).collect())
+                    .collect();
+                out.push(FaceFeature::SubFace {
+                    face: fid,
+                    parent,
+                    loop_path,
+                    curve,
+                    curves,
+                    nested,
+                    holes,
+                });
+            }
+            // Chords: every distinct outer-loop neighbour with a larger key.
+            let hes: Vec<HalfEdgeId> = self.loop_half_edges(f.outer_loop).collect();
+            let mut seen: Vec<LoopId> = Vec::new();
+            for &h in &hes {
+                let Some(t) = self.half_edges[h].twin else {
+                    continue;
+                };
+                let loop_b = self.half_edges[t].loop_id;
+                if seen.contains(&loop_b) || self.loops[loop_b].kind != LoopKind::Outer {
+                    continue;
+                }
+                seen.push(loop_b);
+                let fb = self.loops[loop_b].face;
+                if fb <= fid {
+                    continue;
+                }
+                let edge = &self.edges[self.half_edges[h].edge];
+                if self.mergeable_edge_endpoints(edge).is_none() {
+                    continue;
+                }
+                let marked: Vec<bool> = hes
+                    .iter()
+                    .map(|&hh| {
+                        self.half_edges[hh]
+                            .twin
+                            .is_some_and(|tt| self.half_edges[tt].loop_id == loop_b)
+                    })
+                    .collect();
+                let n = marked.len();
+                let shared = marked.iter().filter(|&&m| m).count();
+                let runs = (0..n)
+                    .filter(|&i| marked[i] && !marked[(i + n - 1) % n])
+                    .count();
+                let len_b = self.loop_half_edges(loop_b).count();
+                if runs != 1 || shared == n || shared == len_b {
+                    continue;
+                }
+                let start = (0..n)
+                    .find(|&i| marked[i] && !marked[(i + n - 1) % n])
+                    .expect("exactly one run");
+                let mut path = Vec::with_capacity(shared + 1);
+                let mut curves = Vec::with_capacity(shared);
+                let mut first_edge = None;
+                for k in 0..shared {
+                    let hh = hes[(start + k) % n];
+                    if first_edge.is_none() {
+                        first_edge = Some(self.half_edges[hh].edge);
+                    }
+                    path.push(self.vertices[self.half_edges[hh].origin].position);
+                    curves.push(self.edges[self.half_edges[hh].edge].curve);
+                }
+                let last = hes[(start + shared - 1) % n];
+                path.push(
+                    self.vertices[self.half_edges[self.half_edges[last].next].origin].position,
+                );
+                out.push(FaceFeature::Chord {
+                    edge: first_edge.expect("a run has an edge"),
+                    faces: [fid, fb],
+                    path,
+                    curves,
+                });
+            }
+        }
+        out
+    }
+
+    /// The gates a closed loop must pass to sit strictly inside `face` (the
+    /// `split_face_inner` contract), returning the holes it would adopt:
+    /// every vertex on the plane, strictly inside the outer boundary and
+    /// outside every hole (except `skip_hole`, the loop's own hole when
+    /// re-placing an existing imprint), the loop simple, and its edges clear
+    /// of the outer boundary and of every hole ring (a loop spanning a
+    /// concave notch is refused even though all its vertices are inside).
+    /// A hole the loop fully ENCLOSES — a shape, boss, recess, or hole drawn
+    /// earlier — is not a refusal: its loop id comes back, and the caller
+    /// hands it to the new sub-face. Only crossing or touching another shape
+    /// refuses. Pure.
+    pub(crate) fn check_loop_strictly_inside(
+        &self,
+        face: FaceId,
+        loop_path: &[Point3],
+        skip_hole: Option<LoopId>,
+    ) -> Result<Vec<LoopId>, StickyError> {
+        let f = &self.faces[face];
+        let face_plane = f.plane;
+        let normal = face_plane.normal();
+        let outer_pts: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+        let holes: Vec<(LoopId, Vec<Point3>)> = f
+            .inner_loops
+            .iter()
+            .filter(|&&il| Some(il) != skip_hole)
+            .map(|&il| (il, self.loop_positions(il).collect()))
+            .collect();
+        for (index, &p) in loop_path.iter().enumerate() {
+            if face_plane.signed_distance(p).abs() > tol::PLANE_DIST {
+                return Err(StickyError::PointNotOnFace { index });
+            }
+            if !point_inside_polygon(p, &outer_pts, normal)
+                || holes
+                    .iter()
+                    .any(|(_, h)| point_inside_polygon(p, h, normal))
+            {
+                return Err(StickyError::LoopNotStrictlyInside { index });
+            }
+        }
+        if !polygon_is_simple(loop_path) {
+            return Err(StickyError::LoopSelfIntersects);
+        }
+        // A loop edge crossing the outer boundary (possible on a concave
+        // face even with every vertex inside) would leave the face.
+        if boundaries_contact(loop_path, &outer_pts) {
+            return Err(StickyError::LoopNotStrictlyInside { index: 0 });
+        }
+        // Every other hole is wholly outside the loop (untouched) or wholly
+        // inside it (adopted). A ring the loop crosses or touches would be
+        // split between two faces, which no single imprint can represent.
+        let mut adopted = Vec::new();
+        for (il, hole) in &holes {
+            if boundaries_contact(loop_path, hole) {
+                return Err(StickyError::LoopNotStrictlyInside { index: 0 });
+            }
+            let inside = hole
+                .iter()
+                .filter(|&&hp| point_inside_polygon(hp, loop_path, normal))
+                .count();
+            if inside == hole.len() {
+                adopted.push(*il);
+            } else if inside > 0 {
+                return Err(StickyError::LoopNotStrictlyInside { index: 0 });
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// Slide, turn, or scale an imprint on its face, in place: every vertex
+    /// of `sub_face`'s outer loop — and, recursively, of every flat imprint
+    /// nested inside it — moves by `xf`; no handle changes, so a selection
+    /// of the sub-face survives the edit. `Edge::curve` claims on the moved
+    /// loops map with it (center as a point, radius by the scale), so a
+    /// moved circle still pushes through as a smooth cylinder.
+    ///
+    /// `xf` must be an in-plane similarity of the parent face — translation
+    /// in the plane, rotation about the normal, uniform positive scale, or
+    /// any composition — else [`StickyError::NotInPlane`]. The moved outer
+    /// loop must still sit strictly inside the parent and clear of its
+    /// boundary ([`StickyError::LoopNotStrictlyInside`]). Another shape,
+    /// boss, recess, or hole on the parent that the moved shape comes to
+    /// fully ENCLOSE is adopted — it becomes a hole of the innermost moved
+    /// shape around it, exactly as drawing around it would — while one it
+    /// would cross, touch, or land inside refuses
+    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint holding
+    /// anything but a flat nested imprint refuses [`StickyError::NestedNotFlat`]
+    /// (a shape holding a boss cannot slide). Not an imprint at all:
+    /// [`StickyError::NotAnInnerFace`].
+    ///
+    /// Reversed by the same op with [`TransformSubFaceReport::inverse`],
+    /// pinning [`TransformSubFaceReport::adopted`].
+    ///
+    /// # Errors
+    /// See above; all leave the object untouched.
+    pub fn transform_sub_face(
+        &mut self,
+        sub_face: FaceId,
+        xf: &Transform,
+    ) -> Result<TransformSubFaceReport, StickyError> {
+        self.transform_sub_face_pinned(sub_face, xf, &[], true)
+    }
+
+    /// [`Object::transform_sub_face`] with `pinned` holes held in place: each
+    /// ring (a hole's vertex positions) names a hole anywhere inside the
+    /// shape that does NOT move with it and afterwards belongs to whichever
+    /// face encloses it — the parent, once the move carried the shape away.
+    /// This is how the inverse of a move that adopted a shape gives it back.
+    ///
+    /// `gate_placement: false` is history replay mode (DEVELOPMENT.md rule
+    /// 9): the placement refusals are skipped — a replay re-enters an
+    /// accepted state and is verified against the recorded proof — while
+    /// the structural checks and the always-on validator still run.
+    pub(crate) fn transform_sub_face_pinned(
+        &mut self,
+        sub_face: FaceId,
+        xf: &Transform,
+        pinned: &[Vec<Point3>],
+        gate_placement: bool,
+    ) -> Result<TransformSubFaceReport, StickyError> {
+        if !self.faces.contains_key(sub_face) {
+            return Err(StickyError::UnknownFace);
+        }
+        let (parent, own_hole) = self
+            .imprint_parent(sub_face)
+            .ok_or(StickyError::NotAnInnerFace)?;
+        let scale = xf.similarity_scale().ok_or(StickyError::NotInPlane)?;
+        if xf.determinant() <= 0.0 {
+            return Err(StickyError::NotInPlane);
+        }
+        let inverse = xf.inverse().map_err(|_| StickyError::NotInPlane)?;
+        let plane = self.faces[parent].plane;
+        let normal = plane.normal();
+        // The plane must map onto itself: normal preserved (up to the
+        // similarity's scale), and the moved loop still on it.
+        let moved_normal = xf.apply_vector(normal) * (1.0 / scale);
+        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION {
+            return Err(StickyError::NotInPlane);
+        }
+        // Resolve each pinned ring to the hole loop it names. A ring that
+        // names no live hole is a recorded-inverse mismatch — a kernel bug by
+        // the history contract — refused typed rather than guessed.
+        let mut pinned_loops: Vec<LoopId> = Vec::with_capacity(pinned.len());
+        for ring in pinned {
+            let found = self
+                .loops
+                .iter()
+                .filter(|(_, l)| l.kind == LoopKind::Inner)
+                .map(|(id, _)| id)
+                .find(|&id| {
+                    let here: Vec<Point3> = self.loop_positions(id).collect();
+                    same_ring_positions(&here, ring)
+                })
+                .ok_or(StickyError::WouldCorrupt)?;
+            pinned_loops.push(found);
+        }
+        let descendants = self.imprint_descendants(sub_face, &pinned_loops)?;
+        let moved_faces: Vec<FaceId> = std::iter::once(sub_face)
+            .chain(descendants.iter().copied())
+            .collect();
+        let moved_ring = |obj: &Object, g: FaceId| -> Vec<Point3> {
+            obj.loop_positions(obj.faces[g].outer_loop)
+                .map(|p| xf.apply_point(p))
+                .collect()
+        };
+        let moved_outer = moved_ring(self, sub_face);
+        if moved_outer
+            .iter()
+            .any(|&p| plane.signed_distance(p).abs() > tol::PLANE_DIST)
+        {
+            return Err(StickyError::NotInPlane);
+        }
+        // Stationary holes: the parent's other holes (the move may adopt
+        // them) and every pinned hole (held in place, re-homed afterwards).
+        let stationary: Vec<LoopId> = self.faces[parent]
+            .inner_loops
+            .iter()
+            .copied()
+            .filter(|&il| il != own_hole)
+            .chain(pinned_loops.iter().copied())
+            .collect();
+
+        if gate_placement {
+            let outer_pts: Vec<Point3> =
+                self.loop_positions(self.faces[parent].outer_loop).collect();
+            for (index, &p) in moved_outer.iter().enumerate() {
+                if !point_inside_polygon(p, &outer_pts, normal) {
+                    return Err(StickyError::LoopNotStrictlyInside { index });
+                }
+            }
+            if boundaries_contact(&moved_outer, &outer_pts) {
+                return Err(StickyError::LoopNotStrictlyInside { index: 0 });
+            }
+            // Every moved ring against every stationary one: touching or
+            // crossing refuses, and so does a moved shape landing INSIDE a
+            // stationary ring (it would belong to that shape, not move
+            // across it). A stationary ring landing inside a moved one is
+            // the adoption case, handled after the move.
+            let moved_rings: Vec<Vec<Point3>> =
+                moved_faces.iter().map(|&g| moved_ring(self, g)).collect();
+            for &st in &stationary {
+                let ring: Vec<Point3> = self.loop_positions(st).collect();
+                for m in &moved_rings {
+                    if boundaries_contact(m, &ring)
+                        || m.iter().any(|&p| point_inside_polygon(p, &ring, normal))
+                    {
+                        return Err(StickyError::LoopNotStrictlyInside { index: 0 });
+                    }
+                }
+            }
+        }
+
+        // ---- in-place move on a clone (strong guarantee) ----
+        let mut obj = self.clone();
+        let loops: Vec<LoopId> = moved_faces
+            .iter()
+            .map(|&g| obj.faces[g].outer_loop)
+            .collect();
+        let mut verts: Vec<VertexId> = Vec::new();
+        let mut edges: Vec<EdgeId> = Vec::new();
+        for &l in &loops {
+            for h in obj.loop_half_edges(l).collect::<Vec<_>>() {
+                let v = obj.half_edges[h].origin;
+                if !verts.contains(&v) {
+                    verts.push(v);
+                }
+                let e = obj.half_edges[h].edge;
+                if !edges.contains(&e) {
+                    edges.push(e);
+                }
+            }
+        }
+        for &v in &verts {
+            let p = obj.vertices[v].position;
+            obj.vertices[v].position = xf.apply_point(p);
+        }
+        for &e in &edges {
+            if let Some(g) = obj.edges[e].curve {
+                obj.edges[e].curve = Some(crate::sketch::CurveGeom {
+                    center: xf.apply_point(g.center),
+                    radius: g.radius * scale,
+                });
+            }
+        }
+
+        // Re-home every stationary hole to the innermost moved shape that now
+        // encloses it, else to the parent. Nesting is a tree, so the smallest
+        // enclosing outer ring is the innermost one.
+        let outer_area = |obj: &Object, g: FaceId| -> f64 {
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces[g].outer_loop).collect();
+            signed_area_on_plane(&ring, normal).abs()
+        };
+        let mut adopted: Vec<Vec<Point3>> = Vec::new();
+        for &st in &stationary {
+            let ring: Vec<Point3> = obj.loop_positions(st).collect();
+            let new_owner = moved_faces
+                .iter()
+                .copied()
+                .filter(|&g| {
+                    let outer: Vec<Point3> = obj.loop_positions(obj.faces[g].outer_loop).collect();
+                    ring.iter()
+                        .all(|&p| point_inside_polygon(p, &outer, normal))
+                })
+                .min_by(|&a, &b| outer_area(&obj, a).total_cmp(&outer_area(&obj, b)))
+                .unwrap_or(parent);
+            let old_owner = obj.loops[st].face;
+            if new_owner != old_owner {
+                obj.faces[old_owner].inner_loops.retain(|&l| l != st);
+                obj.faces[new_owner].inner_loops.push(st);
+                obj.loops[st].face = new_owner;
+                if old_owner == parent {
+                    adopted.push(ring);
+                }
+            }
+        }
+
+        obj.check_invariants();
+        // Always-on backstop.
+        obj.validate().map_err(|_| StickyError::WouldCorrupt)?;
+        *self = obj;
+        Ok(TransformSubFaceReport {
+            sub_face,
+            parent,
+            xf: *xf,
+            inverse,
+            adopted,
+        })
+    }
+
     /// Push/pull a flat imprinted sub-face by `distance` along its outward normal,
     /// generating fresh perpendicular walls between the moved sub-face and its
     /// parent's hole. Positive embosses a boss; negative recesses. Reversed by
@@ -3726,8 +4419,9 @@ impl Object {
     /// the raised walls are stamped [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef)
     /// so the boss shades smooth and a wall push offsets its radius, exactly as
     /// a from-extrusion cylinder does. A mixed or partial loop stamps nothing
-    /// (map-or-drop). The raised sub-face itself drops any inherited claim (it
-    /// leaves its chord plane).
+    /// (map-or-drop). The raised sub-face itself drops any inherited surface
+    /// claim (it leaves its chord plane), while its raised rim edges carry the
+    /// base rim's circle claims translated by the sweep (the map half).
     ///
     /// # Errors
     /// See [`PushPullError`]; [`PushPullError::NotASubFace`] if `sub_face` is not
@@ -3773,102 +4467,28 @@ impl Object {
         let normal = self.faces[sub_face].plane.normal();
         let sweep = normal * distance;
 
-        // The boss side walls are chord facets of the cylinder swept from the
-        // sub-face's boundary circle — the pull-UP mirror of `from_extrusion`'s
-        // `wall_surface` and of the push-THROUGH tunnel stamping (playtest fix
-        // C3). Stamp them `SurfaceRef::Cylinder` iff the sub-face boundary is a
-        // clean, WHOLE circle ring, tested in two parts:
-        //   (1) every boundary edge carries an `Edge::curve` claim (a chord of
-        //       an imprinted circle) and they agree on center and radius; and
-        //   (2) the ring is a genuine full circle of short chord facets — the
-        //       vertices advance MONOTONICALLY around the center (winding once)
-        //       in near-uniform angular steps (heterogeneity gate), AND the
-        //       ring has at least [`MIN_CIRCLE_SEGMENTS`] facets (absolute
-        //       density gate) so no facet is a coarse secant.
-        // (2) is load-bearing in two ways. The heterogeneity gate rejects an
-        // arc closed by a straight chord (20 short arc-chords 0→300° + one 60°
-        // closing secant): all endpoints lie on the circle so every edge can
-        // carry the SAME claim, yet the long closing chord is a flat wall, not
-        // a cylinder facet. The density gate rejects a homogeneous COARSE ring
-        // — an equilateral triangle or a skip-connected 12-gon (every other
-        // point of a 24-gon) whose steps are uniform but far too large to be
-        // facets; the relative uniformity test alone cannot see these, since a
-        // regular n-gon's steps are all exactly 2π/n. Stamping either would
-        // sweep a secant into a "cylinder wall": map-or-drop soundness break
-        // (stamp-wrong is worse than don't-stamp). A rectangle, a partial loop,
-        // or a split fragment that dropped its claim fails (1) and also stamps
-        // nothing. The axis is the sweep direction through the circle's center;
-        // angular/axial extent derive from the facets (the true-curves design
-        // §4.6, clause `extrude_sub_face`).
-        let boss_surface: Option<crate::topo::SurfaceRef> = {
-            let mut geom: Option<crate::sketch::CurveGeom> = None;
-            let mut clean = true;
-            for &h in &h_sub {
-                match self.edges[self.half_edges[h].edge].curve {
-                    Some(g) => match geom {
-                        None => geom = Some(g),
-                        Some(g0) => {
-                            if !g0.center.approx_eq(g.center, tol::POINT_MERGE)
-                                || (g0.radius - g.radius).abs() > tol::POINT_MERGE
-                            {
-                                clean = false;
-                                break;
-                            }
-                        }
-                    },
-                    None => {
-                        clean = false;
-                        break;
-                    }
-                }
-            }
-            // Part (2): the boundary vertices wind once around the center in
-            // near-uniform steps (a full ring of short chord facets).
-            let full_circle_ring = |g: crate::sketch::CurveGeom| -> bool {
-                let (u, v) = crate::geom2d::plane_axes(normal);
-                let angle = |h: HalfEdgeId| -> f64 {
-                    let d = self.vertices[self.half_edges[h].origin].position - g.center;
-                    d.dot(v).atan2(d.dot(u))
-                };
-                // Wrap an angular delta into (-π, π]: the shortest signed step
-                // to the angularly adjacent vertex.
-                let wrap = |mut a: f64| -> f64 {
-                    let two_pi = std::f64::consts::TAU;
-                    while a <= -std::f64::consts::PI {
-                        a += two_pi;
-                    }
-                    while a > std::f64::consts::PI {
-                        a -= two_pi;
-                    }
-                    a
-                };
-                let steps: Vec<f64> = (0..n)
-                    .map(|k| wrap(angle(h_sub[(k + 1) % n]) - angle(h_sub[k])))
-                    .collect();
-                // Monotonic: a closed loop whose angle only ever advances one
-                // way winds exactly once around the center (sum = ±2π), so no
-                // separate winding-sum check is needed.
-                let monotonic = steps.iter().all(|&s| s > 0.0) || steps.iter().all(|&s| s < 0.0);
-                // Uniform: a regular ring's steps are all 2π/n; reject any that
-                // exceeds twice that (a secant, or a mixed arc+chord loop).
-                let cap = 2.0 * std::f64::consts::TAU / n as f64;
-                let uniform = steps.iter().all(|&s| s.abs() <= cap);
-                // Dense enough: an ABSOLUTE facet-count floor, not relative to
-                // the loop's own count — a regular n-gon passes the uniformity
-                // test for any n, so a coarse triangle (n = 3) or skip-12
-                // (n = 12) needs this gate to be rejected. Every real
-                // tool-produced circle clears the floor (see MIN_CIRCLE_SEGMENTS).
-                let dense = n >= crate::sketch::MIN_CIRCLE_SEGMENTS;
-                monotonic && uniform && dense
-            };
-            geom.filter(|&g| clean && full_circle_ring(g)).map(|g| {
-                crate::topo::SurfaceRef::Cylinder {
-                    axis_point: g.center,
-                    axis: normal,
-                    radius: g.radius,
-                }
+        // Each boss side wall is a chord facet of the cylinder swept from the
+        // circle its base edge claims (`Edge::curve`) — the pull-UP mirror of
+        // `from_extrusion`'s per-edge `wall_surface` and of the push-THROUGH
+        // tunnel stamping (playtest fix C3). Stamped PER FACET, never per
+        // ring: an arc closed by a line (a pie or segment) bosses into smooth
+        // arc walls and flat closing walls, on a face exactly as the same
+        // shape does from a ground sketch. The gate is `chord_facet_ok`: a
+        // claimed edge subtending more than one draw-floor step is a secant
+        // (an arc's closing chord, a coarse polygon's side), and sweeping it
+        // into a "cylinder wall" would be a map-or-drop soundness break
+        // (stamp-wrong is worse than don't-stamp). A plain edge stamps
+        // nothing. The axis is the sweep direction through the circle's
+        // center; angular and axial extent derive from the facets (the
+        // true-curves design §4.6, clause `extrude_sub_face`).
+        let facet_curves: Vec<Option<crate::sketch::CurveGeom>> = (0..n)
+            .map(|k| {
+                let g = self.edges[self.half_edges[h_sub[k]].edge].curve?;
+                let p = self.vertices[self.half_edges[h_sub[k]].origin].position;
+                let q = self.vertices[self.half_edges[h_sub[(k + 1) % n]].origin].position;
+                chord_facet_ok(p, q, &g).then_some(g)
             })
-        };
+            .collect();
 
         // Obstruction guard: unlike `push_pull`, an extrusion has no
         // push-through semantics — a recess deeper than the material under
@@ -4001,14 +4621,18 @@ impl Object {
                 inner_loops: Vec::new(),
                 plane,
                 // Freshly generated boss walls take the default material and no
-                // UV frame. `surface` carries the swept cylinder when the
-                // sub-face boundary was a clean circle chain (computed above),
-                // else `None` — so bossing an imprinted circle raises a wall
-                // that shades smooth and whose push offsets the radius, while a
-                // rectangular or mixed loop stays flat facets (map-or-drop).
+                // UV frame. `surface` carries the swept cylinder when this
+                // wall's base edge is a chord facet of a drawn circle (computed
+                // above), else `None` — so bossing an imprinted circle or arc
+                // raises walls that shade smooth and whose push offsets the
+                // radius, while a straight edge stays a flat facet.
                 material: None,
                 uv_frame: None,
-                surface: boss_surface,
+                surface: facet_curves[k].map(|g| crate::topo::SurfaceRef::Cylinder {
+                    axis_point: g.center,
+                    axis: normal,
+                    radius: g.radius,
+                }),
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -4019,10 +4643,22 @@ impl Object {
             // wa[k] ↔ h_sub[k] (new edge).
             obj.half_edges[wa[k]].twin = Some(h_sub[k]);
             obj.half_edges[h_sub[k]].twin = Some(wa[k]);
+            // The raised rim is the base rim translated by the sweep: a chord
+            // of an imprinted circle stays a chord of that circle moved with
+            // it (map-or-drop, the map half), so the boss's top keeps its
+            // circle identity, snaps, and a later push-through's true profile.
+            // Only a facet that stamped its wall carries (the same per-facet
+            // gate): a secant's claim stays on the unmoved base edge, but
+            // copying it onto a fresh edge would hand push-through and
+            // inference a "circle facet" the wall refused.
+            let top_curve = facet_curves[k].map(|g| crate::sketch::CurveGeom {
+                center: g.center + sweep,
+                radius: g.radius,
+            });
             let e_top = obj.edges.insert(Edge {
                 half_edge: h_sub[k],
                 twin_half_edge: Some(wa[k]),
-                curve: None,
+                curve: top_curve,
                 soft: false,
             });
             obj.half_edges[h_sub[k]].edge = e_top;
@@ -4253,7 +4889,27 @@ impl Object {
         face: FaceId,
         path: &[Point3],
     ) -> Result<FaceSplitReport, StickyError> {
-        self.split_face_with_attrs(face, path, None)
+        self.split_face_impl(face, path, None, &[])
+    }
+
+    /// [`Object::split_face`] with a per-edge analytic claim: `curves[k]` is
+    /// the circle path edge `k` (`path[k]` → `path[k+1]`) is a chord facet of,
+    /// or `None` for a plain edge — an arc drawn edge to edge keeps its circle
+    /// on the solid ([`Edge::curve`](crate::topo::Edge::curve)), so pushing
+    /// either side raises smooth walls and the rim keeps its snaps, exactly as
+    /// the same arc does from a ground sketch. Empty `curves` claims nothing.
+    ///
+    /// # Errors
+    /// [`StickyError::CurveClaimOffLoop`] when `curves` is neither empty nor
+    /// one entry per path edge, or a claimed edge's endpoints are not on its
+    /// circle; plus everything [`Object::split_face`] refuses.
+    pub fn split_face_with_curves(
+        &mut self,
+        face: FaceId,
+        path: &[Point3],
+        curves: &[Option<crate::sketch::CurveGeom>],
+    ) -> Result<FaceSplitReport, StickyError> {
+        self.split_face_impl(face, path, None, curves)
     }
 
     /// [`Object::split_face`] with an explicit attribute restoration: after
@@ -4273,12 +4929,29 @@ impl Object {
         path: &[Point3],
         restore: Option<[Option<FaceAttrsAt>; 2]>,
     ) -> Result<FaceSplitReport, StickyError> {
+        self.split_face_impl(face, path, restore, &[])
+    }
+
+    /// Shared body of the [`Object::split_face`] family: `restore` is the
+    /// undo attribute snapshot ([`Object::split_face_with_attrs`]), `curves`
+    /// the per-edge claims ([`Object::split_face_with_curves`]). Crate-internal
+    /// so history's undo of a merge can pass both.
+    pub(crate) fn split_face_impl(
+        &mut self,
+        face: FaceId,
+        path: &[Point3],
+        restore: Option<[Option<FaceAttrsAt>; 2]>,
+        curves: &[Option<crate::sketch::CurveGeom>],
+    ) -> Result<FaceSplitReport, StickyError> {
         // --- validation (before any mutation) ---
         if !self.faces.contains_key(face) {
             return Err(StickyError::UnknownFace);
         }
         if path.len() < 2 {
             return Err(StickyError::PathTooShort);
+        }
+        if !curves.is_empty() && curves.len() != path.len() - 1 {
+            return Err(StickyError::CurveClaimOffLoop);
         }
 
         let face_plane = self.faces[face].plane;
@@ -4354,6 +5027,22 @@ impl Object {
         resolved_path.push(ep0_pos);
         resolved_path.extend_from_slice(&path[1..path.len() - 1]);
         resolved_path.push(ep1_pos);
+
+        // A claimed edge's resolved endpoints must lie on its circle (the
+        // caller owns the analytic truth; the kernel never fits a circle).
+        for (k, g) in curves.iter().enumerate() {
+            let Some(g) = g else {
+                continue;
+            };
+            if !g.radius.is_finite() || g.radius <= tol::POINT_MERGE {
+                return Err(StickyError::CurveClaimOffLoop);
+            }
+            for p in [resolved_path[k], resolved_path[k + 1]] {
+                if ((p - g.center).length() - g.radius).abs() > self.planarity_tol {
+                    return Err(StickyError::CurveClaimOffLoop);
+                }
+            }
+        }
 
         // Check path self-intersections (interior segments only — not adjacent).
         let n_seg = resolved_path.len() - 1;
@@ -4458,6 +5147,13 @@ impl Object {
         let report = do_split_face(&mut obj, face, path, &ep0, &ep1)?;
         if let Some(restore) = restore {
             apply_split_restore(&mut obj, &report.new_faces, &restore);
+        }
+        // The cut's edges come back in path order: stamp each claimed edge
+        // with its circle (validated above against the resolved endpoints).
+        for (k, &e) in report.new_edges.iter().enumerate() {
+            if let Some(&g) = curves.get(k) {
+                obj.edges[e].curve = g;
+            }
         }
         obj.check_invariants();
         // Release-safe backstop: `check_invariants` is compiled out of release
@@ -5370,9 +6066,19 @@ impl Object {
             .iter()
             .map(|&il| self.loop_positions(il).collect())
             .collect();
+        // A solid edge's claim reaches the swept tool only as a genuine facet
+        // (`chord_facet_ok`): a secant carrying a claim — an arc's closing
+        // chord — must not become a "cylinder" tunnel wall. A sketch profile
+        // needs no such gate (the sketch owns its curve chains' density).
         let loop_curves = |lid: crate::ids::LoopId| -> Vec<Option<crate::sketch::CurveGeom>> {
             self.loop_half_edges(lid)
-                .map(|h| self.edges[self.half_edges[h].edge].curve)
+                .map(|h| {
+                    let he = self.half_edges[h];
+                    let g = self.edges[he.edge].curve?;
+                    let p = self.vertices[he.origin].position;
+                    let q = self.vertices[self.half_edges[he.next].origin].position;
+                    chord_facet_ok(p, q, &g).then_some(g)
+                })
                 .collect()
         };
         let outer_curves = loop_curves(f.outer_loop);
@@ -6910,6 +7616,112 @@ fn split_profile_for_pole(
 /// holds and silently omits the stamp otherwise — stamping wrong is worse
 /// than not stamping (map-or-drop, the true-curves design); the geometry
 /// itself is identical either way.
+/// Stamps each wall in `walls` that is a chord facet of a drawn circle's
+/// cylinder along `axis`: some edge of the wall carries an
+/// [`Edge::curve`](crate::topo::Edge::curve) claim that at least
+/// [`crate::sketch::MIN_CIRCLE_SEGMENTS`] edges of the object share (a genuine
+/// circle of short facets, never a coarse polygon), and every wall vertex lies
+/// on that cylinder ([`cylinder_claim_holds`]). The claimed edge must also be
+/// a genuine facet, not a secant ([`chord_facet_ok`]), so the closing chord
+/// of an arc never becomes a "cylinder" wall. A wall failing any test stays a
+/// flat facet (map-or-drop: stamp-wrong is worse than don't-stamp).
+///
+/// A stamped quad wall's opposite edge (the rim the push raised, a fresh edge)
+/// takes the claimed edge's circle translated along the wall, when both of its
+/// endpoints lie on that translated circle: the raised rim keeps the circle's
+/// identity exactly as the boss op's raised rim does (the map half).
+fn stamp_circle_walls(obj: &mut Object, walls: &[FaceId], axis: Vec3) {
+    let tol_on = obj.planarity_tol;
+    for &w in walls {
+        let Some(face) = obj.faces.get(w) else {
+            continue;
+        };
+        if face.surface.is_some() {
+            continue;
+        }
+        let ring: Vec<Point3> = obj.loop_positions(face.outer_loop).collect();
+        let plane = face.plane;
+        let mut stamp = None;
+        for h in obj.loop_half_edges(face.outer_loop) {
+            let Some(g) = obj.edges[obj.half_edges[h].edge].curve else {
+                continue;
+            };
+            let he = obj.half_edges[h];
+            let p = obj.vertices[he.origin].position;
+            let q = obj.vertices[obj.half_edges[he.next].origin].position;
+            if !chord_facet_ok(p, q, &g) {
+                continue;
+            }
+            let surface = crate::topo::SurfaceRef::Cylinder {
+                axis_point: g.center,
+                axis,
+                radius: g.radius,
+            };
+            if cylinder_claim_holds(&ring, &plane, &surface) {
+                stamp = Some((surface, h, g));
+                break;
+            }
+        }
+        let Some((surface, h, g)) = stamp else {
+            continue;
+        };
+        obj.faces[w].surface = Some(surface);
+
+        // Carry the circle onto the quad's opposite edge. Loop order is
+        // h (p0 -> p1), n1, opp (q0 -> q1), n3 (q1 -> p0): q1 sits over p0.
+        let n1 = obj.half_edges[h].next;
+        let opp = obj.half_edges[n1].next;
+        let n3 = obj.half_edges[opp].next;
+        if obj.half_edges[n3].next != h {
+            continue; // not a quad
+        }
+        let opp_edge = obj.half_edges[opp].edge;
+        if obj.edges[opp_edge].curve.is_some() {
+            continue;
+        }
+        let p0 = obj.vertices[obj.half_edges[h].origin].position;
+        let q0 = obj.vertices[obj.half_edges[opp].origin].position;
+        let q1 = obj.vertices[obj.half_edges[n3].origin].position;
+        let offset = q1 - p0;
+        if offset.cross(axis).length() > tol::PLANE_DIST {
+            continue; // the wall is not swept along the axis
+        }
+        let center = g.center + offset;
+        let on = |x: Point3| ((x - center).length() - g.radius).abs() <= tol_on;
+        if on(q0) && on(q1) {
+            obj.edges[opp_edge].curve = Some(crate::sketch::CurveGeom {
+                center,
+                radius: g.radius,
+            });
+        }
+    }
+}
+
+/// Whether the chord `p` → `q` claiming circle `g` is a genuine FACET of it —
+/// short enough to be one of the draw tools' facets rather than a secant. A
+/// facet subtends at most one step of a ring at the density floor
+/// ([`crate::sketch::MIN_CIRCLE_SEGMENTS`] facets per turn, 15°: the
+/// coarsest circle any tool draws; arcs facet at the same per-turn density),
+/// and the gate allows half a step more (22.5°) so a floor-density circle
+/// carried through instance poses, similarities, and the wasm boundary never
+/// sits on the threshold, while the coarsest secants that could carry a
+/// claim — a skip-connected 12-gon's 30° side, an arc's closing chord, a
+/// triangle — stay well outside it. The kernel owns "what density counts as
+/// a curve": a claimed edge subtending more is real geometry but not a
+/// cylinder facet, and stamping a wall from it would sweep a secant into a
+/// "cylinder" (stamp-wrong is worse than don't-stamp, map-or-drop). One gate
+/// for every solid-side wall-stamping path: boss, wall-building push/pull,
+/// and push-through.
+pub(crate) fn chord_facet_ok(p: Point3, q: Point3, g: &crate::sketch::CurveGeom) -> bool {
+    if !g.radius.is_finite() || g.radius <= tol::POINT_MERGE {
+        return false;
+    }
+    let half = ((q - p).length() / (2.0 * g.radius)).min(1.0);
+    let subtends = 2.0 * half.asin();
+    let step = std::f64::consts::TAU / crate::sketch::MIN_CIRCLE_SEGMENTS as f64;
+    subtends <= 1.5 * step
+}
+
 fn cylinder_claim_holds(quad: &[Point3], plane: &Plane, surface: &crate::topo::SurfaceRef) -> bool {
     let crate::topo::SurfaceRef::Cylinder {
         axis_point,

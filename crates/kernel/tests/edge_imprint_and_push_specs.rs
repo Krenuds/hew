@@ -545,6 +545,7 @@ fn a_rectangle_from_edge_midpoint_to_edge_midpoint_plans_as_one_chord() {
                         face: top,
                         path: chords[0].clone(),
                         restore: None,
+                        curves: Vec::new(),
                     },
                 )
                 .expect("chord split");

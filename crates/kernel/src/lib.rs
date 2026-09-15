@@ -47,7 +47,7 @@ pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
     FollowMePath, HistoryEntries, HistoryEntryInfo, HistoryOrigin, InsertOptions, InsertReport,
     LibraryProvenance, LoopImprintReport, LoopImprintRoute, MAX_COMPONENT_DEPTH, MaterialScope,
-    NodeId, PendingActionKind, PurgeReport,
+    NodeId, PendingActionKind, PurgeReport, TransformChordReport,
 };
 pub use error::TopologyError;
 pub use guide::Guide;
@@ -69,9 +69,10 @@ pub use offset::{
     FaceOffsetError, OffsetError, OffsetLoop, ProfileOffset, offset_face_boundary, offset_profile,
 };
 pub use ops::{
-    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
+    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt, FaceFeature,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
     LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError,
+    TransformSubFaceReport,
 };
 pub use scenes::{DisplayState, ResolvedScene, Scene, SceneDrift, SceneProps, SectionPlaneState};
 pub use serialize::{

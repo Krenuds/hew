@@ -41,6 +41,8 @@ export type NodeKind =
   | 'sketch-island'
   | 'sketch-curve'
   | 'sketch-edge'
+  | 'imprint'
+  | 'imprint-chord'
 
 /** A reference to a document node: kind + opaque handle. The sketch-scoped
  * kinds (`'sketch-island'` — one connected shape, the user-facing unit;
@@ -52,16 +54,29 @@ export interface NodeRef {
   id: bigint
   /** Owning sketch handle — set iff `kind` is a sketch-scoped sub-entity. */
   sketch?: bigint
+  /** Owning object handle — set iff `kind` is an imprint kind
+   *  (`'imprint'`: a drawn sub-face, `id` its face handle; `'imprint-chord'`:
+   *  a drawn run up to the face's edge, `id` its first edge handle). Neither
+   *  has a kernel NodeId; see `app/src/tools/imprints.ts`. */
+  object?: bigint
 }
 
 /** Return true when two NodeRefs refer to the same node. */
 export function nodeEq(a: NodeRef, b: NodeRef): boolean {
-  return a.kind === b.kind && a.id === b.id && a.sketch === b.sketch
+  return a.kind === b.kind && a.id === b.id && a.sketch === b.sketch && a.object === b.object
 }
 
 /** Stable string key for a NodeRef, usable in a Set or Map. */
 export function nodeKey(n: NodeRef): string {
-  return n.sketch !== undefined ? `${n.kind}:${n.sketch}:${n.id}` : `${n.kind}:${n.id}`
+  if (n.sketch !== undefined) return `${n.kind}:${n.sketch}:${n.id}`
+  if (n.object !== undefined) return `${n.kind}:${n.object}:${n.id}`
+  return `${n.kind}:${n.id}`
+}
+
+/** Whether `kind` is one of the imprint kinds (a drawn shape on a solid's
+ *  face, selectable and movable on that face but not a node of its own). */
+export function isImprintKind(kind: NodeKind): boolean {
+  return kind === 'imprint' || kind === 'imprint-chord'
 }
 
 /** Convert a NodeJs FFI value (has .kind and .id) to a plain NodeRef. */
@@ -92,7 +107,8 @@ export function collectLeafIds(
     node.kind === 'sketch' ||
     node.kind === 'sketch-island' ||
     node.kind === 'sketch-curve' ||
-    node.kind === 'sketch-edge'
+    node.kind === 'sketch-edge' ||
+    isImprintKind(node.kind)
   ) {
     return { objectIds: [], instanceIds: [] }
   }
@@ -698,6 +714,10 @@ export interface SelectionLivenessView {
   sketch_edge_island(sketch: bigint, edge: bigint): bigint | undefined
   sketch_curve_chain(sketch: bigint, edge: bigint): ArrayLike<bigint>
   sketch_island_edges(sketch: bigint, island: bigint): ArrayLike<bigint>
+  /** The object's imprints as `face_features` JSON (see imprints.ts).
+   *  Optional so older test doubles still satisfy the view; an imprint ref
+   *  is then treated as dead. */
+  face_features?(object: bigint): string
 }
 
 /**
@@ -756,6 +776,26 @@ export function pruneDeadSelection(
         } catch {
           return false
         }
+      case 'imprint':
+      case 'imprint-chord': {
+        // An imprint is alive while its object still reports it: a dissolve,
+        // a push into a boss, or a chord re-cut all retire the handle.
+        if (n.object === undefined || scene.face_features === undefined) return false
+        if (!(objects ??= new Set([...Array.from(scene.object_ids()), ...scopedObjects])).has(n.object)) {
+          return false
+        }
+        let json: string
+        try {
+          json = scene.face_features(n.object)
+        } catch {
+          return false
+        }
+        const key = n.kind === 'imprint' ? '"face":' : '"edge":'
+        // Cheap membership test on the JSON text: the kernel writes handles
+        // as bare integers, so `"face":<id>,` (or `"edge":<id>,`) appears
+        // exactly for a live feature keyed by that handle.
+        return json.includes(`${key}${n.id.toString()},`) || json.includes(`${key}${n.id.toString()}}`)
+      }
     }
   }
 

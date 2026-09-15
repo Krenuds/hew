@@ -1631,47 +1631,59 @@ fn a_wrong_curve_claim_at_imprint_is_refused_not_repaired() {
 }
 
 #[test]
-fn thickening_a_box_after_bossing_an_imprinted_circle_map_or_drops_the_claim() {
+fn thickening_a_box_after_bossing_an_imprinted_circle_maps_the_claim() {
     // Map-or-drop for `Edge::curve` on a SUBSET-vertex move (adversarial
     // review, critical). Imprint a circle (rim edges carry the claim), boss it
-    // up (the base ring keeps a valid claim), then push the holed top face to
-    // thicken the box. Thickening moves the base-ring vertices off the stored
-    // circle: the claim must map-or-DROP, never stay stale — a stale claim
-    // panicked `check_invariants` in debug and false-refused
-    // `NonManifoldResult` in release, a spurious failure of an op unrelated to
-    // the circle. A no-curve control (a plain rectangular imprint) already
-    // succeeds, isolating the cause to the new field.
+    // up, then push the holed top face to thicken the box. Thickening moves
+    // the base-ring vertices off the stored circle: the claim must MAP (move
+    // with the ring) or drop, never stay stale — a stale claim panicked
+    // `check_invariants` in debug and false-refused `NonManifoldResult` in
+    // release, a spurious failure of an op unrelated to the circle. A no-curve
+    // control (a plain rectangular imprint) already succeeds, isolating the
+    // cause to the new field. The thickening push translates the base ring
+    // whole, so its claim maps rather than drops.
     let (h, r) = (1.0, 0.5);
     let (mut obj, disk) = imprint_circle(2.0, 2.0, h, r);
+    let claims =
+        |obj: &Object| -> Vec<CurveGeom> { obj.edges().values().filter_map(|e| e.curve).collect() };
+    let at = |claims: &[CurveGeom], z: f64| {
+        claims
+            .iter()
+            .filter(|g| {
+                g.center
+                    .approx_eq(Point3::new(0.0, 0.0, z), tol::POINT_MERGE)
+                    && (g.radius - r).abs() < tol::POINT_MERGE
+            })
+            .count()
+    };
     assert_eq!(
-        obj.edges().values().filter(|e| e.curve.is_some()).count(),
+        claims(&obj).len(),
         24,
         "the imprint stamps the 24 rim edges"
     );
 
     // Boss the disk up: the base ring (shared with the parent hole) keeps its
-    // valid claim; the raised top and walls are fresh, unclaimed geometry.
+    // claim, and the raised top rim carries the same circle moved up with it.
     obj.extrude_sub_face(disk, 0.3).unwrap();
     obj.validate().unwrap();
-    assert_eq!(
-        obj.edges().values().filter(|e| e.curve.is_some()).count(),
-        24,
-        "the base ring retains its claim after bossing (unmoved)"
-    );
+    let c = claims(&obj);
+    assert_eq!(c.len(), 48, "base ring + raised top rim");
+    assert_eq!(at(&c, h), 24, "the base ring keeps its claim (unmoved)");
+    assert_eq!(at(&c, h + 0.3), 24, "the raised rim carries the circle");
 
     // Thicken: push the holed top face up. This moves the base-ring vertices
     // off the stored circle. Must NOT panic (debug) or refuse (release).
     let top = top_cap(&obj, h);
     obj.push_pull(top, 0.2)
         .expect("thickening an unrelated face must not be refused by a stale claim");
-    // Every surviving claim validates against the moved geometry — the moved
-    // ring's now-stale claim was dropped (validate would reject a stale one).
+    // Every claim validates against the moved geometry (validate rejects a
+    // stale one), and the moved ring's claim moved with it.
     obj.validate().unwrap();
-    assert_eq!(
-        obj.edges().values().filter(|e| e.curve.is_some()).count(),
-        0,
-        "the moved ring's claim was dropped (map-or-drop), leaving none stale"
-    );
+    let c = claims(&obj);
+    assert_eq!(c.len(), 48, "no claim dropped: the moved ring mapped");
+    assert_eq!(at(&c, h), 0, "no claim is left at the ring's old height");
+    assert_eq!(at(&c, h + 0.2), 24, "the base ring's claim moved with it");
+    assert_eq!(at(&c, h + 0.3), 24, "the unmoved boss top keeps its claim");
 }
 
 /// Undoing a boss-wall push keeps `Edge::curve` claims consistent. A boss
@@ -1856,17 +1868,15 @@ fn bossing_a_rectangular_imprint_stays_flat() {
     );
 }
 
+/// A loop whose points all lie on a circle but which is an ARC closed by a
+/// straight chord (20 arc facets 0→300° plus one 60° closing secant) bosses
+/// exactly as the same shape extrudes from a ground sketch: every arc facet
+/// raises a smooth cylinder wall, the secant raises a flat wall. Every edge
+/// holds the claim (all endpoints are on the circle), so the wall stamping is
+/// what tells a facet from a secant (`chord_facet_ok`): stamping the secant
+/// would sweep it into a "cylinder" (stamp-wrong is worse than don't-stamp).
 #[test]
-fn bossing_an_arc_closed_by_a_chord_stays_flat() {
-    // Adversarial (review F2/F6): a loop of 20 short arc-chords (0→300°) plus
-    // ONE long straight closing chord (300°→360°, a 60° secant) — every vertex
-    // lies on the circle, so `split_face_inner_with_curve` stamps the SAME
-    // curve on all 21 edges and the weak "every edge carries a matching curve"
-    // test would pass. But the closing secant is a flat wall, not a cylinder
-    // facet: the ring is non-uniform (its steps are 20×15° + 1×60°), so the
-    // strengthened full-circle-ring check must REFUSE to stamp (map-or-drop —
-    // stamp-wrong is worse than don't-stamp). Red-check: drop the uniformity
-    // test and this wrongly stamps 21 cylinder walls.
+fn bossing_an_arc_closed_by_a_chord_stamps_the_arc_not_the_chord() {
     let (h, r) = (1.0, 0.5);
     let mut obj = box_obj(2.0, 2.0, h);
     let top = top_cap(&obj, h);
@@ -1894,13 +1904,21 @@ fn bossing_an_arc_closed_by_a_chord_stays_flat() {
         21,
         "the imprint stamps all 21 arc+chord edges (endpoints on the circle)"
     );
-    // …but bossing must NOT sweep the secant into a cylinder wall.
+    // …and bossing sweeps the 20 arc facets into cylinder walls, never the
+    // secant.
     obj.extrude_sub_face(disk, 0.3).unwrap();
     obj.validate().unwrap();
     assert_eq!(
         surface_census(&obj).1,
-        0,
-        "an arc closed by a straight chord is not a full circle — no stamp"
+        20,
+        "the arc facets stamp; the closing secant stays a flat wall"
+    );
+    // The raised rim carries the arc's claims (20) but not the secant's,
+    // where push-through and inference would read a "facet" the wall refused.
+    assert_eq!(
+        obj.edges().values().filter(|e| e.curve.is_some()).count(),
+        41,
+        "21 on the unmoved base ring, 20 on the raised arc"
     );
 }
 
@@ -2037,5 +2055,90 @@ fn a_bossed_wall_offset_round_trips_through_history() {
     assert!(
         (radius - 0.6).abs() <= tol::POINT_MERGE,
         "and at the offset radius (0.5 → 0.6)"
+    );
+}
+
+/// Imprint `ring` (points on the circle of radius `r` about the box top's
+/// center, carrying that claim), cut a small square inside it so the disk is
+/// no flat sub-face, and push the disk up by `d` through the wall-building
+/// push/pull path. Returns the validated object.
+fn push_holed_disk(ring: &[Point3], r: f64, h: f64, d: f64) -> Object {
+    let mut obj = box_obj(2.0, 2.0, h);
+    let top = top_cap(&obj, h);
+    let disk = obj
+        .split_face_inner_with_curve(
+            top,
+            ring,
+            Some(CurveGeom {
+                center: Point3::new(0.0, 0.0, h),
+                radius: r,
+            }),
+        )
+        .unwrap()
+        .sub_face;
+    let square: Vec<Point3> = [(-0.1, -0.1), (0.1, -0.1), (0.1, 0.1), (-0.1, 0.1)]
+        .iter()
+        .map(|&(x, y)| Point3::new(x, y, h))
+        .collect();
+    obj.split_face_inner_with_curve(disk, &square, None)
+        .unwrap();
+    let report = obj.push_pull(disk, d).expect("push the holed disk");
+    assert!(
+        !report.created_faces.is_empty(),
+        "the push took the wall-building path"
+    );
+    obj.validate().unwrap();
+    obj
+}
+
+fn claims_at(obj: &Object, z: f64, r: f64) -> usize {
+    obj.edges()
+        .values()
+        .filter_map(|e| e.curve)
+        .filter(|g| {
+            g.center
+                .approx_eq(Point3::new(0.0, 0.0, z), tol::POINT_MERGE)
+                && (g.radius - r).abs() <= tol::POINT_MERGE
+        })
+        .count()
+}
+
+#[test]
+fn a_circle_pushed_through_the_wall_building_path_keeps_its_raised_rim() {
+    // A drawn circle holding another shape is no flat sub-face, so its push
+    // raises walls through the general path rather than the boss op. Its
+    // walls stamp as the circle's cylinder, and the raised rim (fresh edges)
+    // carries the circle moved up with it, exactly as a boss's rim does.
+    let (h, r, d) = (1.0, 0.5, 0.3);
+    let obj = push_holed_disk(&circle_loop(0.0, 0.0, h, r, 24), r, h, d);
+    assert_eq!(surface_census(&obj).1, 24, "every circle wall is a facet");
+    assert_eq!(claims_at(&obj, h, r), 24, "the base ring keeps its claim");
+    assert_eq!(claims_at(&obj, h + d, r), 24, "the raised rim carries it");
+}
+
+#[test]
+fn an_arc_closed_by_a_secant_pushed_up_stamps_and_carries_only_its_arc() {
+    // 27 short arc facets (0°..270° in 10° steps) closed by a 90° secant: all
+    // 28 edges hold the claim (every endpoint is on the circle), enough to
+    // clear the segment floor. The secant wall must not stamp as a cylinder,
+    // and its raised edge must not carry the claim; the arc facets do both.
+    let (h, r, d) = (1.0, 0.5, 0.3);
+    let ring: Vec<Point3> = (0..28)
+        .map(|i| {
+            let a = (10.0 * i as f64).to_radians();
+            Point3::new(r * a.cos(), r * a.sin(), h)
+        })
+        .collect();
+    let obj = push_holed_disk(&ring, r, h, d);
+    assert_eq!(
+        surface_census(&obj).1,
+        27,
+        "the arc facets stamp; the closing secant stays a flat wall"
+    );
+    assert_eq!(claims_at(&obj, h, r), 28, "the unmoved base ring keeps all");
+    assert_eq!(
+        claims_at(&obj, h + d, r),
+        27,
+        "the raised rim carries the arc, never the secant"
     );
 }

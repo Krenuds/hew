@@ -18,7 +18,7 @@
 
 use kernel::{
     CurveGeom, History, HistoryError, KernelOp, KernelOpError, Object, Plane, Point3, Profile,
-    PushPullError, Vec3, WatertightState, tol,
+    PushPullError, Transform, Vec3, WatertightState, tol,
 };
 use proptest::prelude::*;
 
@@ -86,6 +86,17 @@ enum FuzzOp {
     CollapseSubFace {
         face_sel: usize,
     },
+    /// Slide/turn/scale the `face_sel`-th face on its parent if it is an
+    /// imprint (usually rejected typed — a non-imprint, or a move that
+    /// leaves the parent — exercising the strong guarantee); an accepted
+    /// move is handle-stable and its own inverse under undo.
+    TransformSubFace {
+        face_sel: usize,
+        du: f64,
+        dv: f64,
+        angle: f64,
+        scale: f64,
+    },
     Undo,
     Redo,
 }
@@ -120,6 +131,15 @@ fn arb_fuzz_op() -> impl Strategy<Value = FuzzOp> {
         }),
         1 => any::<usize>().prop_map(|face_sel| FuzzOp::MergeInnerFace { face_sel }),
         1 => any::<usize>().prop_map(|face_sel| FuzzOp::CollapseSubFace { face_sel }),
+        2 => (any::<usize>(), -0.4..0.4f64, -0.4..0.4f64, -3.2..3.2f64, 0.6..1.5f64).prop_map(
+            |(face_sel, du, dv, angle, scale)| FuzzOp::TransformSubFace {
+                face_sel,
+                du,
+                dv,
+                angle,
+                scale,
+            }
+        ),
         2 => Just(FuzzOp::Undo),
         1 => Just(FuzzOp::Redo),
     ]
@@ -345,6 +365,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 face,
                 path: vec![point_on(a, *ta), point_on(b, *tb)],
                 restore: None,
+                curves: Vec::new(),
             })
         }
         FuzzOp::MergeFaces { edge_sel } => {
@@ -376,7 +397,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                     face,
                     loop_path,
                     restore: None,
-                    curve: None,
+                    curves: Vec::new(),
                 });
             }
             // Shrink the boundary toward its vertex centroid; strictly inside
@@ -390,7 +411,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 face,
                 loop_path,
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             })
         }
         FuzzOp::ImprintCircle {
@@ -452,7 +473,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 face,
                 loop_path,
                 restore: None,
-                curve: Some(CurveGeom { center: c, radius }),
+                curves: vec![Some(CurveGeom { center: c, radius }); sides],
             })
         }
         FuzzOp::ExtrudeSubFace { face_sel, distance } => {
@@ -472,6 +493,43 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             let n = object.faces().len();
             let sub_face = object.faces().keys().nth(face_sel % n)?;
             Some(KernelOp::CollapseSubFace { sub_face })
+        }
+        FuzzOp::TransformSubFace {
+            face_sel,
+            du,
+            dv,
+            angle,
+            scale,
+        } => {
+            let n = object.faces().len();
+            let sub_face = object.faces().keys().nth(face_sel % n)?;
+            let face = &object.faces()[sub_face];
+            let boundary: Vec<Point3> = object.loop_positions(face.outer_loop).collect();
+            let inv = 1.0 / boundary.len() as f64;
+            let c = boundary.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
+            });
+            let normal = face.plane.normal();
+            let seed = if normal.x.abs() < 0.9 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            let u = (seed - normal * seed.dot(normal)).normalized().ok()?;
+            let v = normal.cross(u);
+            // An in-plane similarity about the loop's vertex centroid: turn,
+            // scale, then slide within the plane.
+            let to_origin = Transform::translation(c.to_vec() * -1.0);
+            let back = Transform::translation(c.to_vec() + u * *du + v * *dv);
+            let xf = to_origin
+                .then(&Transform::rotation(normal, *angle).ok()?)
+                .then(&Transform::uniform_scale(*scale))
+                .then(&back);
+            Some(KernelOp::TransformSubFace {
+                sub_face,
+                xf,
+                pinned: Vec::new(),
+            })
         }
         FuzzOp::Undo | FuzzOp::Redo => None,
     }

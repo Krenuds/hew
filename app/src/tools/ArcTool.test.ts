@@ -116,6 +116,37 @@ function makeWasmScene(opts: {
     split_face_inner_in_instance: vi.fn((_instance: bigint, _object: bigint, _face: bigint, loopPts: Float64Array) => {
       innerLoops.push(loopPts)
     }),
+    // Arc-carrying variants (editable-imprints): the face-mode commit path
+    // prefers these whenever the arc's center resolves, falling back to the
+    // plain calls above only when it can't (see `_commitFace`).
+    split_face_with_arc: vi.fn((
+      _object: bigint, _face: bigint, path: Float64Array,
+      _center: Float64Array, _radius: number, _arcSegments: number,
+    ) => {
+      if (opts.splitFaceThrows) throw new Error('BadLoop: invalid cut path')
+      splitPaths.push(path)
+      return { free: vi.fn() }
+    }),
+    split_face_inner_with_arc: vi.fn((
+      _object: bigint, _face: bigint, loopPts: Float64Array,
+      _center: Float64Array, _radius: number, _arcSegments: number,
+    ) => {
+      innerLoops.push(loopPts)
+    }),
+    split_face_with_arc_in_instance: vi.fn((
+      _instance: bigint, _object: bigint, _face: bigint, path: Float64Array,
+      _center: Float64Array, _radius: number, _arcSegments: number,
+    ) => {
+      if (opts.splitFaceThrows) throw new Error('BadLoop: invalid cut path')
+      splitPaths.push(path)
+      return { free: vi.fn() }
+    }),
+    split_face_inner_with_arc_in_instance: vi.fn((
+      _instance: bigint, _object: bigint, _face: bigint, loopPts: Float64Array,
+      _center: Float64Array, _radius: number, _arcSegments: number,
+    ) => {
+      innerLoops.push(loopPts)
+    }),
     begin_sketch_on_plane_in_instance: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -489,7 +520,7 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     expect(last).toContain('· Pie')
   })
 
-  it('face mode: pie imprints a closed loop via split_face_inner with the center appended', () => {
+  it('face mode: pie imprints a closed loop via split_face_inner_with_arc with the center appended', () => {
     const pick = makePick(7n, 3n)
     const { scene, splitPaths, innerLoops } = makeWasmScene({ pick, facePlane: [0, 0, 1, 0, 0, 1], faceNormal: [0, 0, 1] })
     const { tool, onFaceImprint } = makeTool(scene)
@@ -515,7 +546,7 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     expect(loop[(nPts - 1) * 3 + 1]).toBeGreaterThan(2)
   })
 
-  it('face mode: segment imprints the bare arc loop via split_face_inner (implicit chord close)', () => {
+  it('face mode: segment imprints the bare arc loop via split_face_inner_with_arc (implicit chord close)', () => {
     const pick = makePick(7n, 3n)
     const { scene, splitPaths, innerLoops } = makeWasmScene({ pick, facePlane: [0, 0, 1, 0, 0, 1], faceNormal: [0, 0, 1] })
     const { tool } = makeTool(scene)
@@ -674,7 +705,7 @@ describe('ArcTool — face mode', () => {
     return { ...made, ...t }
   }
 
-  it('three clicks commit one split_face whose path endpoints are exactly A and B', () => {
+  it('three clicks commit one split_face_with_arc whose path endpoints are exactly A and B', () => {
     const { tool, onFaceImprint, splitPaths, scene } = primeFaceTool()
 
     // All snaps on the z=1 face plane.
@@ -682,7 +713,8 @@ describe('ArcTool — face mode', () => {
     tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), RAY)   // B on the boundary
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)   // bulge into the face
 
-    expect((scene as unknown as { split_face: ReturnType<typeof vi.fn> }).split_face).toHaveBeenCalledTimes(1)
+    expect((scene as unknown as { split_face_with_arc: ReturnType<typeof vi.fn> }).split_face_with_arc).toHaveBeenCalledTimes(1)
+    expect((scene as unknown as { split_face: ReturnType<typeof vi.fn> }).split_face).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
 
     const path = splitPaths[0]
@@ -751,24 +783,26 @@ describe('ArcTool — instance editing context (component-edit-parity.md phase A
     return { ...made, ...t }
   }
 
-  it('an OPEN (boundary-to-boundary) face cut routes to split_face_in_instance, never the world split_face', () => {
+  it('an OPEN (boundary-to-boundary) face cut routes to split_face_with_arc_in_instance, never the world split_face_with_arc', () => {
     const { tool, onFaceImprint, splitPaths, scene } = primeInstanceFaceTool()
 
     tool.onPointerDown(makeSnap({ x: 0.5, y: 2, z: 1 }), RAY)
     tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), RAY)
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)
 
-    expect(scene.split_face_in_instance).toHaveBeenCalledTimes(1)
-    const [instance, object, face] = (scene.split_face_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.split_face_with_arc_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.split_face_with_arc_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(instance).toBe(INSTANCE)
     expect(object).toBe(7n)
     expect(face).toBe(3n)
+    expect(scene.split_face_with_arc).not.toHaveBeenCalled()
+    expect(scene.split_face_in_instance).not.toHaveBeenCalled()
     expect(scene.split_face).not.toHaveBeenCalled()
     expect(splitPaths.length).toBe(1)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
-  it('a CLOSED (pie) face cut routes to split_face_inner_in_instance, never the world split_face_inner', () => {
+  it('a CLOSED (pie) face cut routes to split_face_inner_with_arc_in_instance, never the world split_face_inner_with_arc', () => {
     const { tool, onFaceImprint, innerLoops, scene } = primeInstanceFaceTool()
 
     tool.onPointerDown(makeSnap({ x: 0.5, y: 2, z: 1 }), RAY)
@@ -777,11 +811,13 @@ describe('ArcTool — instance editing context (component-edit-parity.md phase A
     tool.onKey(makeKeyEvent('Alt')) // open → pie
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)
 
-    expect(scene.split_face_inner_in_instance).toHaveBeenCalledTimes(1)
-    const [instance, object, face] = (scene.split_face_inner_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.split_face_inner_with_arc_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.split_face_inner_with_arc_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(instance).toBe(INSTANCE)
     expect(object).toBe(7n)
     expect(face).toBe(3n)
+    expect(scene.split_face_inner_with_arc).not.toHaveBeenCalled()
+    expect(scene.split_face_inner_in_instance).not.toHaveBeenCalled()
     expect(scene.split_face_inner).not.toHaveBeenCalled()
     expect(innerLoops.length).toBe(1)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)

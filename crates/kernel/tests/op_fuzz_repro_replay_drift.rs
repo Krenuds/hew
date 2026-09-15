@@ -70,6 +70,7 @@ fn replay_cycles_do_not_accumulate_noise() {
                 face,
                 path: vec![point_on(a, 0.25), point_on(b, 0.745254278052551)],
                 restore: None,
+                curves: Vec::new(),
             };
             let _ = history.apply(&mut object, op);
         }
@@ -90,7 +91,7 @@ fn replay_cycles_do_not_accumulate_noise() {
                 face,
                 loop_path,
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         );
     }

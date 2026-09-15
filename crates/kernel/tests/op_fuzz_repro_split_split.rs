@@ -38,6 +38,7 @@ fn split_op(
         face,
         path: vec![point_on(edge_a % sides, ta), point_on(edge_b % sides, tb)],
         restore: None,
+        curves: Vec::new(),
     }
 }
 

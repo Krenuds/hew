@@ -32,6 +32,7 @@ import type { PrintPageModel } from '../print/PrintDocument'
 import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
+import { imprintName, readImprints } from '../tools/imprints'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
 import { arcFromChord, arcPolylineOnPlane } from '../tools/arcMath'
@@ -336,7 +337,18 @@ export interface HewTestHarness {
   getStateHash(): string
   getObjectCount(): number
   getObjectIds(): string[]
-  getSelection(): { kind: string; id: string }[]
+  getSelection(): { kind: string; id: string; sketch?: string; object?: string }[]
+  /** The imprints (drawn, unpushed shapes — imprints.ts) an object carries,
+   *  as the parsed `face_features` entries with handles as strings. */
+  getImprints(object: string): {
+    kind: 'sub_face' | 'chord'
+    id: string
+    loop: [number, number, number][]
+    name: string
+    /** Per-edge analytic circle (loop[k]→loop[k+1]/path[k]→path[k+1]),
+     *  or `null` per edge that is a plain line — see imprints.ts. */
+    curves: ({ center: [number, number, number]; radius: number } | null)[]
+  }[]
   getLastError(): string | null
   /**
    * The document's current movable drawing axes (tool-parity §4): the flat
@@ -758,8 +770,10 @@ export interface HewTestHarness {
    */
   getComponentMemberSketches(component: string): string[]
 
-  /** Replace the selection with arbitrary nodes (kind + handle string). */
-  selectNodes(nodes: { kind: string; id: string }[]): void
+  /** Replace the selection with arbitrary nodes (kind + handle string; an
+   *  imprint ref carries its owning `object`, a sketch sub-entity its
+   *  `sketch`). */
+  selectNodes(nodes: { kind: string; id: string; sketch?: string; object?: string }[]): void
   // -------- follow me --------
 
   /**
@@ -1461,7 +1475,22 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getObjectCount: () => query((s) => s.object_ids().length),
     getObjectIds: () => query((s) => Array.from(s.object_ids()).map(String)),
     getSelection: () =>
-      deps.getSelection().map((n) => ({ kind: n.kind, id: n.id.toString() })),
+      deps.getSelection().map((n) => ({
+        kind: n.kind,
+        id: n.id.toString(),
+        ...(n.sketch !== undefined ? { sketch: n.sketch.toString() } : {}),
+        ...(n.object !== undefined ? { object: n.object.toString() } : {}),
+      })),
+    getImprints: (object) =>
+      query((s) =>
+        readImprints(s, BigInt(object)).map((f) => ({
+          kind: f.kind,
+          id: (f.kind === 'sub_face' ? f.face : f.edge).toString(),
+          loop: f.kind === 'sub_face' ? f.loop : f.path,
+          name: imprintName(f),
+          curves: f.curves,
+        })),
+      ),
     getLastError: () => lastError,
     getDrawingAxes: () => query((s) => Array.from(s.axes())),
 
@@ -2036,7 +2065,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     selectNodes: (nodes) =>
       deps.setSelection(
-        nodes.map((n) => ({ kind: n.kind as NodeKind, id: BigInt(n.id) })),
+        nodes.map((n) => ({
+          kind: n.kind as NodeKind,
+          id: BigInt(n.id),
+          ...(n.sketch !== undefined ? { sketch: BigInt(n.sketch) } : {}),
+          ...(n.object !== undefined ? { object: BigInt(n.object) } : {}),
+        })),
       ),
 
     // -------- tags --------

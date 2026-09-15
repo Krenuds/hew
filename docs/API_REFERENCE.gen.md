@@ -4735,6 +4735,68 @@ Offset a region boundary within its sketch.
 
 ## hew.solid
 
+### `hew.solid.delete_imprint`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Delete an imprint (sub-face or chord), dissolving it back into its face.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "imprint": {
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "type": "object"
+    }
+  },
+  "required": [
+    "imprint"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
+- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
+- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
+- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
+- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
+- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
+- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
+- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
+- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
+- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_an_imprint`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+
 ### `hew.solid.extrude`
 
 - **Version:** 1
@@ -4910,6 +4972,102 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `ambiguous_locator`
 - `unimplemented`
 
+### `hew.solid.imprints`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+
+List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "imprints": {
+      "items": {
+        "properties": {
+          "at": {
+            "description": "sub_face: an interior point clear of any nested imprint; chord: the midpoint of the run's first segment — the locator to pass to move_imprint/rotate_imprint/scale_imprint/delete_imprint",
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "curve": {
+            "description": "sub_face only: {center, radius} when the whole loop is one drawn circle, else null"
+          },
+          "curves": {
+            "description": "per edge of the loop (sub_face) or run (chord), in order: {center, radius} when that edge is a facet of a drawn circle or arc, else null — a pie, segment, or edge-to-edge arc reports its arc here",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "sub_face",
+              "chord"
+            ],
+            "type": "string"
+          },
+          "loop": {
+            "description": "sub_face only: the outer loop's positions, cycle order",
+            "items": {
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "nested": {
+            "description": "sub_face only: count of directly nested imprints",
+            "type": "integer"
+          },
+          "path": {
+            "description": "chord only: the run's vertex positions, first to last",
+            "items": {
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "at"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "imprints"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+
 ### `hew.solid.intersect`
 
 - **Version:** 1
@@ -4968,6 +5126,77 @@ Boolean intersection of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+
+### `hew.solid.move_imprint`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Slide an imprint (sub-face or chord) on its face by a translation.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "imprint": {
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "type": "object"
+    },
+    "offset": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "imprint",
+    "offset"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
+- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
+- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
+- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
+- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
+- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
+- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
+- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
+- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
+- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_an_imprint`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
 
 ### `hew.solid.push_pull`
 
@@ -5039,6 +5268,177 @@ Push/pull a face of a solid with the tool's full semantics.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+
+### `hew.solid.rotate_imprint`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Turn an imprint on its face about the face normal through a pivot point.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "about": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        {
+          "description": "a derived-point locator (HEW_API.md §5.3)",
+          "type": "object"
+        }
+      ]
+    },
+    "angle": {
+      "description": "radians",
+      "type": "number"
+    },
+    "imprint": {
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "type": "object"
+    }
+  },
+  "required": [
+    "imprint",
+    "angle",
+    "about"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
+- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
+- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
+- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
+- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
+- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
+- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
+- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
+- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
+- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_an_imprint`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+- `no_such_point`
+
+### `hew.solid.scale_imprint`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Uniformly scale an imprint on its face about an anchor point.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "about": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        {
+          "description": "a derived-point locator (HEW_API.md §5.3)",
+          "type": "object"
+        }
+      ]
+    },
+    "factor": {
+      "description": "uniform scale factor",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "imprint": {
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "type": "object"
+    }
+  },
+  "required": [
+    "imprint",
+    "factor",
+    "about"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
+- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
+- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
+- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
+- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
+- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
+- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
+- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
+- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
+- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_an_imprint`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+- `no_such_point`
 
 ### `hew.solid.slice`
 

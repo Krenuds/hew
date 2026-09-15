@@ -1164,7 +1164,8 @@ export default function App() {
     if (api.hasArmedGesture()) return
     if (
       target.kind === 'sketch' || target.kind === 'sketch-island' ||
-      target.kind === 'sketch-curve' || target.kind === 'sketch-edge'
+      target.kind === 'sketch-curve' || target.kind === 'sketch-edge' ||
+      target.kind === 'imprint' || target.kind === 'imprint-chord'
     ) {
       // No kernel NodeId / container chain — select-only, same as today.
       setSelectedIds([target])
@@ -1709,7 +1710,9 @@ export default function App() {
       n.kind === 'sketch' ||
       n.kind === 'sketch-island' ||
       n.kind === 'sketch-curve' ||
-      n.kind === 'sketch-edge'
+      n.kind === 'sketch-edge' ||
+      n.kind === 'imprint' ||
+      n.kind === 'imprint-chord'
     const parentOf = (n: NodeRef) => {
       if (isSketchKind(n)) return undefined
       const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0

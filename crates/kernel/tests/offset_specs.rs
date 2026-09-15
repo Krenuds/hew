@@ -498,7 +498,7 @@ fn box_top_offset_imprints_and_undoes_exactly() {
                 face: top,
                 loop_path: lp.points.clone(),
                 restore: None,
-                curve: None,
+                curves: Vec::new(),
             },
         )
         .expect("imprint succeeds");

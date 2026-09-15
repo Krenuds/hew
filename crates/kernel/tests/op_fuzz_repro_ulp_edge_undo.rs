@@ -48,6 +48,7 @@ fn split_op(
         face,
         path: vec![point_on(a, ta), point_on(b, tb)],
         restore: None,
+        curves: Vec::new(),
     })
 }
 

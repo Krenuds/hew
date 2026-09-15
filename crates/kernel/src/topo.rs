@@ -552,6 +552,130 @@ impl Object {
             })
             .collect()
     }
+
+    /// The rim circles of this object's imprinted circle edges: a circle
+    /// drawn on a face carries its analytic identity on every loop edge
+    /// ([`Edge::curve`]), and this reports it in the same [`AnalyticRim`]
+    /// shape [`Object::analytic_rims`] uses for cylinder walls, so inference
+    /// offers a drawn circle's center, quadrants, and tangents exactly as it
+    /// does for a circle sketched on the ground. One rim per distinct claimed
+    /// circle — same center and radius within [`crate::tol::POINT_MERGE`] AND
+    /// the same plane orientation (claiming faces' normals parallel within
+    /// [`crate::tol::NORMAL_DIRECTION`], either sign), mirroring the axis
+    /// check [`SurfaceRef::same_surface`] gives wall rims — with coverage from
+    /// every claiming edge's angular span. A circle a cylinder wall already
+    /// reports (same center, radius, and axis: a boss, a tunnel, an extruded
+    /// cap) is omitted so no candidate appears twice. Deterministic:
+    /// slot-order visit, first-appearance grouping.
+    pub fn edge_curve_rims(&self) -> Vec<AnalyticRim> {
+        self.edge_curve_rims_with(&self.analytic_rims())
+    }
+
+    /// [`Object::edge_curve_rims`] against wall rims the caller already
+    /// computed with [`Object::analytic_rims`] — inference registers both
+    /// kinds, so it passes its own wall rims rather than scanning the
+    /// object's faces twice.
+    pub fn edge_curve_rims_with(&self, walls: &[AnalyticRim]) -> Vec<AnalyticRim> {
+        struct Group {
+            geom: crate::sketch::CurveGeom,
+            axis: Vec3,
+            rep: FaceId,
+            u: Vec3,
+            v: Vec3,
+            intervals: Vec<[f64; 2]>,
+        }
+        let same_circle = |ca: Point3, ra: f64, cb: Point3, rb: f64| {
+            ca.approx_eq(cb, crate::tol::POINT_MERGE) && (ra - rb).abs() <= crate::tol::POINT_MERGE
+        };
+        let parallel = |a: Vec3, b: Vec3| {
+            (a - b).length() < crate::tol::NORMAL_DIRECTION
+                || (a + b).length() < crate::tol::NORMAL_DIRECTION
+        };
+        let mut groups: Vec<Group> = Vec::new();
+        for (_, edge) in &self.edges {
+            let Some(geom) = edge.curve else {
+                continue;
+            };
+            let he = &self.half_edges[edge.half_edge];
+            // The circle's plane is the adjacent face that CONTAINS its
+            // center: both sides of an imprinted circle, the cap (never the
+            // chord-facet wall) of an extruded cylinder's rim. Which side an
+            // edge's `half_edge` sits on is arbitrary, so it cannot decide.
+            // An edge with no such face names no usable plane and is skipped.
+            let gate = self.planarity_tol.max(crate::tol::POINT_MERGE);
+            let sides = std::iter::once(edge.half_edge).chain(edge.twin_half_edge);
+            let Some(face) = sides
+                .map(|h| self.loops[self.half_edges[h].loop_id].face)
+                .find(|&f| self.faces[f].plane.signed_distance(geom.center).abs() <= gate)
+            else {
+                continue;
+            };
+            let face_normal = self.faces[face].plane.normal();
+            let found = groups.iter().position(|g| {
+                same_circle(g.geom.center, g.geom.radius, geom.center, geom.radius)
+                    && parallel(g.axis, face_normal)
+            });
+            let index = match found {
+                Some(i) => i,
+                None => {
+                    let (u, v) = crate::geom2d::plane_axes(face_normal);
+                    groups.push(Group {
+                        geom,
+                        axis: face_normal,
+                        rep: face,
+                        u,
+                        v,
+                        intervals: Vec::new(),
+                    });
+                    groups.len() - 1
+                }
+            };
+            let (center, axis, u, v) = {
+                let g = &groups[index];
+                (g.geom.center, g.axis, g.u, g.v)
+            };
+            let angle = |p: Point3| -> Option<f64> {
+                let d = p - center;
+                let radial = d - axis * d.dot(axis);
+                (radial.length() > crate::tol::NORMALIZE_MIN_LENGTH)
+                    .then(|| radial.dot(v).atan2(radial.dot(u)))
+            };
+            let a = self.vertices[he.origin].position;
+            let b = self.vertices[self.half_edges[he.next].origin].position;
+            if let (Some(ta), Some(tb)) = (angle(a), angle(b)) {
+                // A chord facet subtends less than a half turn: span the short
+                // way between its endpoint angles (as `analytic_rims` does).
+                let mut offset = tb - ta;
+                while offset > std::f64::consts::PI {
+                    offset -= 2.0 * std::f64::consts::PI;
+                }
+                while offset <= -std::f64::consts::PI {
+                    offset += 2.0 * std::f64::consts::PI;
+                }
+                groups[index]
+                    .intervals
+                    .push([ta.min(ta + offset), ta.max(ta + offset)]);
+            }
+        }
+        groups
+            .into_iter()
+            .filter(|g| {
+                !walls.iter().any(|w| {
+                    same_circle(w.center, w.radius, g.geom.center, g.geom.radius)
+                        && parallel(w.axis, g.axis)
+                })
+            })
+            .map(|g| AnalyticRim {
+                center: g.geom.center,
+                axis: g.axis,
+                radius: g.geom.radius,
+                rep: g.rep,
+                basis_u: g.u,
+                basis_v: g.v,
+                coverage: merge_angular_intervals(&g.intervals, g.geom.radius),
+            })
+            .collect()
+    }
 }
 
 /// One rim circle of a claimed cylinder — see [`Object::analytic_rims`].
@@ -688,5 +812,173 @@ pub(crate) fn merge_angular_intervals(
         None
     } else {
         Some(merged)
+    }
+}
+
+#[cfg(test)]
+mod edge_curve_rim_tests {
+    use super::*;
+    use crate::math::Point3;
+    use crate::sketch::CurveGeom;
+
+    fn unit_cube() -> Object {
+        let v = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        Object::from_polygons(
+            &[
+                v(0.0, 0.0, 0.0),
+                v(1.0, 0.0, 0.0),
+                v(1.0, 1.0, 0.0),
+                v(0.0, 1.0, 0.0),
+                v(0.0, 0.0, 1.0),
+                v(1.0, 0.0, 1.0),
+                v(1.0, 1.0, 1.0),
+                v(0.0, 1.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Map-or-drop's map half maps only what a rigid translate carried whole.
+    /// A claim on the cube's top-front edge (a chord of the circle centered at
+    /// its midpoint) maps when both endpoints moved by the sweep. It never maps
+    /// when only one endpoint is in the moved set, or when both moved by a
+    /// different amount; those are left to the drop, which removes them, so no
+    /// stale claim survives either way.
+    #[test]
+    fn translated_edge_claims_map_only_when_carried_whole() {
+        let sweep = Vec3::new(0.0, 0.0, 0.25);
+        let setup = || {
+            let mut obj = unit_cube();
+            let vertex_at = |obj: &Object, p: Point3| {
+                obj.vertices
+                    .iter()
+                    .find(|(_, v)| v.position.approx_eq(p, 1e-12))
+                    .map(|(id, _)| id)
+                    .unwrap()
+            };
+            let va = vertex_at(&obj, Point3::new(0.0, 0.0, 1.0));
+            let vb = vertex_at(&obj, Point3::new(1.0, 0.0, 1.0));
+            let e = obj
+                .edges
+                .keys()
+                .find(|&e| {
+                    let (p, q) = obj.edge_endpoints(e).unwrap();
+                    let (a, b) = (Point3::new(0.0, 0.0, 1.0), Point3::new(1.0, 0.0, 1.0));
+                    (p.approx_eq(a, 1e-12) && q.approx_eq(b, 1e-12))
+                        || (p.approx_eq(b, 1e-12) && q.approx_eq(a, 1e-12))
+                })
+                .unwrap();
+            obj.edges[e].curve = Some(CurveGeom {
+                center: Point3::new(0.5, 0.0, 1.0),
+                radius: 0.5,
+            });
+            (obj, va, vb, e)
+        };
+
+        let original = Point3::new(0.5, 0.0, 1.0);
+
+        // Carried whole: both endpoints moved by the sweep, so the claim maps.
+        let (mut obj, va, vb, e) = setup();
+        let before = obj.clone();
+        for v in [va, vb] {
+            obj.vertices[v].position = obj.vertices[v].position + sweep;
+        }
+        obj.map_translated_edge_curves(&before, &[va, vb].into_iter().collect(), sweep);
+        obj.drop_stale_edge_curves();
+        let g = obj.edges[e].curve.expect("a whole-translated chord maps");
+        assert!(g.center.approx_eq(Point3::new(0.5, 0.0, 1.25), 1e-12));
+        assert_eq!(g.radius, 0.5);
+
+        // One endpoint moved: not carried whole, never mapped, then dropped.
+        let (mut obj, va, _vb, e) = setup();
+        let before = obj.clone();
+        obj.vertices[va].position = obj.vertices[va].position + sweep;
+        obj.map_translated_edge_curves(&before, &[va].into_iter().collect(), sweep);
+        assert!(
+            obj.edges[e]
+                .curve
+                .is_some_and(|g| g.center.approx_eq(original, 1e-12)),
+            "a half-moved chord is not mapped"
+        );
+        obj.drop_stale_edge_curves();
+        assert!(obj.edges[e].curve.is_none(), "and its stale claim drops");
+
+        // Both moved, but not by the sweep: never mapped, then dropped.
+        let (mut obj, va, vb, e) = setup();
+        let before = obj.clone();
+        for v in [va, vb] {
+            obj.vertices[v].position = obj.vertices[v].position + sweep * 2.0;
+        }
+        obj.map_translated_edge_curves(&before, &[va, vb].into_iter().collect(), sweep);
+        obj.drop_stale_edge_curves();
+        assert!(obj.edges[e].curve.is_none(), "an off-sweep move drops");
+
+        // Both endpoints in the moved set but left in place (a wall's bottom
+        // edge keeps the moved face's original ids): never mapped, and the
+        // still-valid claim stays exactly where it was.
+        let (mut obj, va, vb, e) = setup();
+        let before = obj.clone();
+        obj.map_translated_edge_curves(&before, &[va, vb].into_iter().collect(), sweep);
+        obj.drop_stale_edge_curves();
+        assert!(
+            obj.edges[e]
+                .curve
+                .is_some_and(|g| g.center.approx_eq(original, 1e-12)),
+            "a stationary edge keeps its original claim"
+        );
+    }
+
+    /// Two circle claims with the same center and radius whose planes face
+    /// different ways are two different circles: they must stay two rims,
+    /// each in its own plane, never one rim with a mixed coverage. The claims
+    /// are stamped crate-internally on single cube edges: center (1, 0.5, 1)
+    /// lies on the top face's plane and on the +X side face's plane, the
+    /// top-front edge's only containing face is the top, and the side-front
+    /// edge's only containing face is the side. (No valid solid puts two
+    /// drawn circles on one point, which is why grouping must not rely on
+    /// that.)
+    #[test]
+    fn same_center_and_radius_on_non_parallel_faces_stay_two_rims() {
+        let mut obj = unit_cube();
+        let g = CurveGeom {
+            center: Point3::new(1.0, 0.5, 1.0),
+            radius: 0.5,
+        };
+        let edge_between = |obj: &Object, a: Point3, b: Point3| -> EdgeId {
+            obj.edges
+                .keys()
+                .find(|&e| {
+                    let (p, q) = obj.edge_endpoints(e).unwrap();
+                    (p.approx_eq(a, 1e-12) && q.approx_eq(b, 1e-12))
+                        || (p.approx_eq(b, 1e-12) && q.approx_eq(a, 1e-12))
+                })
+                .unwrap()
+        };
+        let top_front = edge_between(&obj, Point3::new(0.0, 0.0, 1.0), Point3::new(1.0, 0.0, 1.0));
+        let side_front = edge_between(&obj, Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 1.0));
+        obj.edges[top_front].curve = Some(g);
+        obj.edges[side_front].curve = Some(g);
+        let rims = obj.edge_curve_rims();
+        assert_eq!(rims.len(), 2, "one rim per plane orientation: {rims:?}");
+        let along =
+            |r: &AnalyticRim, n: Vec3| r.axis.cross(n).length() < crate::tol::NORMAL_DIRECTION;
+        assert!(
+            rims.iter().any(|r| along(r, Vec3::new(0.0, 0.0, 1.0))),
+            "the top's circle"
+        );
+        assert!(
+            rims.iter().any(|r| along(r, Vec3::new(1.0, 0.0, 0.0))),
+            "the side's circle"
+        );
+        // The walls-supplied form agrees with the self-computed one.
+        assert_eq!(obj.edge_curve_rims_with(&obj.analytic_rims()), rims);
     }
 }

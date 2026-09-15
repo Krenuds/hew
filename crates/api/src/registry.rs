@@ -407,6 +407,44 @@ impl Registry {
             Std,
             "Sweep a profile along an edge-chain path, as the tool does.",
         );
+        // hew.solid — editable imprints: drawn-but-not-yet-pushed shapes,
+        // recovered structurally and listable/movable/deletable before
+        // they're ever pushed/pulled.
+        add(
+            "hew.solid.imprints",
+            R,
+            Kernel,
+            Std,
+            "List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).",
+        );
+        add(
+            "hew.solid.move_imprint",
+            M,
+            Kernel,
+            Std,
+            "Slide an imprint (sub-face or chord) on its face by a translation.",
+        );
+        add(
+            "hew.solid.rotate_imprint",
+            M,
+            Kernel,
+            Std,
+            "Turn an imprint on its face about the face normal through a pivot point.",
+        );
+        add(
+            "hew.solid.scale_imprint",
+            M,
+            Kernel,
+            Std,
+            "Uniformly scale an imprint on its face about an anchor point.",
+        );
+        add(
+            "hew.solid.delete_imprint",
+            M,
+            Kernel,
+            Std,
+            "Delete an imprint (sub-face or chord), dissolving it back into its face.",
+        );
         // hew.entity — transforms and lifecycle.
         add("hew.entity.rename", M, Kernel, Req, "Rename an entity.");
         add("hew.entity.delete", M, Kernel, Req, "Delete an entity.");
@@ -3257,6 +3295,151 @@ impl Registry {
                 "ambiguous_locator",
                 "unimplemented",
             ];
+
+            // hew.solid.imprints / move_imprint / rotate_imprint /
+            // scale_imprint / delete_imprint — editable imprints (§7's
+            // `hew.solid` semantics notes; `commands/solid.rs`'s module
+            // doc comment for the imprint-locator resolution these all
+            // share).
+            let imprint_locator_schema = serde_json::json!({
+                "type": "object",
+                "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines"
+            });
+            let point_or_derived_schema = serde_json::json!({
+                "oneOf": [
+                    { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    { "type": "object", "description": "a derived-point locator (HEW_API.md §5.3)" }
+                ]
+            });
+            let imprint_refusals = || {
+                vec![
+                    "not_in_plane",
+                    "nested_not_flat",
+                    "not_an_inner_face",
+                    "loop_self_intersects",
+                    "loop_not_strictly_inside",
+                    "point_not_on_face",
+                    "not_a_chord",
+                    "endpoint_not_on_boundary",
+                    "path_not_simple",
+                    "would_corrupt",
+                    "not_an_imprint",
+                    "unknown_object",
+                    "unknown_entity",
+                    "locator_missed",
+                    "ambiguous_locator",
+                    "face_token_unknown",
+                    "face_token_stale",
+                ]
+            };
+
+            let cmd = commands
+                .get_mut("hew.solid.imprints")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object": { "type": "string" } },
+                "required": ["object"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "imprints": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["sub_face", "chord"] },
+                                "at": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "sub_face: an interior point clear of any nested imprint; chord: the midpoint of the run's first segment — the locator to pass to move_imprint/rotate_imprint/scale_imprint/delete_imprint" },
+                                "loop": { "type": "array", "items": { "type": "array" }, "description": "sub_face only: the outer loop's positions, cycle order" },
+                                "curve": { "description": "sub_face only: {center, radius} when the whole loop is one drawn circle, else null" },
+                                "curves": { "type": "array", "description": "per edge of the loop (sub_face) or run (chord), in order: {center, radius} when that edge is a facet of a drawn circle or arc, else null — a pie, segment, or edge-to-edge arc reports its arc here" },
+                                "nested": { "type": "integer", "description": "sub_face only: count of directly nested imprints" },
+                                "path": { "type": "array", "items": { "type": "array" }, "description": "chord only: the run's vertex positions, first to last" }
+                            },
+                            "required": ["kind", "at"]
+                        }
+                    }
+                },
+                "required": ["imprints"]
+            });
+            cmd.refusals = vec!["unknown_object", "unknown_entity"];
+
+            let cmd = commands
+                .get_mut("hew.solid.move_imprint")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "imprint": imprint_locator_schema.clone(),
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "required": ["imprint", "offset"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = imprint_refusals();
+
+            let cmd = commands
+                .get_mut("hew.solid.rotate_imprint")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "imprint": imprint_locator_schema.clone(),
+                    "angle": { "type": "number", "description": "radians" },
+                    "about": point_or_derived_schema.clone()
+                },
+                "required": ["imprint", "angle", "about"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = [imprint_refusals(), vec!["no_such_point"]].concat();
+
+            let cmd = commands
+                .get_mut("hew.solid.scale_imprint")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "imprint": imprint_locator_schema.clone(),
+                    "factor": { "type": "number", "exclusiveMinimum": 0, "description": "uniform scale factor" },
+                    "about": point_or_derived_schema.clone()
+                },
+                "required": ["imprint", "factor", "about"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = [imprint_refusals(), vec!["no_such_point"]].concat();
+
+            let cmd = commands
+                .get_mut("hew.solid.delete_imprint")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "imprint": imprint_locator_schema },
+                "required": ["imprint"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = imprint_refusals();
         }
 
         // The solitary commands that nevertheless change the document

@@ -231,6 +231,14 @@ fn stale(code: &str, what: &str) -> ApiError {
 /// the *innermost* error for CODE so callers see e.g. `DistanceTooSmall` or
 /// `UnknownRegion` rather than an opaque wrapper name. The message is the
 /// `DocumentError`'s own `Display`, which delegates to the inner error.
+/// A 12-float row-major 3x4 affine from the JS side, or the boundary's
+/// `BadAffine` request-shape error.
+fn parse_affine(affine: &[f64]) -> Result<[f64; 12], ApiError> {
+    affine
+        .try_into()
+        .map_err(|_| ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string()))
+}
+
 fn doc_err(e: DocumentError) -> ApiError {
     match &e {
         DocumentError::Sketch(inner) => api_err(inner, &e),
@@ -411,6 +419,44 @@ fn object_id(handle: u64) -> ObjectId {
 
 fn group_id(handle: u64) -> GroupId {
     GroupId::from(KeyData::from_ffi(handle))
+}
+
+/// A drawn circle from the wasm boundary: `center` is an xyz triple.
+fn parse_curve(center: &[f64], radius: f64) -> Result<kernel::CurveGeom, ApiError> {
+    if center.len() != 3 {
+        return Err(ApiError(
+            "BadCurve: center must be an xyz triple".to_string(),
+        ));
+    }
+    Ok(kernel::CurveGeom {
+        center: Point3::new(center[0], center[1], center[2]),
+        radius,
+    })
+}
+
+/// The per-edge claims a face cut or loop imprint takes for a drawn circle
+/// or arc: `edges` edges in path/loop order, the first `arc_segments` of them
+/// (every edge when `None`) chord facets of `curve`. No curve claims nothing.
+fn arc_claims(
+    curve: Option<kernel::CurveGeom>,
+    edges: usize,
+    arc_segments: Option<usize>,
+) -> Vec<Option<kernel::CurveGeom>> {
+    match curve {
+        None => Vec::new(),
+        Some(g) => {
+            let k = arc_segments.unwrap_or(edges).min(edges);
+            (0..edges).map(|i| (i < k).then_some(g)).collect()
+        }
+    }
+}
+
+/// Per-edge claims as JSON: `[cx, cy, cz, r]` or `null` per edge.
+fn claims_json(curves: &[Option<kernel::CurveGeom>]) -> Vec<Option<[f64; 4]>> {
+    curves
+        .iter()
+        .map(|c| c.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]))
+        .collect()
 }
 
 fn instance_id(handle: u64) -> InstanceId {
@@ -5427,6 +5473,50 @@ impl Scene {
         face: u64,
         path: &[f64],
     ) -> Result<FaceSplitJs, ApiError> {
+        self.split_face_in_instance_impl(instance, object, face, path, None, None)
+    }
+
+    /// [`Scene::split_face_in_instance`] carrying a drawn arc's analytic
+    /// identity, mirroring [`Scene::split_face_with_arc`] for a definition
+    /// member. `center`/`radius` are WORLD-space like `path`, mapped into the
+    /// definition-local frame the same way
+    /// [`Scene::split_face_inner_with_curve_in_instance`] maps its circle.
+    ///
+    /// # Errors
+    /// Same family as `split_face_in_instance`, plus `AmbiguousInstanceScale`
+    /// for a non-uniformly scaled pose (a world radius has no single local
+    /// equivalent there).
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_face_with_arc_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        path: &[f64],
+        center: &[f64],
+        radius: f64,
+        arc_segments: usize,
+    ) -> Result<FaceSplitJs, ApiError> {
+        let curve = parse_curve(center, radius)?;
+        self.split_face_in_instance_impl(
+            instance,
+            object,
+            face,
+            path,
+            Some(curve),
+            Some(arc_segments),
+        )
+    }
+
+    fn split_face_in_instance_impl(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        path: &[f64],
+        curve: Option<kernel::CurveGeom>,
+        arc_segments: Option<usize>,
+    ) -> Result<FaceSplitJs, ApiError> {
         if !path.len().is_multiple_of(3) || path.len() < 6 {
             return Err(ApiError(
                 "BadPath: path must be at least two xyz triples".to_string(),
@@ -5446,10 +5536,25 @@ impl Scene {
             .chunks_exact(3)
             .map(|c| pose_inv.apply_point(Point3::new(c[0], c[1], c[2])))
             .collect();
+        // The circle maps into the same local frame as the points (see
+        // `split_face_inner_in_instance_impl` for the uniform-scale rule).
+        let mapped_curve = curve
+            .map(|c| -> Result<kernel::CurveGeom, ApiError> {
+                let scale = pose
+                    .similarity_scale()
+                    .ok_or_else(|| doc_err(DocumentError::AmbiguousInstanceScale))?;
+                Ok(kernel::CurveGeom {
+                    center: pose_inv.apply_point(c.center),
+                    radius: c.radius / scale,
+                })
+            })
+            .transpose()?;
+        let curves = arc_claims(mapped_curve, local_points.len() - 1, arc_segments);
         let op = KernelOp::SplitFace {
             face: FaceId::from(KeyData::from_ffi(face)),
             path: local_points,
             restore: None,
+            curves,
         };
         let (report, change) = self
             .doc
@@ -5463,6 +5568,8 @@ impl Scene {
                     object,
                     face,
                     path: path.to_vec(),
+                    curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+                    curve_segments: arc_segments,
                 });
                 Ok(FaceSplitJs { inner })
             }
@@ -5495,7 +5602,7 @@ impl Scene {
         face: u64,
         loop_pts: &[f64],
     ) -> Result<u64, ApiError> {
-        self.split_face_inner_in_instance_impl(instance, object, face, loop_pts, None)
+        self.split_face_inner_in_instance_impl(instance, object, face, loop_pts, None, None)
     }
 
     /// [`Scene::split_face_inner_in_instance`] carrying a drawn circle's
@@ -5531,7 +5638,33 @@ impl Scene {
             center: Point3::new(center[0], center[1], center[2]),
             radius,
         };
-        self.split_face_inner_in_instance_impl(instance, object, face, loop_pts, Some(curve))
+        self.split_face_inner_in_instance_impl(instance, object, face, loop_pts, Some(curve), None)
+    }
+
+    /// [`Scene::split_face_inner_with_arc`] for a definition member: the
+    /// first `arc_segments` loop edges are chord facets of the WORLD-space
+    /// circle (`center`, `radius`), mapped into the definition-local frame
+    /// like [`Scene::split_face_inner_with_curve_in_instance`]'s.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_face_inner_with_arc_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        center: &[f64],
+        radius: f64,
+        arc_segments: usize,
+    ) -> Result<u64, ApiError> {
+        let curve = parse_curve(center, radius)?;
+        self.split_face_inner_in_instance_impl(
+            instance,
+            object,
+            face,
+            loop_pts,
+            Some(curve),
+            Some(arc_segments),
+        )
     }
 
     fn split_face_inner_in_instance_impl(
@@ -5541,6 +5674,7 @@ impl Scene {
         face: u64,
         loop_pts: &[f64],
         curve: Option<kernel::CurveGeom>,
+        arc_segments: Option<usize>,
     ) -> Result<u64, ApiError> {
         if !loop_pts.len().is_multiple_of(3) || loop_pts.len() < 9 {
             return Err(ApiError(
@@ -5586,14 +5720,15 @@ impl Scene {
             .transpose()?;
         // Same routing as the world path (`split_face_inner_impl`), through
         // the def-scoped apply so every instance sees the edit.
+        let curves = arc_claims(mapped_curve, local_points.len(), arc_segments);
         let (report, change) = self
             .doc
-            .imprint_loop_on_face(
+            .imprint_loop_on_face_with_curves(
                 Some(component),
                 object_id(object),
                 FaceId::from(KeyData::from_ffi(face)),
                 local_points,
-                mapped_curve,
+                curves,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
@@ -5603,6 +5738,7 @@ impl Scene {
             face,
             loop_pts: loop_pts.to_vec(),
             curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+            curve_segments: arc_segments,
         });
         Ok(report.region.data().as_ffi())
     }
@@ -6170,6 +6306,349 @@ impl Scene {
         }
     }
 
+    // ------------------------------------------------------ editable imprints
+
+    /// The drawn-but-unpushed shapes an object carries — its imprints
+    /// (docs/design/editable-face-sketches.md; `kernel::FaceFeature`) — as
+    /// a JSON array, derived from topology on every call. Each entry is
+    /// either a sub-face imprint
+    /// `{"kind":"sub_face","face":H,"parent":H,"loop":[x,y,z,…],
+    ///   "curve":[cx,cy,cz,r]|null,"nested":[H,…],"holes":[[x,y,z,…],…]}`
+    /// or a chord run
+    /// `{"kind":"chord","edge":H,"faces":[H,H],"path":[x,y,z,…]}`,
+    /// handles as the u64 FFI form (JSON numbers are exact below 2^53; the
+    /// slotmap FFI encoding of a live handle stays far below that). A
+    /// definition member answers in DEFINITION-local coordinates; map them
+    /// through the instance's pose for display. Pure.
+    pub fn face_features(&self, object: u64) -> Result<String, ApiError> {
+        let features = self
+            .doc
+            .face_features(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let flat =
+            |pts: &[Point3]| -> Vec<f64> { pts.iter().flat_map(|p| [p.x, p.y, p.z]).collect() };
+        let out: Vec<serde_json::Value> = features
+            .iter()
+            .map(|f| match f {
+                kernel::FaceFeature::SubFace {
+                    face,
+                    parent,
+                    loop_path,
+                    curve,
+                    curves,
+                    nested,
+                    holes,
+                } => serde_json::json!({
+                    "kind": "sub_face",
+                    "face": face.data().as_ffi(),
+                    "parent": parent.data().as_ffi(),
+                    "loop": flat(loop_path),
+                    "curve": curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+                    "curves": claims_json(curves),
+                    "nested": nested.iter().map(|n| n.data().as_ffi()).collect::<Vec<_>>(),
+                    "holes": holes.iter().map(|r| flat(r)).collect::<Vec<_>>(),
+                }),
+                kernel::FaceFeature::Chord {
+                    edge,
+                    faces,
+                    path,
+                    curves,
+                } => serde_json::json!({
+                    "kind": "chord",
+                    "edge": edge.data().as_ffi(),
+                    "faces": [faces[0].data().as_ffi(), faces[1].data().as_ffi()],
+                    "path": flat(path),
+                    "curves": claims_json(curves),
+                }),
+            })
+            .collect();
+        Ok(serde_json::Value::Array(out).to_string())
+    }
+
+    /// Slide, turn, or scale an imprint sub-face on its face in place
+    /// (`Document::transform_imprint`): `affine` is the WORLD gesture affine
+    /// (12 floats, row-major 3x4), which must be an in-plane similarity of
+    /// the face (`NotInPlane` otherwise); the sub-face keeps its handle.
+    /// One undo step.
+    pub fn transform_imprint(
+        &mut self,
+        object: u64,
+        face: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows = parse_affine(affine)?;
+        let t = Transform::from_affine(&rows);
+        let (_, change) = self
+            .doc
+            .transform_imprint(
+                None,
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                t,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformImprint {
+            object,
+            face,
+            affine: rows,
+        });
+        Ok(())
+    }
+
+    /// [`Scene::transform_imprint`] for a definition member edited through
+    /// `instance`: the WORLD `affine` is conjugated through the instance's
+    /// pose (`pose · A · pose⁻¹`, never ambiguous under any invertible
+    /// pose) so the kernel sees a definition-local in-plane similarity, and
+    /// every placement of the definition shows the moved imprint.
+    pub fn transform_imprint_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows = parse_affine(affine)?;
+        let (component, local) = self.def_local_affine(instance, &rows)?;
+        let (_, change) = self
+            .doc
+            .transform_imprint(
+                Some(component),
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                local,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformImprintInInstance {
+            instance,
+            object,
+            face,
+            affine: rows,
+        });
+        Ok(())
+    }
+
+    /// Move a chord run (a shape drawn up to a face's edge) by the WORLD
+    /// `affine` (`Document::transform_chord`): dissolved and re-cut along the
+    /// moved path as one undo step. Returns the re-cut run's first edge
+    /// handle — the old one is dead — keyed the way `face_features` reports
+    /// it. Refuses typed (`EndpointNotOnBoundary`, `PathNotSimple`) when the
+    /// moved path would leave the face's boundary.
+    pub fn transform_chord(
+        &mut self,
+        object: u64,
+        edge: u64,
+        affine: &[f64],
+    ) -> Result<u64, ApiError> {
+        let rows = parse_affine(affine)?;
+        let t = Transform::from_affine(&rows);
+        let (report, change) = self
+            .doc
+            .transform_chord(
+                None,
+                object_id(object),
+                EdgeId::from(KeyData::from_ffi(edge)),
+                t,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformChord {
+            object,
+            edge,
+            affine: rows,
+        });
+        Ok(report.edge.data().as_ffi())
+    }
+
+    /// [`Scene::transform_chord`] for a definition member edited through
+    /// `instance` (affine conjugated as in `transform_imprint_in_instance`).
+    pub fn transform_chord_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        edge: u64,
+        affine: &[f64],
+    ) -> Result<u64, ApiError> {
+        let rows = parse_affine(affine)?;
+        let (component, local) = self.def_local_affine(instance, &rows)?;
+        let (report, change) = self
+            .doc
+            .transform_chord(
+                Some(component),
+                object_id(object),
+                EdgeId::from(KeyData::from_ffi(edge)),
+                local,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformChordInInstance {
+            instance,
+            object,
+            edge,
+            affine: rows,
+        });
+        Ok(report.edge.data().as_ffi())
+    }
+
+    /// Whether [`Scene::transform_imprint`] would accept `affine` for this
+    /// sub-face — the move run on a scratch copy of the object, so a
+    /// multi-imprint gesture can refuse whole before any of them commits.
+    /// Throws the SAME typed error the real move would (`NotInPlane`,
+    /// `LoopNotStrictlyInside`, …), so the toast names the real reason.
+    /// Nothing is recorded or mutated. Pure.
+    pub fn check_transform_imprint(
+        &self,
+        object: u64,
+        face: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows = parse_affine(affine)?;
+        let obj = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let mut scratch = obj.clone();
+        scratch
+            .transform_sub_face(
+                FaceId::from(KeyData::from_ffi(face)),
+                &Transform::from_affine(&rows),
+            )
+            .map(|_| ())
+            .map_err(|e| api_err(&e, &e))
+    }
+
+    /// [`Scene::check_transform_imprint`] for a definition member edited
+    /// through `instance` (the WORLD affine conjugated through its pose).
+    pub fn check_transform_imprint_in_instance(
+        &self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows = parse_affine(affine)?;
+        let (_, local) = self.def_local_affine(instance, &rows)?;
+        let obj = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let mut scratch = obj.clone();
+        scratch
+            .transform_sub_face(FaceId::from(KeyData::from_ffi(face)), &local)
+            .map(|_| ())
+            .map_err(|e| api_err(&e, &e))
+    }
+
+    /// [`Scene::merge_faces`] for a definition member edited through
+    /// `instance` — Delete on a chord imprint inside a component (the
+    /// def-scoped apply, so every placement sees the dissolve).
+    pub fn merge_faces_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        edge: u64,
+    ) -> Result<(), ApiError> {
+        let iid = instance_id(instance);
+        let component = self
+            .doc
+            .instance_def(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let op = KernelOp::MergeFaces {
+            edge: EdgeId::from(KeyData::from_ffi(edge)),
+        };
+        let (_, change) = self
+            .doc
+            .apply_def_op(component, object_id(object), op)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::MergeFacesInInstance {
+            instance,
+            object,
+            edge,
+        });
+        Ok(())
+    }
+
+    /// Dissolve an imprint sub-face back into its face — Delete on a
+    /// selected imprint (`Document::dissolve_imprint`). Anything inside it
+    /// (shapes, or a boss, recess, or hole it was drawn around) stays on the
+    /// face; one undo step. A chord run is deleted with
+    /// [`Scene::merge_faces`] instead.
+    pub fn dissolve_imprint(&mut self, object: u64, face: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .dissolve_imprint(
+                None,
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DissolveImprint { object, face });
+        Ok(())
+    }
+
+    /// [`Scene::dissolve_imprint`] for a definition member edited through
+    /// `instance`.
+    pub fn dissolve_imprint_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+    ) -> Result<(), ApiError> {
+        let iid = instance_id(instance);
+        let component = self
+            .doc
+            .instance_def(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let change = self
+            .doc
+            .dissolve_imprint(
+                Some(component),
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DissolveImprintInInstance {
+            instance,
+            object,
+            face,
+        });
+        Ok(())
+    }
+
+    /// The definition-local image of a WORLD affine for an edit inside
+    /// `instance`: `pose · A · pose⁻¹` (apply the pose, the world gesture,
+    /// then un-pose), plus the instance's definition.
+    fn def_local_affine(
+        &self,
+        instance: u64,
+        rows: &[f64; 12],
+    ) -> Result<(ComponentId, Transform), ApiError> {
+        let iid = instance_id(instance);
+        let pose = self
+            .doc
+            .instance_pose(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let component = self
+            .doc
+            .instance_def(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let pose_inv = pose.inverse().map_err(|e| api_err(&e, &e))?;
+        let world = Transform::from_affine(rows);
+        let local = pose.then(&world).then(&pose_inv);
+        // A non-uniformly scaled placement turns a world turn-or-scale into
+        // a definition-space stretch the kernel would refuse `NotInPlane` —
+        // a misleading answer for a gesture that was entirely on the face.
+        // Refuse the way the typed-distance surfaces do for such a pose.
+        if world.similarity_scale().is_some() && local.similarity_scale().is_none() {
+            return Err(doc_err(DocumentError::AmbiguousInstanceScale));
+        }
+        Ok((component, local))
+    }
+
     /// Imprint a closed loop strictly inside an object's face (within-Object
     /// drawing): the face splits into the loop's sub-face plus the parent (now
     /// holed). `loop_pts` is xyz triples. Returns the new sub-face handle;
@@ -6180,7 +6659,7 @@ impl Scene {
         face: u64,
         loop_pts: &[f64],
     ) -> Result<u64, ApiError> {
-        self.split_face_inner_impl(object, face, loop_pts, None)
+        self.split_face_inner_impl(object, face, loop_pts, None, None)
     }
 
     /// [`Scene::split_face_inner`] carrying the drawn circle's analytic
@@ -6207,7 +6686,27 @@ impl Scene {
             center: Point3::new(center[0], center[1], center[2]),
             radius,
         };
-        self.split_face_inner_impl(object, face, loop_pts, Some(curve))
+        self.split_face_inner_impl(object, face, loop_pts, Some(curve), None)
+    }
+
+    /// [`Scene::split_face_inner`] carrying a drawn ARC's identity: the first
+    /// `arc_segments` edges of the loop are chord facets of the circle
+    /// (`center`, `radius`), the remaining edges (the loop closes implicitly
+    /// from the last point back to the first) plain lines — a pie or segment
+    /// drawn on a face (ArcTool's face mode). Bossing it raises smooth arc
+    /// walls and flat closing walls, exactly as the same shape extrudes from
+    /// a ground sketch.
+    pub fn split_face_inner_with_arc(
+        &mut self,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        center: &[f64],
+        radius: f64,
+        arc_segments: usize,
+    ) -> Result<u64, ApiError> {
+        let curve = parse_curve(center, radius)?;
+        self.split_face_inner_impl(object, face, loop_pts, Some(curve), Some(arc_segments))
     }
 
     fn split_face_inner_impl(
@@ -6216,6 +6715,7 @@ impl Scene {
         face: u64,
         loop_pts: &[f64],
         curve: Option<kernel::CurveGeom>,
+        arc_segments: Option<usize>,
     ) -> Result<u64, ApiError> {
         if !loop_pts.len().is_multiple_of(3) || loop_pts.len() < 9 {
             return Err(ApiError(
@@ -6226,6 +6726,33 @@ impl Scene {
             .chunks_exact(3)
             .map(|c| Point3::new(c[0], c[1], c[2]))
             .collect();
+        let curves = arc_claims(curve, points.len(), arc_segments);
+        self.split_face_inner_commit(
+            object,
+            face,
+            loop_pts,
+            points,
+            curves,
+            recording::LoopClaims {
+                curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+                curve_segments: arc_segments,
+                curves: None,
+            },
+        )
+    }
+
+    /// The one loop-imprint commit: `curves` is the per-edge claim list the
+    /// kernel stamps (`curves[k]` for `points[k]` → `points[k+1]`), `claims`
+    /// how the recording log reproduces it on replay.
+    fn split_face_inner_commit(
+        &mut self,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        points: Vec<Point3>,
+        curves: Vec<Option<kernel::CurveGeom>>,
+        claims: recording::LoopClaims,
+    ) -> Result<u64, ApiError> {
         // `Document::imprint_loop_on_face` decides the route: a loop clear of
         // the boundary is a sub-face; one running along part of the boundary
         // (a rectangle drawn to an edge's midpoint) is a chord split. Either
@@ -6233,12 +6760,12 @@ impl Scene {
         // next push/pull or paint acts on.
         let (report, change) = self
             .doc
-            .imprint_loop_on_face(
+            .imprint_loop_on_face_with_curves(
                 None,
                 object_id(object),
                 FaceId::from(KeyData::from_ffi(face)),
                 points,
-                curve,
+                curves,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
@@ -6246,7 +6773,9 @@ impl Scene {
             object,
             face,
             loop_pts: loop_pts.to_vec(),
-            curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+            curve: claims.curve,
+            curve_segments: claims.curve_segments,
+            curves: claims.curves,
         });
         Ok(report.region.data().as_ffi())
     }
@@ -6256,23 +6785,26 @@ impl Scene {
     /// direction that can land on the face) and imprints the offset loop as
     /// a coplanar sub-face, exactly like drawing on the face does. Boundary
     /// arcs recovered from imprinted edge claims or stamped cylinder walls
-    /// offset analytically (`kernel::offset_face_boundary`); when the whole
-    /// loop is one circle the imprint carries its analytic identity, so a
-    /// later push-through yields a smooth cylinder. Returns the new sub-face
-    /// handle; push/pull it to boss/recess. Recorded in undo history.
+    /// offset analytically (`kernel::offset_face_boundary`), and every offset
+    /// arc facet carries its concentric circle into the imprint, so pushing
+    /// the inset raises smooth arc walls — a hollowed half-round's inner
+    /// curve is as smooth as its outer one. Returns the new sub-face handle;
+    /// push/pull it to boss/recess. Recorded in undo history.
     pub fn offset_face(&mut self, object: u64, face: u64, distance: f64) -> Result<u64, ApiError> {
         let lp = self.offset_face_loop(object, face, distance)?;
         let mut loop_pts: Vec<f64> = Vec::with_capacity(lp.points.len() * 3);
         for p in &lp.points {
             loop_pts.extend([p.x, p.y, p.z]);
         }
-        // A single-circle boundary keeps its analytic identity through the
-        // imprint; a mixed boundary imprints as plain edges.
-        let first = lp.curves.first().copied().flatten();
-        let uniform_circle = first.filter(|_| lp.curves.iter().all(|c| *c == first));
-        // Delegating to the imprint path records the literal loop
-        // (`RecordedCall::SplitFaceInner`), so replay needs no new variant.
-        self.split_face_inner_impl(object, face, &loop_pts, uniform_circle)
+        // Delegating to the imprint path records the literal loop with its
+        // per-edge claims (`RecordedCall::SplitFaceInner`), so replay needs
+        // no offset variant.
+        let claims = recording::LoopClaims {
+            curve: None,
+            curve_segments: None,
+            curves: Some(claims_json(&lp.curves)),
+        };
+        self.split_face_inner_commit(object, face, &loop_pts, lp.points, lp.curves, claims)
     }
 
     /// Pure preview of [`Scene::offset_face`]: the offset loop as xyz
@@ -6321,6 +6853,37 @@ impl Scene {
         face: u64,
         path: &[f64],
     ) -> Result<FaceSplitJs, ApiError> {
+        self.split_face_cut_impl(object, face, path, None, None)
+    }
+
+    /// [`Scene::split_face`] carrying a drawn arc's analytic identity: the
+    /// first `arc_segments` edges of `path` are chord facets of the circle
+    /// (`center`, `radius`), the rest plain lines. An arc drawn edge to edge
+    /// on a face keeps its circle on the solid, so pushing either side raises
+    /// smooth walls whose rim keeps the arc's snaps — exactly as the same arc
+    /// does from a ground sketch (ArcTool's face mode). The tool owns the
+    /// truth; the kernel refuses a claim the points do not lie on.
+    pub fn split_face_with_arc(
+        &mut self,
+        object: u64,
+        face: u64,
+        path: &[f64],
+        center: &[f64],
+        radius: f64,
+        arc_segments: usize,
+    ) -> Result<FaceSplitJs, ApiError> {
+        let curve = parse_curve(center, radius)?;
+        self.split_face_cut_impl(object, face, path, Some(curve), Some(arc_segments))
+    }
+
+    fn split_face_cut_impl(
+        &mut self,
+        object: u64,
+        face: u64,
+        path: &[f64],
+        curve: Option<kernel::CurveGeom>,
+        arc_segments: Option<usize>,
+    ) -> Result<FaceSplitJs, ApiError> {
         if !path.len().is_multiple_of(3) || path.len() < 6 {
             return Err(ApiError(
                 "BadPath: path must be at least two xyz triples".to_string(),
@@ -6330,10 +6893,12 @@ impl Scene {
             .chunks_exact(3)
             .map(|c| Point3::new(c[0], c[1], c[2]))
             .collect();
+        let curves = arc_claims(curve, points.len() - 1, arc_segments);
         let op = KernelOp::SplitFace {
             face: FaceId::from(KeyData::from_ffi(face)),
             path: points,
             restore: None,
+            curves,
         };
         match self.apply_op(object, op)? {
             KernelOpReport::FaceSplit(inner) => {
@@ -6341,6 +6906,8 @@ impl Scene {
                     object,
                     face,
                     path: path.to_vec(),
+                    curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+                    curve_segments: arc_segments,
                 });
                 Ok(FaceSplitJs { inner })
             }
@@ -8933,8 +9500,49 @@ impl Scene {
                         face,
                         loop_pts,
                         curve,
-                    } => match curve {
-                        Some(c) => {
+                        curve_segments,
+                        curves,
+                    } => match (curves, curve, curve_segments) {
+                        (Some(list), _, _) => {
+                            // A per-edge claim list (the Offset tool's
+                            // face commit): replay stamps exactly it.
+                            let points: Vec<Point3> = loop_pts
+                                .chunks_exact(3)
+                                .map(|c| Point3::new(c[0], c[1], c[2]))
+                                .collect();
+                            let curves: Vec<Option<kernel::CurveGeom>> = list
+                                .iter()
+                                .map(|c| {
+                                    c.map(|v| kernel::CurveGeom {
+                                        center: Point3::new(v[0], v[1], v[2]),
+                                        radius: v[3],
+                                    })
+                                })
+                                .collect();
+                            self.split_face_inner_commit(
+                                object,
+                                face,
+                                &loop_pts,
+                                points,
+                                curves,
+                                recording::LoopClaims {
+                                    curve: None,
+                                    curve_segments: None,
+                                    curves: Some(list),
+                                },
+                            )?;
+                        }
+                        (None, Some(c), Some(k)) => {
+                            self.split_face_inner_with_arc(
+                                object,
+                                face,
+                                &loop_pts,
+                                &c[..3],
+                                c[3],
+                                k,
+                            )?;
+                        }
+                        (None, Some(c), None) => {
                             self.split_face_inner_with_curve(
                                 object,
                                 face,
@@ -8943,7 +9551,7 @@ impl Scene {
                                 c[3],
                             )?;
                         }
-                        None => {
+                        (None, None, _) => {
                             self.split_face_inner(object, face, &loop_pts)?;
                         }
                     },
@@ -9043,9 +9651,21 @@ impl Scene {
                     } => {
                         self.push_pull_in_component(instance, object, face, distance)?;
                     }
-                    SplitFace { object, face, path } => {
-                        self.split_face(object, face, &path)?;
-                    }
+                    SplitFace {
+                        object,
+                        face,
+                        path,
+                        curve,
+                        curve_segments,
+                    } => match curve {
+                        Some(c) => {
+                            let k = curve_segments.unwrap_or(path.len() / 3 - 1);
+                            self.split_face_with_arc(object, face, &path, &c[..3], c[3], k)?;
+                        }
+                        None => {
+                            self.split_face(object, face, &path)?;
+                        }
+                    },
                     BeginSketchOnPlaneInInstance {
                         instance,
                         px,
@@ -9070,17 +9690,45 @@ impl Scene {
                         object,
                         face,
                         path,
-                    } => {
-                        self.split_face_in_instance(instance, object, face, &path)?;
-                    }
+                        curve,
+                        curve_segments,
+                    } => match curve {
+                        Some(c) => {
+                            let k = curve_segments.unwrap_or(path.len() / 3 - 1);
+                            self.split_face_with_arc_in_instance(
+                                instance,
+                                object,
+                                face,
+                                &path,
+                                &c[..3],
+                                c[3],
+                                k,
+                            )?;
+                        }
+                        None => {
+                            self.split_face_in_instance(instance, object, face, &path)?;
+                        }
+                    },
                     SplitFaceInnerInInstance {
                         instance,
                         object,
                         face,
                         loop_pts,
                         curve,
-                    } => match curve {
-                        Some(c) => {
+                        curve_segments,
+                    } => match (curve, curve_segments) {
+                        (Some(c), Some(k)) => {
+                            self.split_face_inner_with_arc_in_instance(
+                                instance,
+                                object,
+                                face,
+                                &loop_pts,
+                                &c[..3],
+                                c[3],
+                                k,
+                            )?;
+                        }
+                        (Some(c), None) => {
                             self.split_face_inner_with_curve_in_instance(
                                 instance,
                                 object,
@@ -9090,7 +9738,7 @@ impl Scene {
                                 c[3],
                             )?;
                         }
-                        None => {
+                        (None, _) => {
                             self.split_face_inner_in_instance(instance, object, face, &loop_pts)?;
                         }
                     },
@@ -9105,6 +9753,53 @@ impl Scene {
                     }
                     MergeFaces { object, edge } => {
                         self.merge_faces(object, edge)?;
+                    }
+                    TransformImprint {
+                        object,
+                        face,
+                        affine,
+                    } => {
+                        self.transform_imprint(object, face, &affine)?;
+                    }
+                    TransformImprintInInstance {
+                        instance,
+                        object,
+                        face,
+                        affine,
+                    } => {
+                        self.transform_imprint_in_instance(instance, object, face, &affine)?;
+                    }
+                    TransformChord {
+                        object,
+                        edge,
+                        affine,
+                    } => {
+                        self.transform_chord(object, edge, &affine)?;
+                    }
+                    TransformChordInInstance {
+                        instance,
+                        object,
+                        edge,
+                        affine,
+                    } => {
+                        self.transform_chord_in_instance(instance, object, edge, &affine)?;
+                    }
+                    DissolveImprint { object, face } => {
+                        self.dissolve_imprint(object, face)?;
+                    }
+                    DissolveImprintInInstance {
+                        instance,
+                        object,
+                        face,
+                    } => {
+                        self.dissolve_imprint_in_instance(instance, object, face)?;
+                    }
+                    MergeFacesInInstance {
+                        instance,
+                        object,
+                        edge,
+                    } => {
+                        self.merge_faces_in_instance(instance, object, edge)?;
                     }
                     SetNodeName { kind, id, name } => {
                         self.set_node_name(kind, id, name)?;
@@ -9783,6 +10478,34 @@ pub fn demo_mesh() -> DemoMesh {
 
 #[cfg(test)]
 mod tests {
+    /// Playtest II regression, from a filed bug report: a circle drawn on a
+    /// cube, a ring offset around it, the ring pushed down and the circle's
+    /// top pulled up, with undo and redo back and forth. At the end the circle
+    /// imprint must still be a circle — it used to come back as a plain shape,
+    /// its analytic claim lost to a push that dropped it and an undo that could
+    /// not restore it.
+    #[test]
+    fn enclosed_circle_survives_push_pull_and_undo_cycles() {
+        recording::reset();
+        let json = include_str!("../tests/fixtures/missing-circle-recording.json");
+        let mut scene = Scene::new();
+        scene.replay(json).expect("the recording replays");
+        let obj = scene.object_ids()[0];
+        let features: serde_json::Value =
+            serde_json::from_str(&scene.face_features(obj).unwrap()).unwrap();
+        let circle = features
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["kind"] == "sub_face")
+            .find(|f| f["loop"].as_array().unwrap().len() / 3 > 8)
+            .expect("the circle imprint is back after the final undo");
+        assert!(
+            !circle["curve"].is_null(),
+            "the circle is still a circle: {circle}"
+        );
+    }
+
     /// Loading a document must re-register its SKETCHES with inference —
     /// segments, vertices, and curve rims alike. This was silently missing
     /// (objects, instances, and guides were registered; sketches were not),
@@ -13048,6 +13771,73 @@ mod tests {
         assert!(scene.object_ids().contains(&obj));
         scene.scene_undo().unwrap(); // undo create
         assert!(scene.object_ids().is_empty());
+    }
+
+    /// The Offset tool on a half-round's top hands the inset its arc, so
+    /// recessing the inset leaves a smooth inner curve (a hollowed cup's
+    /// inside as smooth as its outside), and the recording replays the
+    /// same per-edge claims.
+    #[test]
+    fn offsetting_a_segment_face_and_recessing_the_inset_stays_smooth_and_replays() {
+        recording::reset();
+        recording::start();
+        let cylinder_walls = |scene: &Scene, obj: u64| {
+            scene
+                .doc
+                .object(object_id(obj))
+                .unwrap()
+                .faces()
+                .values()
+                .filter(|f| matches!(f.surface, Some(kernel::SurfaceRef::Cylinder { .. })))
+                .count()
+        };
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        // A half-disc segment: 18 arc facets, closed by the implicit chord.
+        let mut loop_pts = Vec::new();
+        for i in 0..=18 {
+            let a = std::f64::consts::PI * i as f64 / 18.0;
+            loop_pts.extend([0.5 + 0.3 * a.cos(), 0.5 + 0.3 * a.sin(), 1.0]);
+        }
+        let seg = scene
+            .split_face_inner_with_arc(obj, top, &loop_pts, &[0.5, 0.5, 1.0], 0.3, 18)
+            .unwrap();
+        assert_eq!(cylinder_walls(&scene, obj), 0);
+        let inset = scene.offset_face(obj, seg, -0.05).unwrap();
+        scene.push_pull(obj, inset, -0.2).unwrap();
+        let smooth = cylinder_walls(&scene, obj);
+        assert!(
+            smooth >= 16,
+            "the recess's arc walls are cylinder facets ({smooth})"
+        );
+
+        // The log carries the inset's per-edge claims, and replays them.
+        recording::stop();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"curves\""),
+            "the offset's claims are logged"
+        );
+        recording::reset();
+        let mut again = Scene::new();
+        again.replay(&json).expect("the recording replays");
+        let replayed = again.object_ids()[0];
+        assert_eq!(cylinder_walls(&again, replayed), smooth);
     }
 
     #[test]
