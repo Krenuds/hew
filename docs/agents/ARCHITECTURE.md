@@ -387,9 +387,12 @@ the session had already been closed, without interrupting the edit.
 | `crates/hlr` | Hidden-line removal: projects tessellated solids onto a view plane and returns visible line work — hard edges, curved-wall silhouettes, section-cut outlines — as 2D segments, plus an SVG writer, for vector Line art printing and SVG export | `kernel`, `tessellate` |
 | `crates/pdfwrite` | Small hand-written PDF 1.4 writer (pages of images, stroked paths, text) for Save PDF… and headless `hew.print.pdf` | nothing in-tree (`miniz_oxide` for DEFLATE) |
 | `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `stl-import` |
+| `crates/library` | The Hew Library's on-disk layout: folder resolution, item naming, atomic list/read/write/remove, content hashing — one implementation behind `hew-cli`'s `hew.library.*` and the desktop shell's `library_*` commands | `kernel` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
-| `shells/tauri` | Desktop shell | `app/` |
+| `shells/tauri` | Desktop shell | `app/`, `library` |
 | `shells/web` | Static web build | `app/` |
+| `workers/share-relay` | The public "Open on Phone" relay Worker (Durable Objects); `crates/hew-relay` is the self-hostable binary that speaks the same contract | none in-tree |
+| `workers/bug-intake` | The private Help ▸ Report Bug intake Worker: chunked upload into Durable Objects, notification email, Cloudflare-Access-protected admin page | none in-tree |
 
 ### 3.1 Purity boundaries
 

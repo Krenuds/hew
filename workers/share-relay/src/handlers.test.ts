@@ -39,7 +39,7 @@ import {
   handleRequest,
 } from './handlers.ts'
 import { DropStore, RPC_BATCH_CHUNKS, TTL_MS } from './dropStore.ts'
-import { FakeDurableObjectNamespace } from './testSupport/fakeDurableObject.ts'
+import { FakeDurableObjectNamespace, type FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 import type { DropEnv, ShareDropStub } from './types.ts'
 
 // ---------------------------------------------------------------------------
@@ -854,5 +854,38 @@ describe('handleRequest', () => {
     const res = await handleRequest(req, env)
     assert.equal(res.status, 404)
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.hew3d.com')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unknown tokens leave no Durable Object storage behind
+// ---------------------------------------------------------------------------
+
+describe('unknown tokens leave no Durable Object storage behind', () => {
+  /** `makeEnv` plus every `ShareDrop` storage it constructs, in creation
+   *  order, so a test can inspect the database of a DO a request merely
+   *  NAMED — the thing an unauthenticated caller can do at will. */
+  function makeEnvCapturingDrops(): { env: DropEnv; dropStorages: FakeDurableObjectStorage[] } {
+    const dropStorages: FakeDurableObjectStorage[] = []
+    const env = {} as DropEnv
+    env.SHARE_DROP = new FakeDurableObjectNamespace<ShareDropStub>((state) => {
+      dropStorages.push(state.storage as FakeDurableObjectStorage)
+      return new DropStore(state.storage)
+    })
+    return { env, dropStorages }
+  }
+
+  function tableCount(storage: FakeDurableObjectStorage): number {
+    return storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'").toArray()[0].n
+  }
+
+  test('GET, HEAD, and DELETE for a never-stored token answer as before and create no tables', async () => {
+    const { env, dropStorages } = makeEnvCapturingDrops()
+    const token = generateToken()
+    assert.equal((await handleGetDrop(token, env)).status, 404)
+    assert.equal((await handlePeek(token, env)).status, 404)
+    assert.equal((await handleDeleteDrop(token, env)).status, 204)
+    assert.equal(dropStorages.length, 1, 'one DO was addressed')
+    assert.equal(tableCount(dropStorages[0]), 0, 'and it holds no schema — nothing durable for a guessed token')
   })
 })

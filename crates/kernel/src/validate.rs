@@ -164,7 +164,10 @@ impl Object {
             // `radius` from `center`, and the radius is non-degenerate.
             if let Some(crate::sketch::CurveGeom { center, radius }) = edge.curve {
                 let mismatch = TopologyError::EdgeCurveMismatch { edge: e };
-                if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
+                if !radius.is_finite()
+                    || !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite())
+                    || radius <= crate::tol::POINT_MERGE
+                {
                     return Err(mismatch);
                 }
                 let a = self.vertices[primary.origin].position;

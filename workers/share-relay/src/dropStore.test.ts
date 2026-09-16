@@ -362,3 +362,38 @@ describe('DropStore.destroy', () => {
     assert.equal(await storage.getAlarm(), null)
   })
 })
+
+describe('DropStore: a never-stored token creates no storage', () => {
+  function tableNames(storage: FakeDurableObjectStorage): string[] {
+    return storage.sql
+      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .toArray()
+      .map((r) => r.name)
+  }
+
+  test('peek, consume, take, and destroy against a fresh DO answer "absent" without creating a table', async () => {
+    const { drop, storage } = makeDrop()
+    assert.deepEqual(await drop.peek(), { exists: false })
+    assert.equal(await drop.consume(), null)
+    assert.deepEqual(await drop.take(0, RPC_BATCH_CHUNKS), [])
+    await assert.rejects(drop.append([new Uint8Array(1)]), /no drop in progress/)
+    await drop.destroy()
+    assert.deepEqual(tableNames(storage), [], 'a guessed token must leave no durable schema behind')
+  })
+
+  test('store creates the schema; the pickup poll that follows a consumed drop does not recreate it', async () => {
+    const { drop, storage } = makeDrop()
+    await storeAll(drop, 'model', chunksOf(new Uint8Array([1, 2, 3]), 2))
+    assert.deepEqual(tableNames(storage), ['chunk', 'meta'])
+
+    assert.notEqual(await consumeAll(drop), null)
+    assert.deepEqual(tableNames(storage), [], 'the last take wiped the drop')
+
+    // The desktop dialog keeps polling HEAD after the phone's GET — that
+    // poll is the one request every normal share used to leave an empty
+    // schema behind for.
+    assert.deepEqual(await drop.peek(), { exists: false })
+    assert.equal(await drop.consume(), null)
+    assert.deepEqual(tableNames(storage), [])
+  })
+})

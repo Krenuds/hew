@@ -170,6 +170,12 @@ export async function handleStart(request: Request, env: BugIntakeEnv): Promise<
   if (piece.byteLength > declaredTotal) {
     return jsonResponse(400, { error: 'invalid', message: 'the first piece is longer than the declared total' })
   }
+  // Every piece but the last is exactly PIECE_BYTES (both clients split at
+  // that size) — see `ReportStore.putPiece`'s doc for why the protocol
+  // insists: it is what bounds how many requests an upload can take.
+  if (piece.byteLength < declaredTotal && piece.byteLength !== PIECE_BYTES) {
+    return jsonResponse(400, { error: 'invalid', message: `a first piece that is not the whole report must be exactly ${PIECE_BYTES} bytes` })
+  }
 
   const validated = await decompressAndValidateHead(piece, piece.byteLength === declaredTotal)
   if (!validated.ok) {
@@ -296,6 +302,16 @@ export async function handlePutPiece(request: Request, env: BugIntakeEnv, id: st
       case 'bytes-past-total':
         await abandonUpload(env, id)
         return jsonResponse(400, { error: 'invalid', message: 'bytes past the declared total' })
+      case 'short-piece':
+        // Token verified by `putPiece` before this outcome, like the two
+        // above. A middle piece smaller than PIECE_BYTES is never something
+        // a real client sends — it is the keepalive an attacker would use
+        // to hold a reservation open, so the upload ends here.
+        await abandonUpload(env, id)
+        return jsonResponse(400, { error: 'invalid', message: `every piece but the last must be exactly ${PIECE_BYTES} bytes` })
+      case 'expired':
+        await abandonUpload(env, id)
+        return jsonResponse(400, { error: 'invalid', message: 'the upload took too long and was abandoned' })
       case 'out-of-order':
         return jsonResponse(409, { error: 'out-of-order', expected: result.expected })
     }

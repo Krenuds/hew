@@ -278,6 +278,25 @@ function base64FromBytes(bytes: Uint8Array): string {
 }
 
 /**
+ * Home-directory-SHAPED path prefixes, for the pass after the literal one:
+ * the file-I/O error strings the desktop shell echoes into the log carry the
+ * exact path they failed on, and that path is not always under the current
+ * user's own home — another account's folder on a shared machine, the same
+ * folder spelled with different letter-case on Windows, an extended-length
+ * `\\?\` form. Each pattern captures the per-user segment of the three
+ * layouts (`/Users/<name>`, `/home/<name>`, `<drive>:\Users\<name>`) in the
+ * raw, forward-slash, and JSON-escaped (doubled backslash) spellings, and
+ * stops at the next separator, quote, or whitespace. Case-insensitive, since
+ * Windows and macOS volumes are.
+ */
+const HOME_SHAPED_PREFIXES: RegExp[] = [
+  // Windows first: `D:/Users/erin` must go as a whole, not leave `D:` behind
+  // once the POSIX pattern below has eaten its `/Users/erin` tail.
+  /(?:\\\\\?\\|\\\?\\)?[A-Za-z]:(?:\\\\|\\|\/)Users(?:\\\\|\\|\/)[^\/\\\s"'<>|]+/gi,
+  /(?:^|(?<=[\s"'(=:,]))\/(?:Users|home)\/[^\/\\\s"'<>|]+/gi,
+]
+
+/**
  * Replace every occurrence of `homeDir` in `text` with `~`, in every form it
  * can actually appear in sent text — not just the raw path. The log tail is
  * NDJSON built by `JSON.stringify`ing each record, so a Windows path like
@@ -285,8 +304,12 @@ function base64FromBytes(bytes: Uint8Array): string {
  * escaping): a plain literal replace of the raw path never matches that, and
  * the username would ship in every Windows report. Also covers a
  * forward-slash form, since some sources (Rust's own path normalization, a
- * message a library formatted) render a Windows path that way. No-op when
- * `homeDir` is null or empty.
+ * message a library formatted) render a Windows path that way. Then, because
+ * the desktop shell's file-I/O errors name whatever path they failed on —
+ * not necessarily one under THIS user's home (see `HOME_SHAPED_PREFIXES`) —
+ * every remaining home-directory-shaped prefix is redacted to `~` too. No-op
+ * when `homeDir` is null or empty: the web build has no filesystem paths to
+ * scrub, and the literal form is what tells us we are on a desktop.
  */
 export function scrubHomeDir(text: string, homeDir: string | null): string {
   if (homeDir === null || homeDir === '') return text
@@ -305,6 +328,9 @@ export function scrubHomeDir(text: string, homeDir: string | null): string {
   for (const variant of Array.from(variants).sort((a, b) => b.length - a.length)) {
     if (variant.length === 0) continue
     result = result.split(variant).join('~')
+  }
+  for (const pattern of HOME_SHAPED_PREFIXES) {
+    result = result.replace(pattern, '~')
   }
   return result
 }

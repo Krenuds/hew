@@ -28,10 +28,23 @@
  * Every method checks the presented token's hash against the stored one in
  * constant time (`uploadToken.ts`) — this class never sees a raw token,
  * only its SHA-256 hex digest, computed by the caller (`handlers.ts`).
+ *
+ * Storage is created LAZILY, by `startUpload` alone. A report id is public
+ * and a Durable Object is addressed by name, so any request naming a
+ * well-formed id that was never started (`PUT`/`commit` with a guessed or
+ * stale id, an alarm racing a delete) still instantiates this class over
+ * an empty database. If the constructor ran `CREATE TABLE` the way an
+ * earlier version did, every such request would leave a few KiB of empty
+ * schema behind forever — durable, never alarmed, never cleaned up — and
+ * an unauthenticated caller could mint those by the hundred thousand
+ * against the account-wide Durable Object storage and daily row-write
+ * quotas (shared with share-relay). So every read path first asks
+ * `sqlite_master` (a read, which persists nothing) whether `meta` exists
+ * and answers "absent" without touching the schema when it doesn't.
  */
 
 import type { DurableObjectStorage } from './types.ts'
-import { RETENTION_MS, ABANDON_TIMEOUT_MS, PIECE_BYTES } from './constants.ts'
+import { RETENTION_MS, ABANDON_TIMEOUT_MS, UPLOAD_LIFETIME_MS, PIECE_BYTES } from './constants.ts'
 import { constantTimeEqual } from './uploadToken.ts'
 
 interface MetaRow {
@@ -67,7 +80,9 @@ export type PutPieceResult =
   | { ok: false; reason: 'not-found' }
   | { ok: false; reason: 'forbidden' }
   | { ok: false; reason: 'too-large' }
+  | { ok: false; reason: 'short-piece' } // a non-final piece that isn't exactly PIECE_BYTES
   | { ok: false; reason: 'bytes-past-total' }
+  | { ok: false; reason: 'expired' } // UPLOAD_LIFETIME_MS since START, still uncommitted
   | { ok: false; reason: 'out-of-order'; expected: number }
 
 export type CommitResult =
@@ -87,19 +102,47 @@ export interface ReportHead {
   receivedAt: number
 }
 
+/** When the abandonment alarm should fire for an uncommitted upload that
+ *  started at `receivedAt` and just saw activity at `now`: the usual
+ *  silence window, but never past the upload's absolute lifetime — so a
+ *  caller trickling pieces cannot push the alarm out forever. */
+function abandonAlarmAt(receivedAt: number, now: number): number {
+  return Math.min(now + ABANDON_TIMEOUT_MS, receivedAt + UPLOAD_LIFETIME_MS)
+}
+
 export class ReportStore {
   private readonly storage: DurableObjectStorage
+  /** The size every piece but the last must have (and no piece may exceed)
+   *  — `PIECE_BYTES` in production; a small number in unit tests so the
+   *  protocol can be exercised with ten-byte pieces. */
+  private readonly pieceBytes: number
 
-  constructor(storage: DurableObjectStorage) {
+  constructor(storage: DurableObjectStorage, pieceBytes: number = PIECE_BYTES) {
     this.storage = storage
-    this.migrate()
+    this.pieceBytes = pieceBytes
   }
 
-  /** `CREATE TABLE IF NOT EXISTS` — idempotent, re-run at the top of every
-   *  public method. Required because `destroy()`'s `deleteAll()` wipes the
-   *  SQLite schema, not just rows (see share-relay's `dropStore.ts` for the
-   *  full argument), so a DO instance reused after a delete has no tables
-   *  until this runs again. */
+  /** Whether this Durable Object's database holds the schema at all —
+   *  i.e. `startUpload` has run on it and no `destroy()` has wiped it since
+   *  (`deleteAll()` drops the schema, not just rows). A `sqlite_master`
+   *  read, so a never-started DO answering "no" leaves no storage behind
+   *  (see the class doc). Every read path checks this INSTEAD of creating
+   *  tables it would then have to treat as empty anyway. */
+  private hasSchema(): boolean {
+    return (
+      this.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'meta'")
+        .toArray()[0].n > 0
+    )
+  }
+
+  /** `CREATE TABLE IF NOT EXISTS` — idempotent, run by `startUpload` only
+   *  (the one method that legitimately brings a report into existence).
+   *  `destroy()`'s `deleteAll()` wipes the SQLite schema, not just rows (see
+   *  share-relay's `dropStore.ts` for the full argument), so a DO instance
+   *  reused after a delete has no tables until a fresh `startUpload` runs
+   *  this again — and until then `hasSchema()` is what every other method
+   *  consults. */
   private migrate(): void {
     this.storage.sql.exec(
       `CREATE TABLE IF NOT EXISTS meta (
@@ -174,16 +217,28 @@ export class ReportStore {
       fields.platform,
     )
     this.insertPiece(0, firstPiece)
-    await this.storage.setAlarm(receivedAt + ABANDON_TIMEOUT_MS)
+    await this.storage.setAlarm(abandonAlarmAt(receivedAt, receivedAt))
   }
 
   /** Accepts the next piece of an in-progress upload. See `PutPieceResult`
    *  for every outcome; `not-found` covers "never started", "already
    *  committed", and "abandoned" (an abandoned upload's `meta` row is gone
    *  entirely) alike — the caller can't (and doesn't need to) tell those
-   *  apart. */
+   *  apart.
+   *
+   *  Two rules bound how long an upload can stay open, because an
+   *  uncommitted upload holds its whole declared size against the storage
+   *  ceiling (`indexStore.ts`) and the abandonment alarm measures only
+   *  silence: every piece except the last must be EXACTLY `PIECE_BYTES`
+   *  (`short-piece` otherwise — both clients split at that size, so a
+   *  smaller or empty middle piece is never legitimate, and it is what
+   *  would let a caller re-arm the alarm forever with free keepalives),
+   *  which caps the piece count at `ceil(declaredTotal / PIECE_BYTES)`; and
+   *  `UPLOAD_LIFETIME_MS` after START the upload is `expired` no matter how
+   *  recently a piece arrived. Both refusals reach the caller only after
+   *  the token check, so the caller may abandon the upload on them. */
   async putPiece(index: number, tokenHash: string, data: Uint8Array): Promise<PutPieceResult> {
-    this.migrate()
+    if (!this.hasSchema()) return { ok: false, reason: 'not-found' }
     const meta = this.readMeta()
     if (meta === null || meta.committed !== 0) {
       return { ok: false, reason: 'not-found' }
@@ -194,20 +249,27 @@ export class ReportStore {
     if (data.byteLength > PIECE_BYTES) {
       return { ok: false, reason: 'too-large' }
     }
+    const now = Date.now()
+    if (now - meta.receivedAt > UPLOAD_LIFETIME_MS) {
+      return { ok: false, reason: 'expired' }
+    }
 
     if (index === meta.nextIndex) {
-      if (meta.receivedBytes + data.byteLength > meta.declaredTotal) {
+      const after = meta.receivedBytes + data.byteLength
+      if (after > meta.declaredTotal) {
         return { ok: false, reason: 'bytes-past-total' }
       }
+      if (after < meta.declaredTotal && data.byteLength !== this.pieceBytes) {
+        return { ok: false, reason: 'short-piece' }
+      }
       this.insertPiece(index, data)
-      const now = Date.now()
       this.storage.sql.exec(
         'UPDATE meta SET nextIndex = ?, receivedBytes = ?, lastActivity = ? WHERE id = 0',
         meta.nextIndex + 1,
-        meta.receivedBytes + data.byteLength,
+        after,
         now,
       )
-      await this.storage.setAlarm(now + ABANDON_TIMEOUT_MS)
+      await this.storage.setAlarm(abandonAlarmAt(meta.receivedAt, now))
       return { ok: true, stored: true }
     }
 
@@ -241,7 +303,7 @@ export class ReportStore {
    *  token on an already-committed report still gets `forbidden`, never a
    *  free read of its fields. */
   async commit(tokenHash: string): Promise<CommitResult> {
-    this.migrate()
+    if (!this.hasSchema()) return { ok: false, reason: 'not-found' }
     const meta = this.readMeta()
     if (meta === null) {
       return { ok: false, reason: 'not-found' }
@@ -281,7 +343,7 @@ export class ReportStore {
    *  destroys the upload's storage and reports `ok: true` so the caller
    *  knows to release its `ReportIndex` reservation too. */
   async abandon(tokenHash: string): Promise<AbandonResult> {
-    this.migrate()
+    if (!this.hasSchema()) return { ok: false, reason: 'not-found' }
     const meta = this.readMeta()
     if (meta === null || meta.committed !== 0) {
       return { ok: false, reason: 'not-found' }
@@ -299,7 +361,7 @@ export class ReportStore {
    *  separately. `null` if nothing was ever started (or it's been
    *  destroyed). */
   async head(): Promise<ReportHead | null> {
-    this.migrate()
+    if (!this.hasSchema()) return null
     const meta = this.readMeta()
     if (meta === null) return null
     return {
@@ -315,7 +377,7 @@ export class ReportStore {
    *  wants. Returns an empty array past the end or against a never-stored
    *  report. */
   async read(from: number, count: number): Promise<Uint8Array[]> {
-    this.migrate()
+    if (!this.hasSchema()) return []
     const rows = this.storage.sql
       .exec<PieceRow>('SELECT idx, data FROM piece WHERE idx >= ? AND idx < ? ORDER BY idx ASC', from, from + count)
       .toArray()
@@ -332,12 +394,16 @@ export class ReportStore {
    *  Durable Object boundary without buffering it whole (see
    *  https://developers.cloudflare.com/workers/runtime-apis/rpc/). */
   async readStream(): Promise<ReadableStream<Uint8Array>> {
-    this.migrate()
+    const present = this.hasSchema()
     const storage = this.storage
     let nextIndex = 0
     return new ReadableStream<Uint8Array>({
       type: 'bytes',
       pull(controller) {
+        if (!present) {
+          controller.close()
+          return
+        }
         const rows = storage.sql.exec<PieceRow>('SELECT idx, data FROM piece WHERE idx = ?', nextIndex).toArray()
         if (rows.length === 0) {
           controller.close()

@@ -8,8 +8,7 @@ import {
   RATE_LIMIT_DAY_MAX,
   EMAIL_DAY_MAX,
   STORE_CEILING_BYTES,
-  IDLE_PRUNE_TIMEOUT_MS,
-} from './constants.ts'
+  IDLE_PRUNE_TIMEOUT_MS, UPLOAD_LIFETIME_MS } from './constants.ts'
 import { FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 
 function makeStore(): IndexStore {
@@ -327,5 +326,41 @@ describe('IndexStore: email cap', () => {
       if (await store.reserveEmail(now + i)) reserved++
     }
     assert.equal(reserved, EMAIL_DAY_MAX)
+  })
+})
+
+describe('IndexStore: absolute upload lifetime', () => {
+  const now = 1_700_000_000_000
+  test('an uncommitted row older than UPLOAD_LIFETIME_MS is pruned even with recent activity', async () => {
+    const store = new IndexStore(new FakeDurableObjectStorage())
+    await store.reserveReport('c1', now, {
+      id: 'HEW-OLD0-0000',
+      receivedAt: now,
+      appVersion: '1.1.0',
+      platform: 'desktop-macos',
+      descriptionPreview: 'kept alive by trickled pieces',
+      sizeBytes: 500,
+    })
+    const late = now + UPLOAD_LIFETIME_MS + 1
+    await store.touchActivity('HEW-OLD0-0000', late - 1)
+
+    const ids = await store.findAndDeleteIdleUncommittedIds(late, 15 * 60 * 1000)
+    assert.deepEqual(ids, ['HEW-OLD0-0000'])
+    assert.equal(await store.totalStoredBytes(), 0, 'its bytes go back to the ceiling')
+  })
+
+  test('a committed row is never pruned by the lifetime rule either', async () => {
+    const store = new IndexStore(new FakeDurableObjectStorage())
+    await store.reserveReport('c1', now, {
+      id: 'HEW-OLD1-0000',
+      receivedAt: now,
+      appVersion: '1.1.0',
+      platform: 'desktop-macos',
+      descriptionPreview: 'finished long ago',
+      sizeBytes: 500,
+    })
+    await store.commitReport('HEW-OLD1-0000')
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(now + UPLOAD_LIFETIME_MS * 50, 15 * 60 * 1000), [])
+    assert.equal((await store.getReport('HEW-OLD1-0000'))?.committed, true)
   })
 })

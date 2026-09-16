@@ -297,6 +297,32 @@ fn a_claim_that_does_not_describe_its_edge_is_refused() {
     assert!(claims(&obj).is_empty());
 }
 
+/// A claim with a non-finite center can never agree with any edge — and
+/// every distance comparison against NaN is `false`, so without an explicit
+/// finiteness check such a claim would slip PAST the "must lie on the
+/// circle" gate and be stamped onto the edges. Refused typed, untouched.
+#[test]
+fn a_claim_with_a_non_finite_center_is_refused() {
+    let mut obj = unit_cube();
+    let t = top(&obj);
+    let path = arc(0.5, 0.0, 0.3, 0.0, std::f64::consts::PI, 18);
+    let before = obj.clone();
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let g = CurveGeom {
+            center: Point3::new(bad, 0.0, 1.0),
+            radius: 0.3,
+        };
+        assert_eq!(
+            obj.split_face_with_curves(t, &path, &vec![Some(g); 18])
+                .unwrap_err(),
+            StickyError::CurveClaimOffLoop,
+            "a {bad} center describes no circle"
+        );
+    }
+    assert_eq!(obj.faces().len(), before.faces().len(), "untouched");
+    assert!(claims(&obj).is_empty());
+}
+
 // -------------------------------------------------------- document level
 
 /// A segment drawn with its chord along the face's edge routes to a chord

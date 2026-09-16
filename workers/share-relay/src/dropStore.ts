@@ -89,18 +89,51 @@ export class DropStore {
 
   constructor(storage: DurableObjectStorage) {
     this.storage = storage
-    this.migrate()
   }
 
-  /** `CREATE TABLE IF NOT EXISTS` — idempotent, and re-run at the TOP of
-   *  every public method (not just in the constructor). It must be: a DO
-   *  instance is reused across requests, and `destroy()`'s `deleteAll()` wipes
-   *  the SQLite SCHEMA, not just rows (see `destroy`), so the tables are gone
-   *  after any consume/destroy on the same live instance. Re-ensuring here is
-   *  what makes a second `consume()` return `null` instead of throwing `no
-   *  such table` (a real 500 the tests now reproduce via the fake's DROP-based
-   *  `deleteAll`). `meta.id` is pinned to 0 so the table holds zero or one row;
-   *  a `SELECT` against it is how "populated" is told from "empty". */
+  /** Whether this Durable Object's database holds the schema at all — a
+   *  `sqlite_master` read, which persists nothing. A token is client-chosen
+   *  and a DO is addressed by name, so a `GET`/`HEAD`/`DELETE` naming a
+   *  token that was never stored (the desktop dialog's own pickup poll
+   *  after the phone consumed the drop, or a stranger guessing) still
+   *  instantiates this class over an empty database. An earlier version ran
+   *  `CREATE TABLE` in the constructor and at the top of every method, which
+   *  left a few KiB of empty schema behind for every such request — durable,
+   *  never alarmed, never cleaned up (one per normal share, in fact, from
+   *  the poll that follows the pickup) — and let an unauthenticated caller
+   *  mint those by the hundred thousand against the account-wide Durable
+   *  Object storage and daily row-write quotas. Now only `store` creates
+   *  the schema; every read path asks this first and answers "absent"
+   *  without touching it. */
+  private hasSchema(): boolean {
+    return (
+      this.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'meta'")
+        .toArray()[0].n > 0
+    )
+  }
+
+  /** For the read paths: `false` (and no schema created) when this DO was
+   *  never stored into or has been destroyed since; otherwise runs
+   *  `migrate()` — a no-op on a current-shape table, the in-place column
+   *  upgrade on an old-shape one — and returns `true`. */
+  private ensureSchema(): boolean {
+    if (!this.hasSchema()) return false
+    this.migrate()
+    return true
+  }
+
+  /** `CREATE TABLE IF NOT EXISTS` — idempotent; run unconditionally by
+   *  `store` (the one method that brings a drop into existence) and by
+   *  `ensureSchema` for the read paths once the schema is known to exist.
+   *  Re-running it matters because a DO instance is reused across requests
+   *  and `destroy()`'s `deleteAll()` wipes the SQLite SCHEMA, not just rows
+   *  (see `destroy`), so the tables are gone after any consume/destroy on
+   *  the same live instance — a later `store` recreates them, and a later
+   *  read answers "absent" through `hasSchema()` instead of throwing `no
+   *  such table` (a real 500 the tests reproduce via the fake's DROP-based
+   *  `deleteAll`). `meta.id` is pinned to 0 so the table holds zero or one
+   *  row; a `SELECT` against it is how "populated" is told from "empty". */
   private migrate(): void {
     this.storage.sql.exec(
       `CREATE TABLE IF NOT EXISTS meta (
@@ -123,8 +156,10 @@ export class DropStore {
     // on an existing table, so the column must be added explicitly — and
     // such tables DO survive a deploy: `deleteAll()` wipes the schema after
     // any consume/destroy, but a DO that only ever answered a `peek()` on a
-    // never-stored token keeps its empty old-shape tables indefinitely (the
-    // conformance suite reproduced this against a `wrangler dev` state dir).
+    // never-stored token under the old constructor-creates-tables code kept
+    // its empty old-shape tables indefinitely (the conformance suite
+    // reproduced this against a `wrangler dev` state dir), and those are
+    // still out there.
     const hasClaimed = this.storage.sql
       .exec<{ n: number }>("SELECT COUNT(*) AS n FROM pragma_table_info('meta') WHERE name = 'claimed'")
       .toArray()[0].n
@@ -189,8 +224,7 @@ export class DropStore {
    *  continuing at the current row count. Throws on a drop that was never
    *  begun (or was already wiped) or would overflow its declared count. */
   async append(chunks: Uint8Array[]): Promise<void> {
-    this.migrate()
-    const meta = this.readMeta()
+    const meta = this.ensureSchema() ? this.readMeta() : null
     if (meta === null) {
       throw new Error('ShareDrop.append: no drop in progress')
     }
@@ -216,7 +250,7 @@ export class DropStore {
    *  still uploading — see `store`) and for one already past `TTL_MS`, which
    *  it wipes on the way out. */
   async consume(): Promise<DropHead | null> {
-    this.migrate()
+    if (!this.ensureSchema()) return null
     const meta = this.readMeta()
     if (meta === null) return null
 
@@ -243,7 +277,7 @@ export class DropStore {
    *  any other gone drop. Calling this on a drop that exists but was never
    *  claimed IS a protocol error and throws. */
   async take(from: number, count: number): Promise<Uint8Array[]> {
-    this.migrate()
+    if (!this.ensureSchema()) return []
     const meta = this.readMeta()
     if (meta === null) return []
     if (meta.claimed === 0) {
@@ -265,12 +299,12 @@ export class DropStore {
    *  `peek()` finds present is still there, byte-for-byte, for a following
    *  `consume()`. Backs the desktop dialog's pickup-detection poll
    *  (`handlers.ts`'s `HEAD /drop/<token>`): it needs to know the drop is
-   *  gone without being the request that consumes it. Like `consume`, re-runs
-   *  `migrate()` first so a peek against a never-populated (never `store`d)
-   *  token's DO — which has no `meta` table yet — returns `{ exists: false }`
-   *  instead of throwing `no such table`. */
+   *  gone without being the request that consumes it. Like `consume`, checks
+   *  `ensureSchema()` first so a peek against a never-populated (never
+   *  `store`d) token's DO — which has no `meta` table — returns `{ exists:
+   *  false }` without throwing `no such table` and without creating one. */
   async peek(): Promise<{ exists: boolean }> {
-    this.migrate()
+    if (!this.ensureSchema()) return { exists: false }
     const meta = this.readMeta()
     if (meta === null) return { exists: false }
     return { exists: this.isPresent(meta) }

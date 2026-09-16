@@ -60,6 +60,18 @@ export const STORE_CEILING_BYTES = 3 * 1024 * 1024 * 1024
  *  is never cut off mid-stream — only a truly stalled one is. */
 export const ABANDON_TIMEOUT_MS = 10 * 60 * 1000
 
+/** The absolute lifetime of an UNCOMMITTED upload, measured from its START
+ *  regardless of activity — `ABANDON_TIMEOUT_MS` and `IDLE_PRUNE_TIMEOUT_MS`
+ *  below only measure silence, and a reservation holds its full declared
+ *  size against `STORE_CEILING_BYTES` from the moment START accepts it. An
+ *  upload still uncommitted this long after it started is abandoned (its
+ *  alarm is never armed past this bound, `putPiece` refuses the next piece
+ *  as `expired`, and the index prune drops it) so a client cannot hold a
+ *  reservation open indefinitely by trickling pieces. Two hours is far past
+ *  the slowest legitimate upload: `MAX_UPLOAD_BYTES` in `PIECE_BYTES` pieces
+ *  at the clients' two-minute per-request timeout is about 100 minutes. */
+export const UPLOAD_LIFETIME_MS = 2 * 60 * 60 * 1000
+
 /** `ReportIndex`'s own backstop, independent of any one `ReportDrop`'s
  *  alarm: any uncommitted row whose `lastActivity` is older than this gets
  *  pruned (its bytes given back to the ceiling, and its drop destroyed) the
@@ -83,6 +95,14 @@ export const RATE_LIMIT_DAY_MAX = 20
  *  sender only submitted once. Reports past the cap still store and appear
  *  in the admin list; only the email is skipped. */
 export const EMAIL_DAY_MAX = 50
+
+/** `system.appVersion` / `system.platform` length bound. Both are stored
+ *  verbatim in the `ReportIndex` row for every report (the admin list and
+ *  the email subject), and that row's bytes are NOT what `STORE_CEILING_BYTES`
+ *  counts (`sizeBytes` is the compressed upload), so without a bound a
+ *  submitter could park ~250 KiB of uncounted text per report in the single
+ *  index DO. Real values are short (`1.1.0`, `desktop-macos`). */
+export const SYSTEM_FIELD_MAX_CHARS = 128
 
 /** `report.description` length bounds (docs/design/report-bug.md §2's "10 to
  *  10,000 characters", restated in §8's 400 case). */

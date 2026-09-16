@@ -602,3 +602,33 @@ describe('buildReportBundle', () => {
     expect(bundle.recording).toBeUndefined()
   })
 })
+
+describe('scrubHomeDir: home-shaped paths that are not this user\'s own', () => {
+  it('redacts another account\'s macOS or Linux home path, in prose and inside NDJSON', () => {
+    expect(scrubHomeDir('read_file failed for "/Users/alice/Desktop/a.hew": denied', '/Users/kurt')).toBe(
+      'read_file failed for "~/Desktop/a.hew": denied',
+    )
+    expect(scrubHomeDir('/home/bob/models/x.hew', '/Users/kurt')).toBe('~/models/x.hew')
+    expect(scrubHomeDir('{"path":"/Users/alice/a.hew"}', '/Users/kurt')).toBe('{"path":"~/a.hew"}')
+  })
+
+  it('redacts a Windows home path in any letter case, JSON-escaped, or extended-length form', () => {
+    // JSON-escaped (doubled backslashes), and not this user's spelling.
+    expect(scrubHomeDir('failed for "c:\\\\users\\\\Kurt\\\\Documents\\\\b.hew"', 'C:\\Users\\kurt')).toBe(
+      'failed for "~\\\\Documents\\\\b.hew"',
+    )
+    // Extended-length prefix, raw backslashes, another account.
+    expect(scrubHomeDir('\\\\?\\C:\\Users\\dave\\x.hew', 'C:\\Users\\kurt')).toBe('~\\x.hew')
+    // Forward-slash spelling, another drive.
+    expect(scrubHomeDir('D:/Users/erin/y.hew', 'C:\\Users\\kurt')).toBe('~/y.hew')
+  })
+
+  it('leaves the web build alone: no home dir means no filesystem paths to scrub', () => {
+    expect(scrubHomeDir('/Users/alice/x', null)).toBe('/Users/alice/x')
+  })
+
+  it('does not touch a path that merely contains a home-like segment mid-path', () => {
+    expect(scrubHomeDir('/opt/Users/x/y', '/Users/kurt')).toBe('/opt/Users/x/y')
+    expect(scrubHomeDir('see https://example.com/home/page', '/Users/kurt')).toBe('see https://example.com/home/page')
+  })
+})

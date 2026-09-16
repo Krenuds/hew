@@ -58,7 +58,9 @@ export type PutPieceResult =
   | { ok: false; reason: 'not-found' }
   | { ok: false; reason: 'forbidden' }
   | { ok: false; reason: 'too-large' }
+  | { ok: false; reason: 'short-piece' }
   | { ok: false; reason: 'bytes-past-total' }
+  | { ok: false; reason: 'expired' }
   | { ok: false; reason: 'out-of-order'; expected: number }
 
 export type CommitResult =

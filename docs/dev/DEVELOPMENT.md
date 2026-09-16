@@ -104,6 +104,9 @@ crates/pdfwrite/      hand-written PDF 1.4 writer for Save PDF… and the
 crates/wasm-api/      wasm-bindgen surface exposing the kernel to the UI
 crates/hew-relay/     self-hostable "Open on Phone" relay binary (axum;
                       speaks workers/share-relay's contract)
+crates/library/       the Hew Library's on-disk layout (folder resolution,
+                      item naming, atomic list/read/write/remove), shared
+                      by hew-cli's hew.library.* and the desktop shell
 crates/vendor/        vendored third-party code (dae-parser)
 app/                  TypeScript UI (viewport, tools, panels, E2E suite)
 shells/tauri/         desktop shell
@@ -111,6 +114,8 @@ shells/web/           static web build + deploy/ (nginx, relay stanza,
                       systemd unit — shipped inside the release tarball)
 workers/share-relay/  the public relay Worker, its unit suite, and the
                       black-box conformance suite both relays must pass
+workers/bug-intake/   the private Help ▸ Report Bug intake Worker (chunked
+                      upload, Access-protected admin page) and its unit suite
 tools/                replay runner and development tooling
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide

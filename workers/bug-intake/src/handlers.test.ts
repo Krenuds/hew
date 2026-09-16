@@ -39,8 +39,9 @@ import {
   STORE_CEILING_BYTES,
   IDLE_PRUNE_TIMEOUT_MS,
   INDEX_DO_NAME,
+  UPLOAD_LIFETIME_MS,
 } from './constants.ts'
-import { FakeDurableObjectNamespace } from './testSupport/fakeDurableObject.ts'
+import { FakeDurableObjectNamespace, type FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 import type { BugIntakeEnv, ReportDropStub, ReportIndexStub } from './types.ts'
 import type { RawMailSender } from './email.ts'
 import type { VerifyOptions } from './adminAuth.ts'
@@ -565,16 +566,18 @@ describe('START: rate limiting and storage ceiling', () => {
 // PIECE — PUT /report/<id>/<index>
 // ---------------------------------------------------------------------------
 
-describe('PIECE', () => {
-  async function startTwoPieceUpload(env: BugIntakeEnv): Promise<{ id: string; token: string; pieces: Uint8Array[] }> {
-    const compressed = await buildTwoPieceBundle()
-    const pieces = [compressed.slice(0, PIECE_BYTES), compressed.slice(PIECE_BYTES)]
-    const startRes = await handleRequest(startRequest(pieces[0], {}, compressed.byteLength), env, NOOP_MAILER)
-    assert.equal(startRes.status, 201, `start failed: ${await startRes.clone().text()}`)
-    const { id, token } = (await startRes.json()) as { id: string; token: string }
-    return { id, token, pieces }
-  }
+/** START with a real two-piece bundle: an exact `PIECE_BYTES` first piece
+ *  and a shorter second one — the shape every multi-piece upload has. */
+async function startTwoPieceUpload(env: BugIntakeEnv): Promise<{ id: string; token: string; pieces: Uint8Array[] }> {
+  const compressed = await buildTwoPieceBundle()
+  const pieces = [compressed.slice(0, PIECE_BYTES), compressed.slice(PIECE_BYTES)]
+  const startRes = await handleRequest(startRequest(pieces[0], {}, compressed.byteLength), env, NOOP_MAILER)
+  assert.equal(startRes.status, 201, `start failed: ${await startRes.clone().text()}`)
+  const { id, token } = (await startRes.json()) as { id: string; token: string }
+  return { id, token, pieces }
+}
 
+describe('PIECE', () => {
   test('204 on the next expected piece, and touches ReportIndex activity', async () => {
     const env = makeEnv()
     const { id, token, pieces } = await startTwoPieceUpload(env)
@@ -654,12 +657,10 @@ describe('PIECE', () => {
 
   test('400 and abandonment when bytes would go past the declared total', async () => {
     const env = makeEnv()
-    // Declare a tiny total so a normal-sized second piece overruns it.
-    const first = await minimalGzipBundle()
-    const startRes = await handleRequest(startRequest(first, {}, first.byteLength + 5), env, NOOP_MAILER)
-    assert.equal(startRes.status, 201, `start failed: ${await startRes.clone().text()}`)
-    const { id, token } = (await startRes.json()) as { id: string; token: string }
-    const res = await handleRequest(pieceRequest(id, 1, new Uint8Array(10), token), env, NOOP_MAILER)
+    // A two-piece upload declares less than two full pieces, so a FULL
+    // second piece overruns the declared total.
+    const { id, token } = await startTwoPieceUpload(env)
+    const res = await handleRequest(pieceRequest(id, 1, new Uint8Array(PIECE_BYTES), token), env, NOOP_MAILER)
     assert.equal(res.status, 400)
     const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME)) as unknown as IndexStore
     assert.equal(await index.totalStoredBytes(), 0)
@@ -765,11 +766,8 @@ describe('PIECE', () => {
 
   test('503 unavailable when ReportDrop.putPiece throws', async () => {
     const env = makeEnvWithThrowingDrop(new Set(['putPiece']))
-    const first = await minimalGzipBundle()
-    const startRes = await handleRequest(startRequest(first, {}, first.byteLength + 20), env, NOOP_MAILER)
-    assert.equal(startRes.status, 201, `start failed: ${await startRes.clone().text()}`)
-    const { id, token } = (await startRes.json()) as { id: string; token: string }
-    const res = await handleRequest(pieceRequest(id, 1, new Uint8Array(10), token), env, NOOP_MAILER)
+    const { id, token, pieces } = await startTwoPieceUpload(env)
+    const res = await handleRequest(pieceRequest(id, 1, pieces[1], token), env, NOOP_MAILER)
     assert.equal(res.status, 503)
   })
 })
@@ -813,10 +811,7 @@ describe('COMMIT', () => {
 
   test('400 and abandonment when fewer bytes arrived than declared', async () => {
     const env = makeEnv()
-    const first = await minimalGzipBundle()
-    const startRes = await handleRequest(startRequest(first, {}, first.byteLength + 50), env, NOOP_MAILER)
-    assert.equal(startRes.status, 201, `start failed: ${await startRes.clone().text()}`)
-    const { id, token } = (await startRes.json()) as { id: string; token: string }
+    const { id, token } = await startTwoPieceUpload(env)
     const res = await handleRequest(commitRequest(id, token), env, NOOP_MAILER)
     assert.equal(res.status, 400)
     assert.match((await res.json()).message, /fewer bytes/)
@@ -1475,5 +1470,112 @@ describe('404s', () => {
       NOOP_MAILER,
     )
     assert.equal(res.status, 404)
+  })
+})
+
+/** A `makeEnv` twin that also hands back every `ReportDrop` storage it
+ *  ever constructs, in creation order, so a test can look at what a
+ *  request left in the database of a DO it merely NAMED. */
+function makeEnvCapturingDrops(): { env: BugIntakeEnv; dropStorages: FakeDurableObjectStorage[] } {
+  const dropStorages: FakeDurableObjectStorage[] = []
+  const env = {} as BugIntakeEnv
+  env.REPORT_DROP = new FakeDurableObjectNamespace<ReportDropStub>((state) => {
+    dropStorages.push(state.storage as FakeDurableObjectStorage)
+    return new ReportStore(state.storage)
+  })
+  env.REPORT_INDEX = new FakeDurableObjectNamespace<ReportIndexStub>((state) => new IndexStore(state.storage))
+  env.IP_HASH_SECRET = 'test-secret'
+  env.ACCESS_TEAM_DOMAIN = TEAM_DOMAIN
+  env.ACCESS_AUD = AUD
+  return { env, dropStorages }
+}
+
+describe('unknown ids leave no Durable Object storage behind', () => {
+  function tableCount(storage: FakeDurableObjectStorage): number {
+    return storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'").toArray()[0].n
+  }
+
+  test('a PUT, a COMMIT, and an oversized PUT naming a never-started id all 404 and create no tables', async () => {
+    const { env, dropStorages } = makeEnvCapturingDrops()
+    const token = 'A'.repeat(43)
+
+    const put = await handleRequest(pieceRequest('HEW-ZZZZ-0000', 1, new Uint8Array(16), token), env, NOOP_MAILER)
+    assert.equal(put.status, 404)
+    const commit = await handleRequest(commitRequest('HEW-ZZZZ-0000', token), env, NOOP_MAILER)
+    assert.equal(commit.status, 404)
+    const oversized = await handleRequest(
+      pieceRequest('HEW-ZZZZ-0000', 1, new Uint8Array(PIECE_BYTES + 1), token),
+      env,
+      NOOP_MAILER,
+    )
+    assert.equal(oversized.status, 404)
+
+    assert.equal(dropStorages.length, 1, 'one DO was addressed')
+    assert.equal(tableCount(dropStorages[0]), 0, 'and it holds no schema — nothing durable for a guessed id')
+  })
+
+  test('a report the admin deleted answers later stray requests without recreating its schema', async () => {
+    const { env, dropStorages } = makeEnvCapturingDrops()
+    const { id, token } = await uploadAndCommit(env)
+    assert.equal(dropStorages.length, 1)
+    assert.ok(tableCount(dropStorages[0]) > 0)
+
+    const { token: adminToken, authOptions } = await makeAdminAuth()
+    const del = await handleRequest(
+      new Request(`https://app.hew3d.com/report/admin/${id}/delete`, {
+        method: 'POST',
+        headers: { 'cf-access-jwt-assertion': adminToken, origin: 'https://app.hew3d.com' },
+      }),
+      env,
+      NOOP_MAILER,
+      authOptions,
+    )
+    assert.equal(del.status, 303)
+    assert.equal(tableCount(dropStorages[0]), 0)
+
+    const commit = await handleRequest(commitRequest(id, token), env, NOOP_MAILER)
+    assert.equal(commit.status, 404)
+    assert.equal(tableCount(dropStorages[0]), 0)
+  })
+})
+
+describe('upload lifetime and piece-shape bounds (reservation keepalive)', () => {
+  test('START refuses a first piece that is neither the whole report nor exactly PIECE_BYTES, reserving nothing', async () => {
+    const env = makeEnv()
+    const first = await minimalGzipBundle()
+    const res = await handleRequest(startRequest(first, {}, first.byteLength + 5000), env, NOOP_MAILER)
+    assert.equal(res.status, 400)
+    const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME)) as unknown as IndexStore
+    assert.equal(await index.totalStoredBytes(), 0)
+  })
+
+  test('an empty keepalive PUT with the right token is a 400 that abandons the upload', async () => {
+    const env = makeEnv()
+    const { id, token } = await startTwoPieceUpload(env)
+    const res = await handleRequest(pieceRequest(id, 1, new Uint8Array(0), token), env, NOOP_MAILER)
+    assert.equal(res.status, 400)
+    const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME)) as unknown as IndexStore
+    assert.equal(await index.totalStoredBytes(), 0, 'the reservation is released')
+    assert.equal(await env.REPORT_DROP.get(env.REPORT_DROP.idFromName(id)).head(), null, 'the partial drop is gone')
+  })
+
+  test('an empty keepalive PUT with the WRONG token is a 403 that abandons nothing', async () => {
+    const env = makeEnv()
+    const { id, token, pieces } = await startTwoPieceUpload(env)
+    const res = await handleRequest(pieceRequest(id, 1, new Uint8Array(0), 'totally-wrong-token-value-thats-43-charsx'), env, NOOP_MAILER)
+    assert.equal(res.status, 403)
+    const ok = await handleRequest(pieceRequest(id, 1, pieces[1], token), env, NOOP_MAILER)
+    assert.equal(ok.status, 204)
+  })
+
+  test('a piece arriving after UPLOAD_LIFETIME_MS is a 400 that abandons the upload', async () => {
+    const { env, dropStorages } = makeEnvCapturingDrops()
+    const { id, token, pieces } = await startTwoPieceUpload(env)
+    assert.equal(dropStorages.length, 1)
+    dropStorages[0].sql.exec('UPDATE meta SET receivedAt = ? WHERE id = 0', Date.now() - UPLOAD_LIFETIME_MS - 1)
+    const res = await handleRequest(pieceRequest(id, 1, pieces[1], token), env, NOOP_MAILER)
+    assert.equal(res.status, 400)
+    const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME)) as unknown as IndexStore
+    assert.equal(await index.totalStoredBytes(), 0, 'the reservation is released')
   })
 })

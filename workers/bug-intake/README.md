@@ -36,8 +36,8 @@ first), then **COMMIT**.
 | Route | Method | Purpose | Response |
 |---|---|---|---|
 | `/report/` (also `/report`) | `GET` | identity | `200 {"service":"hew-bug-intake","format":1,"maxBytes":94371840,"pieceBytes":1900000}` |
-| `/report/` (also `/report`) | `POST` | **START** — begins an upload with its first piece | `201 {"id":"HEW-XXXX-XXXX","token":"<43-char base64url>","pieceBytes":1900000}` / `400` invalid / `411` no Content-Length / `413` too large / `429` rate limited / `507` full / `5xx` unavailable |
-| `/report/<id>/<index>` (`index` ≥ 1) | `PUT` | **PIECE** — uploads one following piece | `204` stored (or an accepted idempotent retry) / `400` invalid (piece too large, or past the declared total, WITH the correct upload token — **abandons the upload**) / `403` forbidden (missing/wrong token — never abandons anything, even an oversized piece) / `404` not found (unknown, committed, or already abandoned) / `409 {"error":"out-of-order","expected":<n>}` / `5xx` unavailable |
+| `/report/` (also `/report`) | `POST` | **START** — begins an upload with its first piece | `201 {"id":"HEW-XXXX-XXXX","token":"<43-char base64url>","pieceBytes":1900000}` / `400` invalid (including a first piece that is neither the whole report nor exactly `pieceBytes`) / `411` no Content-Length / `413` too large / `429` rate limited / `507` full / `5xx` unavailable |
+| `/report/<id>/<index>` (`index` ≥ 1) | `PUT` | **PIECE** — uploads one following piece | `204` stored (or an accepted idempotent retry) / `400` invalid (piece too large, past the declared total, a non-final piece that is not exactly `pieceBytes`, or an upload older than `UPLOAD_LIFETIME_MS` — all WITH the correct upload token — **abandons the upload**) / `403` forbidden (missing/wrong token — never abandons anything, even an oversized piece) / `404` not found (unknown, committed, or already abandoned) / `409 {"error":"out-of-order","expected":<n>}` / `5xx` unavailable |
 | `/report/<id>/commit` | `POST` | **COMMIT** — finishes the upload | `201 {"id":"HEW-XXXX-XXXX"}` — idempotent for the token holder: a retry against an already-committed report answers `201` again (with no second notification email), not `404` / `400` invalid (fewer bytes arrived than declared — **abandons the upload**) / `403` forbidden / `404` not found / `5xx` unavailable |
 | `/report/admin/` | `GET` | the reports list (HTML), Access-protected | |
 | `/report/admin/<id>` | `GET` | one report's detail (HTML) — reads and decompresses only piece 0's HEAD, never the whole bundle | |
@@ -68,8 +68,12 @@ index (stores it, `204`), silently accepts an identical retry of the last
 stored index without storing it twice (also `204` — the client's own retry
 after a dropped response), and refuses anything else as `409
 out-of-order` naming the index it actually expects. A piece over
-`pieceBytes`, or one that would push the upload past its declared total, is
-a `400` that **abandons the upload** — but ONLY once the presented
+`pieceBytes`, one that would push the upload past its declared total, a
+piece that is not the LAST one yet is not exactly `pieceBytes` long (both
+clients split at that size; a smaller or empty middle piece is only ever a
+keepalive — see "Abandonment"), or any piece arriving more than
+`UPLOAD_LIFETIME_MS` after START, is a `400` that **abandons the upload**
+— but ONLY once the presented
 `Hew-Upload-Token` has been checked against it: report IDs are public (a
 user pastes one into a GitHub issue), so an ID alone must never be enough
 to destroy a report. A missing or wrong token on an oversized piece is a
@@ -134,7 +138,10 @@ a description containing `{`, `}`, or `,` inside a quoted string never
 confuses it) that checks the decompressed text begins `{"format":1,
 "report":{…}` in that exact key order, that `report.description` is
 10–10,000 characters, and — if a `system` key immediately follows `report`
-— that it's an object. `system` is **optional**: the dialog lets a user
+— that it's an object whose `appVersion`/`platform` are at most
+`SYSTEM_FIELD_MAX_CHARS` (128) characters: both are stored verbatim in the
+`ReportIndex` row, whose bytes the storage ceiling does not count, so an
+unbounded value there would be uncounted storage. `system` is **optional**: the dialog lets a user
 untick "App version and system" entirely, and a report submitted without
 it is still accepted, with `appVersion`/`platform` recorded as empty
 strings (the admin page and the notification email display "unknown").
@@ -253,8 +260,27 @@ Two independent mechanisms, deliberately overlapping:
   `ABANDON_TIMEOUT_MS` on purpose, since the per-drop alarm is meant to be
   the one that actually fires first in the normal case.
 
+- **An absolute lifetime** (`UPLOAD_LIFETIME_MS`, two hours since START),
+  independent of activity, because both mechanisms above measure only
+  silence while an uncommitted upload holds its whole declared size
+  against the storage ceiling from the moment START accepts it. Without
+  it, a caller could hold a 90 MiB reservation open forever by sending
+  one trivial piece every nine minutes — and with 20 STARTs a day per
+  client hash, fill the 3 GiB ceiling for everyone in two days. Three
+  places enforce it: the drop's alarm is never armed later than
+  `receivedAt + UPLOAD_LIFETIME_MS`; `ReportStore.putPiece` refuses a
+  piece after that instant as `expired` (a `400` that abandons); and the
+  index prune also drops uncommitted rows whose `receivedAt` is past it.
+  The companion rule that every piece but the last is exactly `pieceBytes`
+  (`short-piece`, also a `400` that abandons) caps an upload at
+  `ceil(declaredTotal / pieceBytes)` requests, so there is no cheap
+  keepalive to send in the first place. Two hours is far beyond the
+  slowest legitimate upload: 90 MiB in 1.9 MB pieces at the clients'
+  two-minute per-request timeout is about 100 minutes.
+
 An explicit `400` on a piece or commit (oversized piece, bytes past the
-declared total, an incomplete commit) doesn't wait for either of these —
+declared total, a short or late piece, an incomplete commit) doesn't wait
+for either of these —
 `handlers.ts`'s `abandonUpload` runs immediately, deleting the drop and
 releasing the reservation as part of answering that same request.
 
@@ -299,6 +325,17 @@ tier's least generous quota (100k/day account-wide):
   schedule, so they stay small without this DO needing its own alarm
   (which would collide with "the alarm" meaning abandonment/retention,
   `ReportDrop`'s job, everywhere else in this codebase).
+- **A guessed id costs nothing durable**: `PUT`/`commit` (and an admin
+  route) naming a well-formed id that was never started still instantiate
+  that id's `ReportDrop`, but `ReportStore` creates its tables only in
+  `startUpload` — every other method first asks `sqlite_master` whether
+  the schema exists and answers "not found" without creating it. The
+  earlier constructor-runs-`CREATE TABLE` shape left a few KiB of empty
+  schema behind per such request, forever (no alarm, no cleanup), which
+  an unauthenticated caller could have minted by the hundred thousand
+  against the account-wide Durable Object storage and daily row-write
+  quotas shared with share-relay. share-relay's `DropStore` follows the
+  same rule.
 
 Turnstile is out of scope here — see `docs/design/report-bug.md` §4 for why
 (the desktop path can't run a browser challenge; the web path would need to

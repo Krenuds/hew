@@ -25,7 +25,13 @@
  * decompressed text in the first place, bounded the same way.
  */
 
-import { BUNDLE_FORMAT, DESCRIPTION_MIN_CHARS, DESCRIPTION_MAX_CHARS, HEAD_MAX_DECOMPRESSED_BYTES } from './constants.ts'
+import {
+  BUNDLE_FORMAT,
+  DESCRIPTION_MIN_CHARS,
+  DESCRIPTION_MAX_CHARS,
+  HEAD_MAX_DECOMPRESSED_BYTES,
+  SYSTEM_FIELD_MAX_CHARS,
+} from './constants.ts'
 
 export interface HeadFields {
   description: string
@@ -162,6 +168,14 @@ export function validateHead(text: string): HeadValidation {
     const systemObj = system as Record<string, unknown>
     appVersion = typeof systemObj.appVersion === 'string' ? systemObj.appVersion : ''
     platform = typeof systemObj.platform === 'string' ? systemObj.platform : ''
+    // Both land verbatim in the index row and the email subject, and the
+    // storage ceiling never counts them — see `SYSTEM_FIELD_MAX_CHARS`.
+    if (appVersion.length > SYSTEM_FIELD_MAX_CHARS || platform.length > SYSTEM_FIELD_MAX_CHARS) {
+      return {
+        ok: false,
+        message: `system.appVersion and system.platform must be at most ${SYSTEM_FIELD_MAX_CHARS} characters`,
+      }
+    }
   }
 
   return { ok: true, fields: { description, appVersion, platform } }

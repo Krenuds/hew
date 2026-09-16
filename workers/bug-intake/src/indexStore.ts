@@ -44,6 +44,7 @@ import {
   RATE_LIMIT_WINDOW_MS,
   EMAIL_DAY_MAX,
   STORE_CEILING_BYTES,
+  UPLOAD_LIFETIME_MS,
 } from './constants.ts'
 
 export interface ReportRow {
@@ -281,15 +282,23 @@ export class IndexStore {
    *  alarm somehow missed. ACTIVITY time, not age since `receivedAt`: a
    *  genuinely slow but still-progressing upload keeps touching activity
    *  the whole time and is never at risk. */
-  async findAndDeleteIdleUncommittedIds(now: number, maxIdleMs: number): Promise<string[]> {
+  async findAndDeleteIdleUncommittedIds(now: number, maxIdleMs: number, maxLifetimeMs: number = UPLOAD_LIFETIME_MS): Promise<string[]> {
     this.migrate()
-    const threshold = now - maxIdleMs
+    const idleThreshold = now - maxIdleMs
+    // Idle by activity, OR simply too old: an upload that keeps sending
+    // pieces past `UPLOAD_LIFETIME_MS` never goes idle, and its reservation
+    // would otherwise hold the ceiling for as long as it cares to keep
+    // trickling (`reportStore.ts`'s `putPiece` refuses it as `expired` and
+    // its alarm is never armed past the same bound — this is the index's
+    // own copy of that rule).
+    const ageThreshold = now - maxLifetimeMs
+    const where = 'committed = 0 AND (lastActivity < ? OR receivedAt < ?)'
     const ids = this.storage.sql
-      .exec<{ id: string }>('SELECT id FROM reports WHERE committed = 0 AND lastActivity < ?', threshold)
+      .exec<{ id: string }>(`SELECT id FROM reports WHERE ${where}`, idleThreshold, ageThreshold)
       .toArray()
       .map((r) => r.id)
     if (ids.length > 0) {
-      this.storage.sql.exec('DELETE FROM reports WHERE committed = 0 AND lastActivity < ?', threshold)
+      this.storage.sql.exec(`DELETE FROM reports WHERE ${where}`, idleThreshold, ageThreshold)
     }
     return ids
   }

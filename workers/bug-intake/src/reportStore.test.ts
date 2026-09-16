@@ -2,13 +2,15 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { ReportStore, type StartFields } from './reportStore.ts'
-import { RETENTION_MS, ABANDON_TIMEOUT_MS, PIECE_BYTES } from './constants.ts'
+import { RETENTION_MS, ABANDON_TIMEOUT_MS, UPLOAD_LIFETIME_MS, PIECE_BYTES } from './constants.ts'
 import { concatChunks } from './bytes.ts'
 import { hashToken } from './uploadToken.ts'
 import { FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 
-function makeStore(): ReportStore {
-  return new ReportStore(new FakeDurableObjectStorage())
+/** `pieceBytes` defaults to the real `PIECE_BYTES`; the protocol tests
+ *  below pass a small size so ten-byte pieces model a multi-piece upload. */
+function makeStore(pieceBytes: number = PIECE_BYTES): ReportStore {
+  return new ReportStore(new FakeDurableObjectStorage(), pieceBytes)
 }
 
 function randomBytes(n: number): Uint8Array {
@@ -119,7 +121,7 @@ describe('ReportStore: upload round trip', () => {
 
 describe('ReportStore: putPiece', () => {
   test('stores the next expected index, advances, and reports stored:true', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0001', 20, tokenHash, randomBytes(10), FIELDS)
     const result = await store.putPiece(1, tokenHash, randomBytes(10))
@@ -127,7 +129,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('an identical retry of the last stored index is accepted without storing twice', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     const piece1 = randomBytes(10)
     await store.startUpload('HEW-AAAA-0002', 20, tokenHash, piece1, FIELDS)
@@ -140,7 +142,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('a retry with a different length is rejected as out-of-order', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0003', 25, tokenHash, randomBytes(10), FIELDS)
     await store.putPiece(1, tokenHash, randomBytes(10))
@@ -149,7 +151,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('skipping ahead is rejected as out-of-order with the expected index', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0004', 30, tokenHash, randomBytes(10), FIELDS)
     const result = await store.putPiece(3, tokenHash, randomBytes(10))
@@ -157,7 +159,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('an index far behind (not the immediate prior one) is rejected as out-of-order', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0005', 40, tokenHash, randomBytes(10), FIELDS)
     await store.putPiece(1, tokenHash, randomBytes(10))
@@ -167,7 +169,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('wrong token hash is forbidden', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('right')
     await store.startUpload('HEW-AAAA-0006', 20, tokenHash, randomBytes(10), FIELDS)
     const result = await store.putPiece(1, await hashToken('wrong'), randomBytes(10))
@@ -175,7 +177,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('a piece over PIECE_BYTES is rejected as too-large', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0007', PIECE_BYTES * 3, tokenHash, randomBytes(10), FIELDS)
     const result = await store.putPiece(1, tokenHash, randomBytes(PIECE_BYTES + 1))
@@ -183,7 +185,7 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('bytes past the declared total are rejected', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0008', 15, tokenHash, randomBytes(10), FIELDS)
     const result = await store.putPiece(1, tokenHash, randomBytes(10)) // 10 + 10 = 20 > 15
@@ -191,13 +193,13 @@ describe('ReportStore: putPiece', () => {
   })
 
   test('not-found for an upload that was never started', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const result = await store.putPiece(1, await hashToken('t'), randomBytes(10))
     assert.deepEqual(result, { ok: false, reason: 'not-found' })
   })
 
   test('not-found once the upload is committed', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-AAAA-0009', 10, tokenHash, randomBytes(10), FIELDS)
     const committed = await store.commit(tokenHash)
@@ -222,7 +224,7 @@ describe('ReportStore: putPiece', () => {
 
 describe('ReportStore: commit', () => {
   test('succeeds once every declared byte has arrived, returning the head-validated fields', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-BBBB-0001', 20, tokenHash, randomBytes(10), FIELDS)
     await store.putPiece(1, tokenHash, randomBytes(10))
@@ -231,7 +233,7 @@ describe('ReportStore: commit', () => {
   })
 
   test('incomplete when fewer bytes arrived than declared', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-BBBB-0002', 30, tokenHash, randomBytes(10), FIELDS)
     const result = await store.commit(tokenHash)
@@ -239,7 +241,7 @@ describe('ReportStore: commit', () => {
   })
 
   test('forbidden with the wrong token', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('right')
     await store.startUpload('HEW-BBBB-0003', 10, tokenHash, randomBytes(10), FIELDS)
     const result = await store.commit(await hashToken('wrong'))
@@ -247,13 +249,13 @@ describe('ReportStore: commit', () => {
   })
 
   test('not-found for an upload that was never started', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const result = await store.commit(await hashToken('t'))
     assert.deepEqual(result, { ok: false, reason: 'not-found' })
   })
 
   test('a second commit with the right token is idempotent, returning the same fields again', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-BBBB-0004', 10, tokenHash, randomBytes(10), FIELDS)
     const first = await store.commit(tokenHash)
@@ -263,7 +265,7 @@ describe('ReportStore: commit', () => {
   })
 
   test('a second commit with the wrong token is forbidden, not idempotent', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('right')
     await store.startUpload('HEW-BBBB-0006', 10, tokenHash, randomBytes(10), FIELDS)
     const first = await store.commit(tokenHash)
@@ -324,7 +326,7 @@ describe('ReportStore: alarm arming at start', () => {
 
 describe('ReportStore: abandon', () => {
   test('destroys the upload when the token matches', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-ABND-0001', 20, tokenHash, randomBytes(10), FIELDS)
     const result = await store.abandon(tokenHash)
@@ -333,7 +335,7 @@ describe('ReportStore: abandon', () => {
   })
 
   test('forbidden with the wrong token, and the upload survives untouched', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('right')
     await store.startUpload('HEW-ABND-0002', 20, tokenHash, randomBytes(10), FIELDS)
     const result = await store.abandon(await hashToken('wrong'))
@@ -342,13 +344,13 @@ describe('ReportStore: abandon', () => {
   })
 
   test('not-found for an upload that was never started', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const result = await store.abandon(await hashToken('t'))
     assert.deepEqual(result, { ok: false, reason: 'not-found' })
   })
 
   test('not-found once the upload is committed, even with the right token — a committed report must survive', async () => {
-    const store = makeStore()
+    const store = makeStore(10)
     const tokenHash = await hashToken('t')
     await store.startUpload('HEW-ABND-0003', 10, tokenHash, randomBytes(10), FIELDS)
     const committed = await store.commit(tokenHash)
@@ -396,5 +398,96 @@ describe('ReportStore: readStream', () => {
     const head = await store.head()
     assert.ok(head !== null)
     assert.equal(head.pieceCount, 1)
+  })
+})
+
+describe('ReportStore: a never-started instance creates no storage', () => {
+  function tableNames(storage: FakeDurableObjectStorage): string[] {
+    return storage.sql
+      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .toArray()
+      .map((r) => r.name)
+  }
+
+  test('every read path answers "absent" against a fresh DO without creating a single table', async () => {
+    const storage = new FakeDurableObjectStorage()
+    const store = new ReportStore(storage)
+    const tokenHash = await hashToken('t')
+
+    assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(4)), { ok: false, reason: 'not-found' })
+    assert.deepEqual(await store.commit(tokenHash), { ok: false, reason: 'not-found' })
+    assert.deepEqual(await store.abandon(tokenHash), { ok: false, reason: 'not-found' })
+    assert.equal(await store.head(), null)
+    assert.deepEqual(await store.read(0, 8), [])
+    const stream = await store.readStream()
+    const { done } = await stream.getReader().read()
+    assert.equal(done, true)
+    await store.destroy()
+
+    assert.deepEqual(tableNames(storage), [], 'a guessed or stale id must leave no durable schema behind')
+  })
+
+  test('startUpload is what creates the schema, and destroy() takes it away again for good', async () => {
+    const storage = new FakeDurableObjectStorage()
+    const store = new ReportStore(storage)
+    const tokenHash = await hashToken('t')
+    await store.startUpload('HEW-AAAA-BBBB', 4, tokenHash, randomBytes(4), FIELDS)
+    assert.deepEqual(tableNames(storage), ['meta', 'piece'])
+
+    await store.destroy()
+    assert.deepEqual(tableNames(storage), [])
+
+    // The same live instance keeps answering "absent" afterwards — a
+    // retention-expired or admin-deleted report's later stray requests
+    // (a client retry, a stale alarm) never resurrect its schema.
+    assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(4)), { ok: false, reason: 'not-found' })
+    assert.deepEqual(await store.commit(tokenHash), { ok: false, reason: 'not-found' })
+    assert.equal(await store.head(), null)
+    assert.deepEqual(tableNames(storage), [])
+  })
+})
+
+describe('ReportStore: upload lifetime and piece shape', () => {
+  test('a non-final piece that is not exactly PIECE_BYTES is refused as short-piece and stores nothing', async () => {
+    const store = new ReportStore(new FakeDurableObjectStorage())
+    const tokenHash = await hashToken('t')
+    await store.startUpload('HEW-KEEP-ALIV', PIECE_BYTES * 2 + 5, tokenHash, randomBytes(PIECE_BYTES), FIELDS)
+
+    // The keepalive an attacker would send: an empty (or tiny) middle piece.
+    assert.deepEqual(await store.putPiece(1, tokenHash, new Uint8Array(0)), { ok: false, reason: 'short-piece' })
+    assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(10)), { ok: false, reason: 'short-piece' })
+    const head = await store.head()
+    assert.equal(head?.pieceCount, 1, 'nothing was stored')
+    assert.equal(head?.totalBytes, PIECE_BYTES)
+
+    // The real shape still works: exact middle piece, short LAST piece.
+    assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(PIECE_BYTES)), { ok: true, stored: true })
+    assert.deepEqual(await store.putPiece(2, tokenHash, randomBytes(5)), { ok: true, stored: true })
+    assert.equal((await store.commit(tokenHash)).ok, true)
+  })
+
+  test('the abandonment alarm is never armed past UPLOAD_LIFETIME_MS after START, however recent the activity', async () => {
+    const storage = new FakeDurableObjectStorage()
+    const store = new ReportStore(storage)
+    const tokenHash = await hashToken('t')
+    await store.startUpload('HEW-KEEP-ALIV', PIECE_BYTES * 3, tokenHash, randomBytes(PIECE_BYTES), FIELDS)
+    const receivedAt = Date.now() - UPLOAD_LIFETIME_MS + 60_000
+    storage.sql.exec('UPDATE meta SET receivedAt = ? WHERE id = 0', receivedAt)
+
+    assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(PIECE_BYTES)), { ok: true, stored: true })
+    const alarm = await storage.getAlarm()
+    assert.equal(alarm, receivedAt + UPLOAD_LIFETIME_MS, 'capped at the absolute lifetime, not now + ABANDON_TIMEOUT_MS')
+    assert.ok(alarm! < Date.now() + ABANDON_TIMEOUT_MS)
+  })
+
+  test('a piece after UPLOAD_LIFETIME_MS is refused as expired — but only to the token holder', async () => {
+    const storage = new FakeDurableObjectStorage()
+    const store = new ReportStore(storage)
+    const tokenHash = await hashToken('t')
+    await store.startUpload('HEW-KEEP-ALIV', PIECE_BYTES * 3, tokenHash, randomBytes(PIECE_BYTES), FIELDS)
+    storage.sql.exec('UPDATE meta SET receivedAt = ? WHERE id = 0', Date.now() - UPLOAD_LIFETIME_MS - 1)
+
+    assert.deepEqual(await store.putPiece(1, await hashToken('wrong'), randomBytes(PIECE_BYTES)), { ok: false, reason: 'forbidden' })
+    assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(PIECE_BYTES)), { ok: false, reason: 'expired' })
   })
 })

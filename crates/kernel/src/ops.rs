@@ -575,6 +575,19 @@ pub enum SliceError {
     Degenerate,
 }
 
+/// Whether a curve claim's numbers are all finite. Every "claim must match
+/// geometry" gate below is a `>` comparison against a distance, and any
+/// comparison involving NaN is `false` — so a NaN or infinite center would
+/// pass those gates and be committed as an edge's analytic claim. Checked
+/// explicitly before them (the wasm boundary refuses the same input as a
+/// request-shape error; this is the kernel's own rule, not a backstop).
+fn curve_geom_is_finite(g: &crate::sketch::CurveGeom) -> bool {
+    g.center.x.is_finite()
+        && g.center.y.is_finite()
+        && g.center.z.is_finite()
+        && g.radius.is_finite()
+}
+
 impl std::fmt::Display for SliceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
@@ -3624,7 +3637,7 @@ impl Object {
             let Some(g) = g else {
                 continue;
             };
-            if !g.radius.is_finite() || g.radius <= tol::POINT_MERGE {
+            if !curve_geom_is_finite(g) || g.radius <= tol::POINT_MERGE {
                 return Err(StickyError::CurveClaimOffLoop);
             }
             for p in [pts[k], pts[(k + 1) % n]] {
@@ -5034,7 +5047,7 @@ impl Object {
             let Some(g) = g else {
                 continue;
             };
-            if !g.radius.is_finite() || g.radius <= tol::POINT_MERGE {
+            if !curve_geom_is_finite(g) || g.radius <= tol::POINT_MERGE {
                 return Err(StickyError::CurveClaimOffLoop);
             }
             for p in [resolved_path[k], resolved_path[k + 1]] {

@@ -2,7 +2,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { validateHead, HeadDecompressor, decompressAndValidateHead, parseHeadForDisplay } from './headScan.ts'
-import { DESCRIPTION_MIN_CHARS, DESCRIPTION_MAX_CHARS, HEAD_MAX_DECOMPRESSED_BYTES } from './constants.ts'
+import { DESCRIPTION_MIN_CHARS, DESCRIPTION_MAX_CHARS, HEAD_MAX_DECOMPRESSED_BYTES, SYSTEM_FIELD_MAX_CHARS } from './constants.ts'
 
 async function gzipBytes(input: Uint8Array): Promise<Uint8Array> {
   const cs = new CompressionStream('gzip')
@@ -472,5 +472,22 @@ describe('decompressAndValidateHead', () => {
     const piece = compressed.slice(0, 20) // nowhere near enough to decode a usable head
     const result = await decompressAndValidateHead(piece, false)
     assert.equal(result.ok, false)
+  })
+})
+
+describe('validateHead: system field length cap', () => {
+  test('appVersion/platform exactly at SYSTEM_FIELD_MAX_CHARS are accepted; one over is refused', () => {
+    const atCap = validateHead(
+      headText({ system: { appVersion: 'v'.repeat(SYSTEM_FIELD_MAX_CHARS), platform: 'p'.repeat(SYSTEM_FIELD_MAX_CHARS) } }),
+    )
+    assert.equal(atCap.ok, true)
+    const longVersion = validateHead(headText({ system: { appVersion: 'v'.repeat(SYSTEM_FIELD_MAX_CHARS + 1), platform: 'desktop-macos' } }))
+    assert.equal(longVersion.ok, false)
+    const longPlatform = validateHead(headText({ system: { appVersion: '1.1.0', platform: 'p'.repeat(SYSTEM_FIELD_MAX_CHARS + 1) } }))
+    assert.equal(longPlatform.ok, false)
+    // A quarter-megabyte platform string used to be stored in the index row
+    // uncounted by the storage ceiling.
+    const huge = validateHead(headText({ system: { appVersion: '1.1.0', platform: 'p'.repeat(200_000) } }))
+    assert.equal(huge.ok, false)
   })
 })

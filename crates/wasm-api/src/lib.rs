@@ -421,12 +421,20 @@ fn group_id(handle: u64) -> GroupId {
     GroupId::from(KeyData::from_ffi(handle))
 }
 
-/// A drawn circle from the wasm boundary: `center` is an xyz triple.
+/// A drawn circle from the wasm boundary: `center` is an xyz triple of
+/// finite numbers. Finiteness is checked HERE because the kernel's
+/// "claim must match geometry" gates are `>` comparisons against a
+/// distance, and every comparison with NaN is false — a NaN center would
+/// sail through them and be persisted as an edge's analytic claim (the
+/// same reason `radius` is checked right beside it in the kernel).
 fn parse_curve(center: &[f64], radius: f64) -> Result<kernel::CurveGeom, ApiError> {
-    if center.len() != 3 {
+    if center.len() != 3 || !center.iter().all(|c| c.is_finite()) {
         return Err(ApiError(
-            "BadCurve: center must be an xyz triple".to_string(),
+            "BadCurve: center must be an xyz triple of finite numbers".to_string(),
         ));
+    }
+    if !radius.is_finite() {
+        return Err(ApiError("BadCurve: radius must be finite".to_string()));
     }
     Ok(kernel::CurveGeom {
         center: Point3::new(center[0], center[1], center[2]),
@@ -5629,9 +5637,9 @@ impl Scene {
         center: &[f64],
         radius: f64,
     ) -> Result<u64, ApiError> {
-        if center.len() != 3 {
+        if center.len() != 3 || !center.iter().all(|c| c.is_finite()) {
             return Err(ApiError(
-                "BadCurve: center must be an xyz triple".to_string(),
+                "BadCurve: center must be an xyz triple of finite numbers".to_string(),
             ));
         }
         let curve = kernel::CurveGeom {
@@ -6677,9 +6685,9 @@ impl Scene {
         center: &[f64],
         radius: f64,
     ) -> Result<u64, ApiError> {
-        if center.len() != 3 {
+        if center.len() != 3 || !center.iter().all(|c| c.is_finite()) {
             return Err(ApiError(
-                "BadCurve: center must be an xyz triple".to_string(),
+                "BadCurve: center must be an xyz triple of finite numbers".to_string(),
             ));
         }
         let curve = kernel::CurveGeom {
