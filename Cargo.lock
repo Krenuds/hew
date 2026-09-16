@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "dae-import"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dae-parser",
  "kernel",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "gltf-import"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "gltf",
  "kernel",
@@ -518,7 +518,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hew-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "api",
  "dae-import",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "hew-relay"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "axum",
  "clap",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "hlr"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "proptest",
  "serde",
@@ -745,7 +745,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "library"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "serde_json",
@@ -788,7 +788,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mesh-export"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "serde_json",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-heal"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -875,7 +875,7 @@ checksum = "7ed904b6e9a4c08e08ed1ed605938d5ecf82325c31edbbec9651d07a30df4ac9"
 
 [[package]]
 name = "pdfwrite"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "miniz_oxide",
 ]
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "skp-import"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dae-import",
  "kernel",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "softrender"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "tessellate",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "stl-import"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "mesh-heal",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "tessellate"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-api"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "api",
  "dae-import",

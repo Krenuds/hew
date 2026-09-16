@@ -8,7 +8,7 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
-## [1.1.0] (Unreleased) - The "User Feedback" Release
+## [1.1.0] (2026-09-16) - The "User Feedback" Release
 
 Hew had no users before 1.0 and so this is the first one incorporating
 user feedback... and there was a lot of that! As a result, this release
@@ -73,6 +73,7 @@ work, too).
 ### Security
 
 - **Desktop:** Updated rustls to 0.23.45 for RUSTSEC-2026-0285.
+- **All:** An audit of the Report Bug intake and everything new since 1.0. An upload is bounded in size, shape, and time, a guessed report id costs the service nothing, the log scrub covers any home folder, and a malformed arc claim is refused.
 
 ## [1.0.0] (2026-08-24) - The "Rock Solid" Release
 
@@ -358,7 +359,7 @@ modeling tools working and builds for every platform.
 
 - **Linux:** The AppImage can fail to load on newer distributions. Fixed in 0.1.1.
 
-[1.1.0]: https://github.com/hew3d/hew/compare/v1.0.0...HEAD
+[1.1.0]: https://github.com/hew3d/hew/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/hew3d/hew/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/hew3d/hew/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/hew3d/hew/compare/v0.8.0...v0.9.0
