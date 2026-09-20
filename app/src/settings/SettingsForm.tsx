@@ -108,6 +108,94 @@ export function SettingsNote({ children }: { children: ReactNode }) {
   )
 }
 
+/**
+ * Shared continuous control: a native `<input type="range">` with a
+ * fixed-width readout beside it (fixed so the row cannot reflow as the value
+ * changes under the user's thumb) and optional end captions under the track.
+ *
+ * Native rather than a custom div-and-thumb track: it is keyboard-operable,
+ * focusable and announced correctly for free. What it does NOT get right on
+ * its own is the announced value — `aria-valuenow` of 0.8 is read out as
+ * "zero point eight" — so `format` also feeds `aria-valuetext`, and the
+ * visible readout is `aria-hidden` to avoid it being announced twice.
+ *
+ * The label comes from the enclosing `SettingsRow`'s `htmlFor`, so `id` is
+ * required and there is deliberately no `aria-label` prop — one way to label
+ * a row, not two.
+ */
+export function SettingsSlider({
+  id,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  format = String,
+  minLabel,
+  maxLabel,
+  width = 180,
+}: {
+  id: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (next: number) => void
+  format?: (v: number) => string
+  minLabel?: string
+  maxLabel?: string
+  width?: number
+}) {
+  const readout = format(value)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <input
+          id={id}
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          aria-valuetext={readout}
+          onChange={(e) => onChange(Number(e.target.value))}
+          style={{
+            width: `${width}px`,
+            accentColor: 'var(--accent-base, #5b8cff)',
+            margin: 0,
+          }}
+        />
+        <span
+          aria-hidden="true"
+          style={{
+            minWidth: '3.5em',
+            fontSize: '13px',
+            fontVariantNumeric: 'tabular-nums',
+            color: 'var(--text-secondary, #ddd)',
+          }}
+        >
+          {readout}
+        </span>
+      </div>
+      {(minLabel !== undefined || maxLabel !== undefined) && (
+        <div
+          aria-hidden="true"
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            width: `${width}px`,
+            fontSize: '11px',
+            color: 'var(--text-faint, #888)',
+          }}
+        >
+          <span>{minLabel}</span>
+          <span>{maxLabel}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Shared pop-up-button (select) styling for settings controls. */
 export const settingsSelectStyle: CSSProperties = {
   minWidth: '180px',

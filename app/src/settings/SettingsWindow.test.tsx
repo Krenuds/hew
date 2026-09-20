@@ -32,7 +32,14 @@ describe('SettingsWindow', () => {
   it('shows the toolbar tab strip with one tab per pane', () => {
     render(<SettingsWindow />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'Theme', 'Folders', 'Advanced', 'Debug'])
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      'Units',
+      'Theme',
+      'Viewport',
+      'Folders',
+      'Advanced',
+      'Debug',
+    ])
   })
 
   it('shows the Units pane by default (Units tab selected)', () => {
@@ -67,6 +74,14 @@ describe('SettingsWindow', () => {
     expect(screen.getByRole('tab', { name: 'Theme' })).toHaveAttribute('aria-selected', 'true')
     // Theme pane content: the Appearance selector.
     expect(screen.getByLabelText('Appearance')).toBeInTheDocument()
+  })
+
+  it('switches to the Viewport pane when the Viewport tab is clicked', () => {
+    render(<SettingsWindow />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Viewport' }))
+    expect(screen.getByRole('tab', { name: 'Viewport' })).toHaveAttribute('aria-selected', 'true')
+    // Viewport pane content: the snap-dot size slider.
+    expect(screen.getByRole('slider', { name: 'Snap dot size' })).toBeInTheDocument()
   })
 
   it('switches to the Folders pane when the Folders tab is clicked', () => {

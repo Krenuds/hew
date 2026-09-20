@@ -38,6 +38,16 @@ import {
   type ThemeSetting,
 } from './theme'
 import { getDebugMode, setDebugMode, subscribe as subscribeDebug } from './debugMode'
+import {
+  getSnapDotScale,
+  setSnapDotScale,
+  subscribe as subscribeViewport,
+  formatScalePercent,
+  SNAP_DOT_SCALE_MIN,
+  SNAP_DOT_SCALE_MAX,
+  SNAP_DOT_SCALE_STEP,
+} from './viewport'
+import { SnapDotSample } from '../viewport/SnapDot'
 import { libraryStore } from '../io/libraryStore'
 import { describeIdentity, useServerSettingForm } from './serverForm'
 import { CLOUD_ORIGIN } from './server'
@@ -268,6 +278,66 @@ function ToggleSwitch({
   )
 }
 
+/**
+ * Windows 11 slider: accent-filled track with a live readout to its right.
+ * The Fluent mirror of SettingsForm.tsx's `SettingsSlider` — same prop shape,
+ * different styling. Deliberately styling-only duplication: unlike the server
+ * pane (whose draft/commit/probe state machine is shared via serverForm.ts),
+ * there is no behavior here to share, just a number.
+ *
+ * `aria-valuetext` carries the formatted value because a bare `aria-valuenow`
+ * of 0.8 is announced as "zero point eight"; the visible readout is
+ * aria-hidden so it is not announced a second time.
+ */
+function FluentSlider({
+  id,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  format = String,
+  width = 200,
+}: {
+  id: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (next: number) => void
+  format?: (v: number) => string
+  width?: number
+}) {
+  const readout = format(value)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-valuetext={readout}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ width: `${width}px`, accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
+      />
+      <span
+        aria-hidden="true"
+        style={{
+          minWidth: '3.5em',
+          fontSize: '14px',
+          fontFamily: FONT,
+          fontVariantNumeric: 'tabular-nums',
+          color: 'var(--text-secondary, #ddd)',
+        }}
+      >
+        {readout}
+      </span>
+    </div>
+  )
+}
+
 const SYSTEM_OPTIONS: { value: LengthSystem; label: string }[] = [
   { value: 'metric', label: 'Metric' },
   { value: 'imperial', label: 'Imperial' },
@@ -401,6 +471,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
   const [debug, setDebug] = useState<boolean>(() => getDebugMode())
+  const [snapDotScale, setSnapDotScaleState] = useState<number>(() => getSnapDotScale())
   const libStore = libraryStore()
   const libraryAvailable = libStore.available()
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
@@ -408,6 +479,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   useEffect(() => subscribeUnits(setFormat), [])
   useEffect(() => subscribeTheme(setTheme), [])
   useEffect(() => subscribeDebug(setDebug), [])
+  useEffect(() => subscribeViewport((v) => setSnapDotScaleState(v.snapDotScale)), [])
 
   useEffect(() => {
     if (!libraryAvailable) return
@@ -545,6 +617,24 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
                 </option>
               ))}
             </select>
+          </SettingsCard>
+
+          <div style={sectionHeaderStyle}>Viewport</div>
+          <SettingsCard
+            title="Snap dot size"
+            description="The colored marker that rides the cursor and lands on the exact point a tool has snapped to. This changes how big it draws — not how close the cursor must come before a point is picked up."
+            htmlFor="fluent-viewport-snap-dot-scale"
+          >
+            <FluentSlider
+              id="fluent-viewport-snap-dot-scale"
+              value={snapDotScale}
+              min={SNAP_DOT_SCALE_MIN}
+              max={SNAP_DOT_SCALE_MAX}
+              step={SNAP_DOT_SCALE_STEP}
+              onChange={setSnapDotScale}
+              format={formatScalePercent}
+            />
+            <SnapDotSample scale={snapDotScale} />
           </SettingsCard>
 
           <div style={sectionHeaderStyle}>Library</div>

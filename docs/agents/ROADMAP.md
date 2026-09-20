@@ -337,6 +337,12 @@ below.
   depth, nearest first, so a stack of corners seen from a nearly-vertical
   Top view — top plate, sole plate, slab — resolves to the one in front
   rather than to whichever the camera's slight tilt happens to lean toward
+- The on-cursor snap marker: a filled dot on the exact snapped point,
+  colored by inference kind, with a white contrast ring, a soft tinted
+  halo and a gentle pulse that `prefers-reduced-motion` drops. It is
+  user-scalable — Settings ▸ Viewport ▸ Snap dot size, 60–150% of the
+  shipped size — which changes only how big the marker draws, never the
+  snap tolerance that decides when a point is acquired
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range

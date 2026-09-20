@@ -17,12 +17,13 @@
 import { useState, type CSSProperties, type ReactElement } from 'react'
 import { UnitsPane } from './UnitsPane'
 import { ThemePane } from './ThemePane'
+import { ViewportPane } from './ViewportPane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
-type Category = 'units' | 'theme' | 'folders' | 'advanced' | 'debug'
+type Category = 'units' | 'theme' | 'viewport' | 'folders' | 'advanced' | 'debug'
 
 const iconProps = {
   width: 22,
@@ -52,6 +53,16 @@ function ThemeIcon() {
     <svg {...iconProps}>
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+/** Crosshair/reticle — Viewport. */
+function ViewportIcon() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="12" cy="12" r="4.2" />
+      <path d="M12 2.6v4.2M12 17.2v4.2M2.6 12h4.2M17.2 12h4.2" />
     </svg>
   )
 }
@@ -91,6 +102,7 @@ function AdvancedIcon() {
 const TABS: { id: Category; label: string; icon: ReactElement }[] = [
   { id: 'units', label: 'Units', icon: <UnitsIcon /> },
   { id: 'theme', label: 'Theme', icon: <ThemeIcon /> },
+  { id: 'viewport', label: 'Viewport', icon: <ViewportIcon /> },
   { id: 'folders', label: 'Folders', icon: <FoldersIcon /> },
   { id: 'advanced', label: 'Advanced', icon: <AdvancedIcon /> },
   { id: 'debug', label: 'Debug', icon: <DebugIcon /> },
@@ -185,6 +197,7 @@ export function SettingsWindow() {
       >
         {active === 'units' && <UnitsPane />}
         {active === 'theme' && <ThemePane />}
+        {active === 'viewport' && <ViewportPane />}
         {active === 'folders' && <FoldersPane />}
         {active === 'advanced' && <AdvancedPane />}
         {active === 'debug' && <DebugPane />}

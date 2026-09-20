@@ -1,8 +1,12 @@
 /**
  * CueLayer — a THREE.Group rebuilt on every pointer move.
  *
- * Renders:
- *   - Snap marker glyph at the snap point, colored by kind:
+ * Renders the IN-SCENE part of a snap's feedback — the part that needs depth
+ * and world extent, which a DOM overlay cannot do. The snap POINT itself is
+ * marked by `SnapDot.tsx` (a DOM overlay); this layer draws only the dashed
+ * guide line through the point and the tie line back to a projected source.
+ *
+ * Both are colored by snap kind:
  *       endpoint   → green   #00cc44
  *       midpoint   → cyan    #00cccc
  *       on-edge    → red     #cc2200
@@ -18,8 +22,9 @@
  *   - Dashed guide line through the snap point along direction() when present.
  *
  * The group is added to the scene once; call update() on every pointer move
- * to rebuild its children; call updateMarkerScale(camera) every render frame
- * so the cross marker stays a constant screen size regardless of zoom.
+ * to rebuild its children. Nothing here needs a per-frame screen-size fixup:
+ * the lines are world-space by design, and the only screen-space element —
+ * the marker — now lives in the DOM.
  */
 
 import * as THREE from 'three'
