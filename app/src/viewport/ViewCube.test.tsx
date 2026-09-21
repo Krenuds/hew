@@ -207,10 +207,10 @@ describe('camera pose feed', () => {
  * face at the viewer with its +X to the right and +Y up the screen. Every
  * expected region below follows from that.
  */
-const STAGE = { left: 1000, top: 100, size: 125 }
+const STAGE = { left: 1000, top: 100, size: 111 }
 const CENTRE = { x: STAGE.left + STAGE.size / 2, y: STAGE.top + STAGE.size / 2 }
-/** Well past a third of the half-size (36), so it lands in an outer band. */
-const OFF = 30
+/** Well past a third of the half-size (32), so it lands in an outer band. */
+const OFF = 26
 
 function layOutStage(container: HTMLElement): void {
   stageEl(container).getBoundingClientRect = () =>
@@ -264,7 +264,7 @@ describe('picking is math, not DOM hit-testing', () => {
     const { container, onSelectRegion, onOrbitBy } = setup()
     layOutStage(container)
     const stage = stageEl(container)
-    // The far corner of the 125px box is outside a 72px cube seen face-on.
+    // The far corner of the 111px box is outside a 64px cube seen face-on.
     fireEvent.pointerDown(stage, { button: 0, clientX: STAGE.left + 2, clientY: STAGE.top + 2, pointerId: 1 })
     fireEvent.pointerUp(stage, { clientX: STAGE.left + 2, clientY: STAGE.top + 2, pointerId: 1 })
     expect(onSelectRegion).not.toHaveBeenCalled()

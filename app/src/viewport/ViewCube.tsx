@@ -47,7 +47,7 @@
  * only when the projection flips.
  */
 import { useEffect, useLayoutEffect, useRef } from 'react'
-import { CUBE_FACES, faceZones, regionAtDirection, regionById, type CubeFace } from './viewCubeRegions'
+import { CUBE_FACES, faceFrame, faceZones, regionAtDirection, regionById, type CubeFace } from './viewCubeRegions'
 import {
   cubeMatrix,
   cssMatrix3d,
@@ -66,8 +66,13 @@ import {
 } from './viewCubeDrag'
 
 /** A face's edge length in CSS pixels. Each of its nine zones is a third of
- * that — a 24px target, comfortable without making the widget a billboard. */
-const CUBE_PX = 72
+ * that — a 21px target. Under the 24px a standalone control would want, but
+ * this is a pointing widget whose regions are read by inverting the cube's
+ * projection rather than by hit-testing the DOM, so a zone is exactly as big
+ * as the part of the cube it draws and shrinking the cube shrinks it 1:1.
+ * Every region is also reachable from the keyboard and from Camera ▸ Standard
+ * Views. */
+const CUBE_PX = 64
 const HALF_PX = CUBE_PX / 2
 
 /**
@@ -118,6 +123,44 @@ const PRIMARY_ZONES: ReadonlySet<string> = (() => {
 const FACE_TRANSFORMS: Record<CubeFace, string> = Object.fromEntries(
   CUBE_FACES.map((face) => [face, cssMatrix3d(faceMatrix(face, HALF_PX))]),
 ) as Record<CubeFace, string>
+
+/** The world-axis colour token per axis index, in the same X, Y, Z order
+ * `axisColors.ts` uses — the one place the app decides that X is red. */
+const AXIS_TOKEN = ['--axis-red', '--axis-green', '--axis-blue'] as const
+
+/**
+ * Each face painted in its own axis colour.
+ *
+ * A face's normal IS a world axis, so the cube can say which axis you are
+ * looking down without drawing a triad: Right/Left carry X, Front/Back carry
+ * Y, Top/Bottom carry Z. The tint is a whisper — a tenth of the axis colour
+ * mixed into the same overlay surface every other chip uses — but it is
+ * enough that three adjacent faces never read as one flat shape, which is the
+ * other thing a cube of six identical fills was missing.
+ *
+ * The POSITIVE end of an axis is tinted twice as hard as the negative one, so
+ * the pair also tells you which way along the axis you are: +X reads red, −X
+ * reads barely red. That is the same convention the axis lines already use,
+ * where the negative half is the faint one.
+ */
+const FACE_PAINT: Record<CubeFace, { background: string; color: string }> = Object.fromEntries(
+  CUBE_FACES.map((face) => {
+    const normal = faceFrame(face).normal
+    const axis = normal.findIndex((c) => c !== 0)
+    const hue = `var(${AXIS_TOKEN[axis]})`
+    const positive = normal[axis] > 0
+    return [
+      face,
+      {
+        background: `color-mix(in srgb, ${hue} ${positive ? 10 : 5}%, var(--surface-overlay))`,
+        // Mixed toward the PRIMARY text colour, not the secondary one the
+        // labels used to take: an axis-tinted grey is just mud, and the label
+        // was the weakest thing on the widget to begin with.
+        color: `color-mix(in srgb, ${hue} 70%, var(--text-primary))`,
+      },
+    ]
+  }),
+) as Record<CubeFace, { background: string; color: string }>
 
 /** The same six words the Camera ▸ Standard Views submenu uses, so the cube
  * and the menu cannot disagree about what a face is called. */
@@ -336,7 +379,7 @@ export function ViewCube({
                 faceRefs.current[face] = el
               }}
               data-face={face}
-              style={{ ...FACE_STYLE, transform: FACE_TRANSFORMS[face] }}
+              style={{ ...FACE_STYLE, ...FACE_PAINT[face], transform: FACE_TRANSFORMS[face] }}
             >
               {faceZones(face).map((row, rowFromTop) =>
                 row.map((regionId, col) => {
@@ -539,10 +582,9 @@ const FACE_STYLE: React.CSSProperties = {
   marginTop: `${-HALF_PX}px`,
   transformStyle: 'flat',
   backfaceVisibility: 'hidden',
-  // Opaque, or the far faces read through the near ones. The border doubles
-  // as the cube's own edge line and hides the sub-pixel seam where two faces
-  // meet.
-  background: 'var(--surface-overlay)',
+  // The fill comes from `FACE_PAINT` — opaque, or the far faces read through
+  // the near ones. The border doubles as the cube's own edge line and hides
+  // the sub-pixel seam where two faces meet.
   // `--border-strong`, not the hairline every other overlay uses: on a cube
   // the borders ARE the edges, and the whole read of the shape depends on
   // them. A hairline leaves it a pale blob.
@@ -564,10 +606,16 @@ const FACE_ZONE_STYLE: React.CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   fontFamily: 'var(--font-family-ui)',
-  fontSize: '9px',
+  fontSize: '11px',
   fontWeight: 600,
   letterSpacing: '0.04em',
-  color: 'var(--text-secondary)',
+  // The label is wider than the centre zone that holds it — "BOTTOM" is some
+  // 45px across a 21px cell — and it is meant to be: it is the FACE's label,
+  // centred on the face, and the zone is only where it happens to live in the
+  // grid. Without this it wraps to three stacked letters.
+  whiteSpace: 'nowrap',
+  // Colour comes from the face, which sets its own axis tint.
+  color: 'inherit',
 }
 
 const GLYPH_STRIP_STYLE: React.CSSProperties = {
