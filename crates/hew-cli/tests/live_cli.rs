@@ -149,6 +149,84 @@ fn spawn_attach_gated_fake_instance(
     })
 }
 
+/// A fake instance that serves SEVERAL connections in turn, dropping each
+/// one after `commands_per_conn` post-hello frames instead of waiting for
+/// the client to disconnect.
+///
+/// `spawn_attach_gated_fake_instance` above accepts exactly one connection
+/// and runs until the client goes away, which is the right model for a
+/// session that ends normally. It cannot model the failure this file's
+/// reconnect test is about: the *instance* vanishing mid-session, which is
+/// what a browser tab reloading looks like to `hew-cli` (`hew-bridge`
+/// withdraws the discovery file and closes the socket when the tab that
+/// owned the session goes away — docs/agents/HEW_API.md §11.5).
+///
+/// Returns the methods seen on each connection separately, so a test can
+/// assert that the second connection re-ran the handshake rather than
+/// somehow continuing the first.
+fn spawn_recycling_fake_instance(
+    socket_path: PathBuf,
+    expected_token: &'static str,
+    connections: usize,
+    commands_per_conn: usize,
+) -> std::thread::JoinHandle<Vec<Vec<String>>> {
+    let listener = UnixListener::bind(&socket_path).expect("bind the fake instance socket");
+    std::thread::spawn(move || {
+        let mut all = Vec::new();
+        for _ in 0..connections {
+            let (stream, _) = listener.accept().expect("accept a connection");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut seen = Vec::new();
+
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read the hello frame");
+            let hello: Value = serde_json::from_str(line.trim_end()).unwrap();
+            assert_eq!(hello["method"], "hew.meta.hello");
+            assert_eq!(
+                hello["params"]["token"], expected_token,
+                "every reconnect must re-read the discovery file's token"
+            );
+            let hello_reply = json!({
+                "jsonrpc": "2.0", "id": hello["id"],
+                "result": {
+                    "protocol": 1, "app": { "name": "hew", "version": "0.5.0" },
+                    "profile": "app", "encoding": "json", "documents": [],
+                },
+            });
+            writeln!(writer, "{hello_reply}").unwrap();
+
+            let mut attached = false;
+            while seen.len() < commands_per_conn {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).expect("read a frame");
+                if n == 0 {
+                    break; // the client hung up first
+                }
+                let frame: Value = serde_json::from_str(line.trim_end()).unwrap();
+                let method = frame["method"].as_str().unwrap_or("").to_string();
+                seen.push(method.clone());
+                let reply = if method == "hew.doc.attach" {
+                    attached = true;
+                    json!({ "jsonrpc": "2.0", "id": frame["id"], "result": {} })
+                } else if !attached {
+                    json!({
+                        "jsonrpc": "2.0", "id": frame["id"],
+                        "error": { "code": -32002, "message": "no document attached" },
+                    })
+                } else {
+                    json!({ "jsonrpc": "2.0", "id": frame["id"], "result": { "tree": [] } })
+                };
+                writeln!(writer, "{reply}").unwrap();
+            }
+            all.push(seen);
+            // Drop the connection without waiting for EOF — the instance
+            // going away, not the client leaving.
+        }
+        all
+    })
+}
+
 /// A fake instance that hello's normally but refuses `hew.doc.attach`
 /// itself (an application-side policy refusal — e.g. no document open at
 /// all) — proves the attach step fails the whole connection cleanly
@@ -323,10 +401,11 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
         "dispatch --live must attach before dispatching the requested command"
     );
 
-    // 5. `hew-cli mcp --live` performs the identical attach step at
-    //    construction time — before any `tools/call` — and a forwarded
-    //    tool call (here `hew_describe_scene`, which maps to
-    //    `hew.query.scene`) succeeds afterward instead of hitting -32002.
+    // 5. `hew-cli mcp --live` performs the identical attach step — lazily,
+    //    on the first `tools/call` that needs the socket rather than at
+    //    construction — and the forwarded tool call (here
+    //    `hew_describe_scene`, which maps to `hew.query.scene`) succeeds
+    //    afterward instead of hitting -32002.
     let mcp_socket = short_socket_path("mcp");
     let mcp_server_thread =
         spawn_attach_gated_fake_instance(mcp_socket.clone(), "fixture-token-mcp");
@@ -339,8 +418,7 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
     let mut mcp_server = hew_cli::mcp::McpServer::new_live(&hew_cli::live::LiveOptions {
         launch: false,
         instance: Some(std::process::id()),
-    })
-    .expect("mcp --live connects and attaches");
+    });
     let line = mcp_server
         .handle_line(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hew_describe_scene","arguments":{}}}"#,
@@ -361,7 +439,8 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
     assert_eq!(
         mcp_seen,
         vec!["hew.doc.attach", "hew.query.scene"],
-        "mcp --live must attach at construction, before any forwarded tool call"
+        "mcp --live must attach before it forwards a tool call — on the first \
+         one, since construction contacts nothing"
     );
 
     // 6. An attach refusal (the app has no document open at all) fails the
@@ -475,4 +554,186 @@ fn a_live_script_writes_the_bytes_a_save_hands_back() {
 
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(&target);
+}
+
+/// `hew-cli mcp --live` must be startable before anything is attached, and
+/// must recover by itself when the instance goes away mid-session.
+///
+/// Both are consequences of one fact: `hew-bridge` publishes its §11.2
+/// discovery file only while a browser tab holds the remote-control session
+/// and withdraws it when that tab goes away, so "nobody has consented yet"
+/// and "no app is running" are the same observation. Resolving the instance
+/// once, at construction, therefore made two ordinary situations
+/// unrecoverable without restarting the server: starting the agent before
+/// flipping the consent toggle, and reloading the tab.
+///
+/// What this pins down:
+///
+/// 1. With nothing attached, the server still starts and answers
+///    `initialize` and `tools/list` — a client that dies during startup
+///    looks like a crash, not like "ask the user to consent".
+/// 2. A tool call in that state is a *typed* refusal carrying
+///    `error.data.live`, not an opaque string, so an agent can tell "go ask
+///    the user" from "the socket died, try again".
+/// 3. Consent arriving later needs no restart.
+/// 4. Neither does the instance vanishing mid-session.
+#[test]
+fn mcp_live_resolves_per_call_and_survives_a_vanished_instance() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "hew-cli-live-mcp-lazy-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(fixture_dir.join("hew")).unwrap();
+    // SAFETY: see `RUNTIME_DIR_LOCK` — held for this whole scenario.
+    let _env = RUNTIME_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        std::env::set_var("HEW_RUNTIME_DIR", &fixture_dir);
+    }
+
+    // 1. Nothing attached at all. Construction must not fail, and must not
+    //    have contacted anything.
+    let mut server = hew_cli::mcp::McpServer::new_live(&hew_cli::live::LiveOptions {
+        launch: false,
+        instance: None,
+    });
+
+    let reply: Value = serde_json::from_str(
+        &server
+            .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+            .expect("initialize replies with no instance attached"),
+    )
+    .unwrap();
+    assert!(
+        reply.get("error").is_none(),
+        "initialize must succeed with nothing attached: {reply}"
+    );
+    let instructions = reply["result"]["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("YOU ARE EDITING"),
+        "a live session's instructions carry LIVE_ADDENDUM even before an \
+         instance is resolved — the agent needs the warning up front, not \
+         after it has already dispatched something"
+    );
+
+    let reply: Value = serde_json::from_str(
+        &server
+            .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#)
+            .expect("tools/list replies with no instance attached"),
+    )
+    .unwrap();
+    let names: Vec<&str> = reply["result"]["tools"]
+        .as_array()
+        .expect("tools/list returns a tool array")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "hew_capabilities",
+            "hew_transact",
+            "hew_query",
+            "hew_describe_scene",
+            "hew_snapshot",
+            "hew_print_pdf",
+            "hew_line_drawing",
+        ],
+        "the live tool inventory does not depend on a live connection — §11.5 \
+         grants every remote connection `app`, so this list is knowable \
+         before anything is attached and must never change afterwards"
+    );
+
+    // 2. A tool call in that state refuses, typed.
+    let call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hew_describe_scene","arguments":{}}}"#;
+    let reply: Value =
+        serde_json::from_str(&server.handle_line(call).expect("tools/call replies")).unwrap();
+    assert_eq!(
+        reply["error"]["data"]["live"], "no_instance",
+        "the refusal must name WHICH live failure this is, so an agent can \
+         tell 'ask the user to consent' from 'the socket died': {reply}"
+    );
+
+    // 2b. But the local-only `hew.library.*` reads are answered on THIS
+    //     side — the library lives on the machine `hew-cli` runs on, not in
+    //     the remote tab — so they must keep working with nothing attached.
+    //     They never reach the socket, and must not be made to resolve one.
+    let reply: Value = serde_json::from_str(
+        &server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"hew_query","arguments":{"method":"hew.library.list","params":{}}}}"#,
+            )
+            .expect("tools/call replies"),
+    )
+    .unwrap();
+    assert!(
+        reply.get("error").is_none(),
+        "a local-only library read must not need a live instance: {reply}"
+    );
+
+    // 3. Consent arrives — the discovery file appears — and the very next
+    //    call works. No restart, no reconstruction of the server.
+    let socket = short_socket_path("mcp-lazy");
+    let fake = spawn_recycling_fake_instance(socket.clone(), "lazy-token", 2, 2);
+    write_instance_file(
+        &fixture_dir.join("hew"),
+        std::process::id(),
+        socket.to_str().unwrap(),
+        "lazy-token",
+    );
+
+    let reply: Value =
+        serde_json::from_str(&server.handle_line(call).expect("tools/call replies")).unwrap();
+    let inner: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        inner["result"]["tree"],
+        json!([]),
+        "the first call after the instance appears must succeed on the SAME \
+         server object: {inner}"
+    );
+
+    // 4. The instance vanishes mid-session (the fake drops the connection
+    //    after its two frames, as a reloading tab does). The call that
+    //    discovers this refuses typed — never silently replayed, because a
+    //    transact whose fate is unknown must not be applied twice — and the
+    //    call after it reconnects on its own.
+    let reply: Value =
+        serde_json::from_str(&server.handle_line(call).expect("tools/call replies")).unwrap();
+    let tag = reply["error"]["data"]["live"].as_str().unwrap_or("");
+    assert!(
+        // Which of the two depends on a race the kernel arbitrates: on
+        // Linux the first write after the peer closes often succeeds, so
+        // the death surfaces as EOF on the read (`connection_closed`)
+        // rather than EPIPE on the write (`io`). Both mean the same thing
+        // to a caller, so pinning one would only make this flaky.
+        tag == "io" || tag == "connection_closed",
+        "a dead socket must surface as a typed transport failure, got {tag:?}: {reply}"
+    );
+
+    let reply: Value =
+        serde_json::from_str(&server.handle_line(call).expect("tools/call replies")).unwrap();
+    let inner: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        inner["result"]["tree"],
+        json!([]),
+        "the call after a dropped session must re-resolve and succeed, with \
+         no restart: {inner}"
+    );
+
+    drop(server);
+    let seen = fake.join().expect("the fake instance thread completes");
+    assert_eq!(
+        seen,
+        vec![
+            vec!["hew.doc.attach", "hew.query.scene"],
+            vec!["hew.doc.attach", "hew.query.scene"],
+        ],
+        "each connection re-runs the full handshake — a reconnect that \
+         skipped the attach would answer -32002 forever"
+    );
 }

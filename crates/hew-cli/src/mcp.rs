@@ -25,12 +25,16 @@ use std::io::{BufRead, Write};
 /// The MCP protocol revision this server speaks.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// A JSON-RPC error `{code, message}` — the MCP layer's own errors
-/// (unknown method, bad params), distinct from a `hew.*` refusal (which
-/// travels as a normal tool-call *result*, per §13: refusals are answers).
+/// A JSON-RPC error `{code, message}`, optionally carrying `data` — the
+/// MCP layer's own errors (unknown method, bad params, a live transport
+/// that is not there), distinct from a `hew.*` refusal (which travels as a
+/// normal tool-call *result*, per §13: refusals are answers).
 struct JsonRpcErr {
     code: i64,
     message: String,
+    /// Machine-readable detail, omitted entirely when `None`. Only the live
+    /// transport sets it today — see [`JsonRpcErr::live`].
+    data: Option<Value>,
 }
 
 impl JsonRpcErr {
@@ -38,6 +42,7 @@ impl JsonRpcErr {
         JsonRpcErr {
             code: -32601,
             message: format!("unknown method \"{method}\""),
+            data: None,
         }
     }
 
@@ -45,7 +50,52 @@ impl JsonRpcErr {
         JsonRpcErr {
             code: -32602,
             message: message.into(),
+            data: None,
         }
+    }
+
+    /// An internal error with no structured detail — every `-32603` site
+    /// that isn't the live transport.
+    fn internal(message: impl Into<String>) -> JsonRpcErr {
+        JsonRpcErr {
+            code: -32603,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    /// The live transport could not answer. `message` stays
+    /// [`live::LiveError`]'s own `Display` — already a complete
+    /// user-facing sentence — while `data.live` carries a stable tag so a
+    /// client can tell "nothing is attached" (retry after the user
+    /// consents) from "the socket died" (retry now) from "two instances
+    /// are running" (the user must choose). Without the tag all three read
+    /// as one opaque string, which is what made a reload unrecoverable.
+    fn live(err: &live::LiveError) -> JsonRpcErr {
+        JsonRpcErr {
+            code: -32603,
+            message: format!("live transport error: {err}"),
+            data: Some(json!({ "live": live_error_tag(err) })),
+        }
+    }
+}
+
+/// The stable snake_case name of a [`live::LiveError`] variant, for
+/// [`JsonRpcErr::live`]'s `data.live`. Deliberately hand-written rather
+/// than derived: these names are part of what a client sees, so adding a
+/// variant must be a decision here, not an automatic rename.
+fn live_error_tag(err: &live::LiveError) -> &'static str {
+    match err {
+        live::LiveError::Io(_) => "io",
+        live::LiveError::Timeout(_) => "timeout",
+        live::LiveError::Protocol(_) => "protocol",
+        live::LiveError::HelloRefused(_) => "hello_refused",
+        live::LiveError::Unsupported(_) => "unsupported",
+        live::LiveError::Closed => "connection_closed",
+        live::LiveError::NoInstances => "no_instance",
+        live::LiveError::Ambiguous(_) => "ambiguous",
+        live::LiveError::InstanceNotFound(_) => "instance_not_found",
+        live::LiveError::LaunchFailed(_) => "launch_failed",
     }
 }
 
@@ -54,13 +104,26 @@ impl JsonRpcErr {
 /// instance over [`crate::live`]). `doc` is boxed so the `Live` variant —
 /// which is comparatively tiny — doesn't pay for the `Document`-sized
 /// space every `Backend` value reserves.
+///
+/// `Live.session` is an `Option` on purpose: "this server is live" and
+/// "this server is holding a socket" are different facts, and conflating
+/// them is what made `--live` need a restart. A live instance is discovered
+/// per tool call (see [`McpServer::dispatch_live_session`]), because `hew-bridge`
+/// publishes its discovery file only while a browser tab owns the session
+/// — so with the consent toggle off, "nobody consented" and "no app is
+/// running" are indistinguishable by design (docs/agents/HEW_API.md §11.5),
+/// and a server that resolved once at boot could never notice consent
+/// arriving afterwards.
 enum Backend {
     Embedded {
         conn: Connection,
         doc: Box<Document>,
         host: CliHost,
     },
-    Live(Box<live::LiveSession>),
+    Live {
+        opts: LiveOptions,
+        session: Option<Box<live::LiveSession>>,
+    },
 }
 
 /// One long-lived MCP session. Embedded: a `Connection` hello'd and
@@ -68,7 +131,9 @@ enum Backend {
 /// `tools/call` an agent makes already has a working document
 /// (docs/agents/HEW_API.md §13's intended loop: describe → plan → transact →
 /// look). Live: hello'd against a discovered running instance instead —
-/// the document is whatever the user already has open.
+/// the document is whatever the user already has open — and that discovery
+/// happens per tool call, not at construction, so the session outlives an
+/// instance coming and going.
 pub struct McpServer {
     backend: Backend,
     /// The protocol-1 command registry, kept independent of `backend`
@@ -78,9 +143,11 @@ pub struct McpServer {
     /// `backend`, which is what answers with the real (possibly remote)
     /// authority.
     registry: Registry,
-    /// The granted profile — `Core` embedded, whatever the remote's hello
-    /// reported when live (docs/agents/HEW_API.md §12: live is always `app`, but
-    /// this reads it back rather than assuming).
+    /// The granted profile — `Core` embedded, `App` live. Live cannot read
+    /// it back from a hello reply the way it once did, because there may be
+    /// no connection yet when `tools/list` is answered; §11.5 grants every
+    /// live connection `app` regardless, and `generate_tools` yields the
+    /// same seven tools either way, so nothing is lost by stating it.
     profile: Profile,
 }
 
@@ -219,32 +286,48 @@ impl McpServer {
         }
     }
 
-    /// Live: discovers (and, with `opts.launch`, starts) a running desktop
-    /// instance, hello's it with the discovery token, then attaches to its
-    /// document (docs/agents/HEW_API.md §11.2, §12). The attach step matters
-    /// because a live host serves a document the user already has open
-    /// rather than creating one on connect — unlike [`McpServer::new`]
-    /// above, whose embedded `hew.doc.new` auto-attaches for free, a live
-    /// session has no such call to piggyback on, so without this every
-    /// forwarded tool call (`hew_transact`, `hew_query`,
-    /// `hew_describe_scene`, `hew_snapshot`) would answer `-32002 no
-    /// document attached` the moment an agent tried to use it
-    /// ([`crate::run::dispatch_live`]'s doc comment has the fuller
+    /// Live: forwards every tool call to a running desktop instance (or a
+    /// `hew-bridge` impersonating one) over [`crate::live`]. Construction
+    /// contacts nothing — the instance is discovered, hello'd and attached
+    /// on the first tool call that needs it, and re-resolved after any
+    /// transport failure (see [`McpServer::dispatch_live_session`]). That is what
+    /// lets an agent start this server before the user has consented, and
+    /// keep it across a tab reload.
+    ///
+    /// The profile is `App` rather than read back from a hello reply, which
+    /// is a statement about the protocol, not a guess: §11.5 grants every
+    /// live connection `app`, [`live::LiveSession::granted_profile`] falls
+    /// back to it, and `generate_tools` yields the same seven tools for
+    /// both profiles anyway — so `tools/list` answers identically whether
+    /// or not anything is attached, and never has to change its mind later.
+    pub fn new_live(opts: &LiveOptions) -> McpServer {
+        McpServer {
+            backend: Backend::Live {
+                opts: opts.clone(),
+                session: None,
+            },
+            registry: Registry::protocol_1(),
+            profile: Profile::App,
+        }
+    }
+
+    /// Connects to a live instance and attaches to its open document
+    /// (docs/agents/HEW_API.md §11.2, §12). The attach step matters because a
+    /// live host serves a document the user already has open rather than
+    /// creating one on connect — unlike [`McpServer::new`], whose embedded
+    /// `hew.doc.new` auto-attaches for free, a live session has no such call
+    /// to piggyback on, so without this every forwarded tool call would
+    /// answer `-32002 no document attached` the moment an agent tried to use
+    /// it ([`crate::run::dispatch_live`]'s doc comment has the fuller
     /// rationale — this is the same fix, applied here via
-    /// [`crate::run::attach_live`]). The granted profile comes back from
-    /// the remote's own hello reply.
-    pub fn new_live(opts: &LiveOptions) -> Result<McpServer, live::LiveError> {
+    /// [`crate::run::attach_live`]).
+    fn connect_and_attach(opts: &LiveOptions) -> Result<live::LiveSession, live::LiveError> {
         let hello_request = live::build_hello_request("hew-cli:mcp");
         let mut session = live::connect_live(opts, hello_request)?;
         if let Err(msg) = crate::run::attach_live(&mut session) {
             return Err(live::LiveError::Protocol(msg));
         }
-        let profile = session.granted_profile();
-        Ok(McpServer {
-            backend: Backend::Live(Box::new(session)),
-            registry: Registry::protocol_1(),
-            profile,
-        })
+        Ok(session)
     }
 
     /// Handles one newline-delimited JSON-RPC message. Returns the reply
@@ -266,6 +349,7 @@ impl McpServer {
                     Value::Null,
                     -32700,
                     &format!("parse error: {e}"),
+                    None,
                 )));
             }
         };
@@ -294,7 +378,7 @@ impl McpServer {
         }
         Some(encode_frame(&match result {
             Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-            Err(e) => error_response(id, e.code, &e.message),
+            Err(e) => error_response(id, e.code, &e.message, e.data.as_ref()),
         }))
     }
 
@@ -304,7 +388,7 @@ impl McpServer {
         // training describes it, so this is the difference between an
         // agent that starts modeling and one that guesses.
         let mut instructions = INSTRUCTIONS.to_string();
-        if matches!(self.backend, Backend::Live(_)) {
+        if matches!(self.backend, Backend::Live { .. }) {
             instructions.push_str(LIVE_ADDENDUM);
         }
         json!({
@@ -364,6 +448,47 @@ impl McpServer {
         }))
     }
 
+    /// Forwards one envelope to the live instance, resolving a session
+    /// first if there isn't one and dropping it again if it fails.
+    ///
+    /// Both halves matter, and they are the whole phase:
+    ///
+    /// - **Resolve late.** `hew-bridge` publishes its discovery file only
+    ///   while a tab holds the session and withdraws it when that tab goes
+    ///   away, so a server that resolved at startup could never see consent
+    ///   arrive. Resolving here means `--live` can be started first and
+    ///   simply answer "nothing attached" until the user flips the toggle.
+    /// - **Re-resolve, never reuse.** The failed session is dropped rather
+    ///   than retried, so the *next* call runs `connect_live` again — which
+    ///   re-reads the discovery file. The `Instance` behind a bridge is not
+    ///   stable across tab sessions, so caching one is exactly wrong.
+    ///
+    /// What it deliberately does NOT do is re-send `request` on the fresh
+    /// socket. A transport failure leaves a mutation's fate unknown, so a
+    /// silent replay of `hew.doc.transact` could apply it twice; and
+    /// [`live::LiveError::Protocol`]'s desync case says outright that the
+    /// session is no longer trustworthy. The caller gets one typed refusal
+    /// (tagged, see [`JsonRpcErr::live`]) and decides for itself.
+    fn dispatch_live_session(
+        opts: &LiveOptions,
+        session: &mut Option<Box<live::LiveSession>>,
+        request: Request,
+    ) -> Result<DispatchOutcome, JsonRpcErr> {
+        if session.is_none() {
+            *session = Some(Box::new(
+                Self::connect_and_attach(opts).map_err(|e| JsonRpcErr::live(&e))?,
+            ));
+        }
+        let live = session.as_mut().expect("just resolved");
+        match live.dispatch(request) {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                *session = None;
+                Err(JsonRpcErr::live(&e))
+            }
+        }
+    }
+
     /// Dispatches one `hew.*` envelope — embedded, through the session's
     /// own `Connection`; live, forwarded over the socket to the remote app
     /// (docs/agents/HEW_API.md §12: "every envelope the embedded path would
@@ -373,7 +498,7 @@ impl McpServer {
     /// underlying command refuses; the refusal is the answer, forwarded
     /// verbatim in live mode (§13).
     fn dispatch_tool(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcErr> {
-        let live = matches!(self.backend, Backend::Live(_));
+        let live = matches!(self.backend, Backend::Live { .. });
 
         // `hew.library.list`/`describe`/`remove`/`update_meta` never touch
         // the document (docs/design/v1.1-cycle.md's Lane B) — in `--live`
@@ -416,16 +541,12 @@ impl McpServer {
         };
         let outcome = match &mut self.backend {
             Backend::Embedded { conn, doc, host } => conn.dispatch(doc, host, request),
-            Backend::Live(session) => session.dispatch(request).map_err(|e| JsonRpcErr {
-                code: -32603,
-                message: format!("live transport error: {e}"),
-            })?,
+            Backend::Live { opts, session } => Self::dispatch_live_session(opts, session, request)?,
         };
         let DispatchOutcome::Reply(response) = outcome else {
-            return Err(JsonRpcErr {
-                code: -32603,
-                message: "internal error: envelope dropped unexpectedly".to_string(),
-            });
+            return Err(JsonRpcErr::internal(
+                "internal error: envelope dropped unexpectedly",
+            ));
         };
         let value = serde_json::to_value(&response).expect("Response serializes");
         if response.error.is_none()
@@ -435,20 +556,14 @@ impl McpServer {
                 Ok(rewritten) => Ok(serde_json::json!({
                     "jsonrpc": "2.0", "id": "mcp", "result": rewritten
                 })),
-                Err(message) => Err(JsonRpcErr {
-                    code: -32603,
-                    message,
-                }),
+                Err(message) => Err(JsonRpcErr::internal(message)),
             };
         }
         if let Some(path) = write_path
             && response.error.is_none()
         {
             {
-                crate::run::write_live_bytes(&value, &path).map_err(|message| JsonRpcErr {
-                    code: -32603,
-                    message,
-                })?;
+                crate::run::write_live_bytes(&value, &path).map_err(JsonRpcErr::internal)?;
                 // Report what a filesystem host would have: the file, not
                 // a megabyte of base64 the caller has no use for.
                 return Ok(serde_json::json!({
@@ -605,8 +720,15 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
     tools
 }
 
-fn error_response(id: Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+/// A JSON-RPC error frame. `data` is omitted entirely when `None` rather
+/// than sent as `null` — a client testing `"data" in error` must not see a
+/// field for every plain error.
+fn error_response(id: Value, code: i64, message: &str, data: Option<&Value>) -> Value {
+    let mut error = json!({ "code": code, "message": message });
+    if let Some(data) = data {
+        error["data"] = data.clone();
+    }
+    json!({ "jsonrpc": "2.0", "id": id, "error": error })
 }
 
 /// One JSON-RPC frame, encoded compact. The MCP stdio transport is
@@ -617,22 +739,21 @@ fn encode_frame(value: &Value) -> String {
 
 /// Reads newline-delimited JSON-RPC from stdin and writes replies to
 /// stdout until EOF. The process boundary `src/main.rs` calls into; the
-/// state machine it drives is [`McpServer::handle_line`]. `live`, if
-/// given, discovers (and connects to) a running desktop instance before
-/// the loop starts — a discovery/connect failure here means the process
-/// exits before ever reading a line of MCP traffic.
+/// state machine it drives is [`McpServer::handle_line`].
+///
+/// Construction never fails, `--live` included: a live server contacts
+/// nothing until a tool call needs it, so an MCP client always gets a
+/// server that answers `initialize` and `tools/list`. "No instance is
+/// attached" is reported as a typed error on the call that wanted one, not
+/// by exiting before the first line of MCP traffic is read — the latter
+/// looks to a client like a crash during startup, and left the user with
+/// no recovery but restarting the server after consenting.
 pub fn run_stdio(live: Option<&LiveOptions>) -> i32 {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut server = match live {
         None => McpServer::new(),
-        Some(opts) => match McpServer::new_live(opts) {
-            Ok(server) => server,
-            Err(e) => {
-                eprintln!("hew-cli mcp --live: {e}");
-                return 1;
-            }
-        },
+        Some(opts) => McpServer::new_live(opts),
     };
     let mut line = String::new();
     loop {

@@ -18,6 +18,10 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Self-hosting:** Remote control. `hew-bridge` gives `hew-cli --live` and the MCP server the same reach into a browser tab they already have into an open desktop app: a client on your server dispatches into the document someone has open, in their undo history, in front of them. Two gates are required, not one: the person in the tab turns it on, and everything under `/bridge/` sits behind an authenticating front that the bridge verifies itself rather than trusting.
 - **Web:** **Settings ▸ Advanced ▸ Allow remote control**, off by default and asked for per tab, is how that consent is given. One tab holds the session at a time: the most recent to turn it on takes it, and the tab it displaced is told so.
 
+### Changed
+
+- **API:** `hew-cli mcp --live` no longer has to be started after someone has consented. It starts whether or not anything is attached, finds the instance when a tool call needs one, and recovers on its own when a tab reloads. A call made with nothing attached says so and the next one succeeds, with no restart. With `--launch`, the app is started by the first tool call rather than when the server starts.
+
 ### Fixed
 
 - **Draw:** A rectangle's two live dimensions are shown in the same order typing them back uses. On a plane other than the ground, dragging into some directions showed them swapped.
