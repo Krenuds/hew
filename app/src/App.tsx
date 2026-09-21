@@ -6077,7 +6077,12 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
-              onDocumentChanged={handleDocumentChanged}
+              // This panel commits real geometry straight on the Scene —
+              // re-faceting a circle's Segments rebuilds its chords — so it
+              // needs the REPAINT path, not just the docRev/dirty
+              // bookkeeping `handleDocumentChanged` does. Every other tray
+              // panel that mutates already routes here.
+              onDocumentChanged={refreshAfterPanelMutation}
               onSelectMany={handleReplaceSelection}
               onToast={handleToast}
             />
