@@ -1,0 +1,49 @@
+[package]
+name = "hew-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Remote control bridge: makes a browser tab's live document reachable over the §11.5 WebSocket transport, impersonating a desktop instance on its local side"
+
+# Standalone binary, modelled on crates/hew-relay. Not a kernel crate
+# (DEVELOPMENT.md rule 1 does not bind it) and it depends on no kernel crate:
+# every frame it moves is opaque JSON-RPC text it never interprets beyond the
+# handful of wire-level facts docs/agents/HEW_API.md §11.5 names (the hello
+# token, a request id, whether a frame is a notification).
+[[bin]]
+name = "hew-bridge"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP + WebSocket stack, the same axum/tokio shape hew-relay uses. `ws` is
+# the one feature difference: §11.5's browser face is a WebSocket upgrade.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "io-util"] }
+tower-http = { version = "0.6", features = ["timeout"] }
+# The accept loop is hand-rolled over hyper-util (rather than `axum::serve`)
+# so a header-read timeout can be armed on every connection — the same
+# slow-loris guard hew-relay's main.rs documents at length.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio", "service"] }
+# Flags with env twins (`--listen` / HEW_BRIDGE_LISTEN, ...) — the systemd
+# unit carries the env; there is no config file.
+clap = { version = "4", features = ["derive", "env"] }
+# Constant-time compare for the per-launch token.
+subtle = "2"
+# Splitting the upgraded socket into an independent sink and stream: the
+# writer is driven by the local side's channel while the reader waits on the
+# browser, so they cannot be the same task.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# §11.5's edge-identity check: RS256 over Cloudflare Access's JWKS.
+# `jsonwebtoken` owns the signature and the iss/aud/exp validation;
+# `reqwest` (rustls, never OpenSSL) fetches the team's key set.
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the router in-process for the unit tests.
+tower = { version = "0.5", features = ["util"] }
