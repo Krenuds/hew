@@ -178,6 +178,10 @@ struct RawSnapshotParams {
     include_ids: Option<bool>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    dimensions: Option<bool>,
+    #[serde(default)]
+    dimension_units: Option<String>,
 }
 
 /// `hew.view.snapshot`'s default and clamped size bounds
@@ -218,6 +222,8 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         scene,
         include_ids: raw.include_ids.unwrap_or(false),
         path: raw.path,
+        dimensions: raw.dimensions.unwrap_or(true),
+        dimension_units: super::print::parse_dimension_units(raw.dimension_units.as_deref())?,
     };
     let result = ctx
         .host

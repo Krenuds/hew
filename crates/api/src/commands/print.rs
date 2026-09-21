@@ -31,7 +31,7 @@ fn parse<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, CmdError> {
 /// `hew.view.units`'s own vocabulary. Meters is the default because it is
 /// the kernel's own unit and the only one a caller that named nothing can
 /// be assumed to mean.
-fn parse_dimension_units(raw: Option<&str>) -> Result<LengthFormat, CmdError> {
+pub(crate) fn parse_dimension_units(raw: Option<&str>) -> Result<LengthFormat, CmdError> {
     match raw {
         None => Ok(LengthFormat::Meters),
         Some(name) => LengthFormat::from_wire(name).ok_or_else(|| {

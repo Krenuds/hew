@@ -1106,7 +1106,8 @@ without a viewport; MCP exposes them as `hew_print_pdf` and
 `hew_line_drawing` whenever the connection's profile grants the
 underlying command (§13).
 
-Both draw the document's annotations (§7.3) by default — `dimensions:
+All three render commands -- `hew.view.snapshot` included -- draw the
+document's annotations (§7.3) by default — `dimensions:
 false` leaves them out — lettering each measurement in the unit format
 `dimension_units` names, over `hew.view.units`'s own vocabulary (`"m"`,
 `"cm"`, `"mm"`, `"arch"`, `"frac_in"`, `"dec_in"`, default `"m"`). A
@@ -1122,10 +1123,18 @@ standing off the model is not cropped out of the page. On
 `hew.print.pdf` they ride the vector pass, so `style: "shaded"` gets
 none; its labels are black, since PDF text here is greyscale.
 
-`hew.view.snapshot` renders **without** annotations, deliberately and
-for now: drawing text into a raster needs a glyph rasterizer, and
-`crates/softrender` has no text concept at all. Ask for a line drawing
-or a PDF when the dimensions matter.
+`hew.view.snapshot` is the odd one out in HOW it letters them. SVG and
+PDF each carry a "set this word here" instruction for their reader to
+execute; a PNG is pixels, and nothing downstream knows the shape of a
+character. So its measurement text is drawn as line work from a
+single-stroke font (`crates/api/src/stroke_font.rs`) through the same
+rasterizer pass that draws every edge -- the way a pen plotter letters a
+drawing. The glyphs are upper case, which is the drafting convention,
+and lower-case input folds to them; a character with no glyph draws as a
+box rather than vanishing. A snapshot's labels hold a constant pixel
+size rather than scaling with the model, matching the app's own
+annotation text, and a cameraless fit widens to include the annotations
+so a dimension standing off the geometry is not cropped out of frame.
 
 Refusals: `host_capability_missing` (a host with no render path — should
 not occur for `core`/`app`, both of which always grant a render route),

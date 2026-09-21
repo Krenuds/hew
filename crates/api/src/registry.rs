@@ -1301,7 +1301,10 @@ impl Registry {
                 .get_mut("hew.view.snapshot")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.";
+            // Version 2 draws annotations, on the same terms as
+            // `hew.view.line_drawing` and `hew.print.pdf`.
+            cmd.version = 2;
+            cmd.summary = "Render the attached document to PNG, dimensions and leader text included, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1346,7 +1349,9 @@ impl Registry {
                     "path": {
                         "type": "string",
                         "description": "when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export)"
-                    }
+                    },
+                    "dimensions": { "type": "boolean", "description": "draw the document's dimensions and leader text; defaults to true. A cameraless fit widens to include them." },
+                    "dimension_units": { "type": "string", "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"], "description": "unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m" }
                 },
                 "additionalProperties": false
             });

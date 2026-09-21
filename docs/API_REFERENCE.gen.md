@@ -6560,12 +6560,12 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
 
 ### `hew.view.snapshot`
 
-- **Version:** 1
+- **Version:** 2
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
 
-Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
+Render the attached document to PNG, dimensions and leader text included, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
 
 **Params schema:**
 
@@ -6618,6 +6618,22 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
         "target"
       ],
       "type": "object"
+    },
+    "dimension_units": {
+      "description": "unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m",
+      "enum": [
+        "m",
+        "cm",
+        "mm",
+        "arch",
+        "frac_in",
+        "dec_in"
+      ],
+      "type": "string"
+    },
+    "dimensions": {
+      "description": "draw the document's dimensions and leader text; defaults to true. A cameraless fit widens to include them.",
+      "type": "boolean"
     },
     "height": {
       "description": "defaults to 512; out-of-range values are clamped, not refused",

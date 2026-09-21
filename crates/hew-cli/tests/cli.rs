@@ -829,6 +829,10 @@ fn snapshot_respects_user_hidden_state() {
         scene: None,
         include_ids: true,
         path: None,
+        // These cover the id buffer and the hidden sets; annotations are
+        // a different test's business.
+        dimensions: false,
+        dimension_units: api::units::LengthFormat::Meters,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -900,6 +904,10 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         scene: Some(sid),
         include_ids: true,
         path: None,
+        // These cover the id buffer and the hidden sets; annotations are
+        // a different test's business.
+        dimensions: false,
+        dimension_units: api::units::LengthFormat::Meters,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -963,6 +971,10 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         scene: Some(sid),
         include_ids: true,
         path: None,
+        // These cover the id buffer and the hidden sets; annotations are
+        // a different test's business.
+        dimensions: false,
+        dimension_units: api::units::LengthFormat::Meters,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -1001,6 +1013,8 @@ fn snapshot_scene_refuses_unknown_scene() {
         scene: Some(0xffff_ffff),
         include_ids: false,
         path: None,
+        dimensions: false,
+        dimension_units: api::units::LengthFormat::Meters,
     };
     let err = host.snapshot(&doc, &params).unwrap_err();
     assert_eq!(err.name, "unknown_scene");

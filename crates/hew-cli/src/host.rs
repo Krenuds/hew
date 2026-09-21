@@ -253,6 +253,48 @@ fn export_refusal(e: mesh_export::ExportError) -> Refusal {
 /// shared definition; user-hidden nodes skipped; an object that fails to
 /// tessellate skipped, not fatal). If nothing renders at all, refuses
 /// typed rather than returning a background-only image.
+/// Cap height for a snapshot's dimension text, as a fraction of the
+/// image height, clamped so it stays readable on a thumbnail and does
+/// not swamp a large render. The app sizes its labels in screen pixels
+/// for the same reason: text that scales with the model becomes
+/// unreadable as soon as you zoom out.
+fn label_cap_px(height: u32) -> f64 {
+    (height as f64 * 0.022).clamp(9.0, 40.0)
+}
+
+/// The document's annotations as rasterizer ink: line work in world
+/// space, and each label's measurement run already shaped into strokes
+/// by `api::stroke_font`. A PNG has no text, so the characters arrive as
+/// lines like everything else.
+fn annotation_overlay(
+    doc: &Document,
+    units: api::units::LengthFormat,
+    height: u32,
+) -> softrender::Overlay {
+    let world = api::annotate_layout::drawing(doc, units);
+    let cap = label_cap_px(height);
+    softrender::Overlay {
+        segments: world
+            .segments
+            .iter()
+            .map(|[a, b]| softrender::OverlaySegment {
+                a: *a,
+                b: *b,
+                warning: false,
+            })
+            .collect(),
+        labels: world
+            .labels
+            .iter()
+            .map(|l| softrender::OverlayLabel {
+                at: l.position,
+                strokes: api::stroke_font::text_strokes(&l.text, cap),
+                warning: l.detached,
+            })
+            .collect(),
+    }
+}
+
 fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotResult, Refusal> {
     // `scene` renders through the Scene's OWN resolved hidden set
     // (docs/agents/HEW_API.md's Scenes section) instead of the document's live
@@ -299,11 +341,22 @@ fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotRe
         .collect();
 
     let camera = resolve_camera(doc, params, scene.as_ref(), &hidden);
-    let rendered = softrender::render(&render_items, &camera, params.width, params.height)
-        .map_err(|e| {
-            Refusal::api("too_many_objects", &e.to_string())
-                .with_detail(serde_json::json!({ "max_items": u16::MAX }))
-        })?;
+    let overlay = if params.dimensions {
+        annotation_overlay(doc, params.dimension_units, params.height)
+    } else {
+        softrender::Overlay::default()
+    };
+    let rendered = softrender::render_with_overlay(
+        &render_items,
+        &camera,
+        params.width,
+        params.height,
+        &overlay,
+    )
+    .map_err(|e| {
+        Refusal::api("too_many_objects", &e.to_string())
+            .with_detail(serde_json::json!({ "max_items": u16::MAX }))
+    })?;
     let png = softrender::png::encode(&rendered.rgba, rendered.width, rendered.height);
 
     let (id_buffer, id_palette) = if params.include_ids {
@@ -362,7 +415,7 @@ fn resolve_camera(
     if let Some(view) = params.view {
         return softrender::Camera::standard_view(
             to_softrender_view(view),
-            fitted_bbox(doc, hidden),
+            fitted_bbox(doc, hidden, params),
         );
     }
     if let Some(resolved) = scene
@@ -374,7 +427,7 @@ fn resolve_camera(
         Some(state) => softrender::Camera::from_kernel(&state),
         None => softrender::Camera::standard_view(
             softrender::StandardView::Iso,
-            fitted_bbox(doc, hidden),
+            fitted_bbox(doc, hidden, params),
         ),
     }
 }
@@ -432,8 +485,30 @@ fn to_softrender_view(view: StandardView) -> softrender::StandardView {
 /// in the degenerate case (unreachable in practice: `render_snapshot`
 /// already refuses `nothing_to_render` before this is called with
 /// nothing visible).
-fn fitted_bbox(doc: &Document, hidden: &softrender::HiddenLeaves) -> (Point3, Point3) {
-    softrender::document_bbox_hiding(doc, hidden)
+/// The box a cameraless snapshot frames to. Annotations count when they
+/// are being drawn: a dimension stands OFF the geometry it measures, so
+/// fitting to the solids alone crops the very thing that was asked for.
+/// The app's own fit takes the same option.
+fn fitted_bbox(
+    doc: &Document,
+    hidden: &softrender::HiddenLeaves,
+    params: &SnapshotParams,
+) -> (Point3, Point3) {
+    let (mut min, mut max) = softrender::document_bbox_hiding(doc, hidden);
+    if !params.dimensions {
+        return (min, max);
+    }
+    let drawing = api::annotate_layout::drawing(doc, params.dimension_units);
+    let points = drawing
+        .segments
+        .iter()
+        .flat_map(|[a, b]| [*a, *b])
+        .chain(drawing.labels.iter().map(|l| l.position));
+    for p in points {
+        min = Point3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+        max = Point3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+    }
+    (min, max)
 }
 
 // -------------------------------------------------------- import unit scale

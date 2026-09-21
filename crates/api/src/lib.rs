@@ -29,6 +29,7 @@ pub mod locate;
 pub mod print_layout;
 pub mod refusal;
 pub mod registry;
+pub mod stroke_font;
 pub mod transact;
 pub mod units;
 

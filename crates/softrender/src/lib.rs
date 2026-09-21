@@ -161,6 +161,8 @@ const BACKGROUND: [u8; 4] = [245, 246, 248, 255];
 pub const BACKGROUND_RGBA: [u8; 4] = BACKGROUND;
 const AMBIENT: f32 = 0.35;
 const EDGE_COLOR: [u8; 4] = [40, 44, 52, 255];
+/// A detached annotation's ink — the app's own warning red.
+const WARNING_COLOR: [u8; 4] = [179, 38, 30, 255];
 /// Depth bias pulling edges toward the viewer so they win the z-test
 /// against their own faces.
 const EDGE_DEPTH_BIAS: f32 = 2e-3;
@@ -234,6 +236,46 @@ fn dot4(row: &[f64; 4], v: &[f64; 4]) -> f64 {
     row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3]
 }
 
+/// A run of text to letter onto a render, anchored to a world point.
+///
+/// The strokes are pixel offsets around that point, y up, and arrive
+/// already shaped: this rasterizer has no font, no metrics, and no
+/// layout. It knows how to draw a line, which is the whole reason
+/// annotation text reaches it as line work (`api::stroke_font`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayLabel {
+    /// The world point the run is centred on. It supplies the position
+    /// AND the depth, so a label behind geometry is occluded by it, the
+    /// same way the app's own annotations are depth-tested.
+    pub at: Point3,
+    /// `[[x0, y0], [x1, y1]]` pixel offsets from `at`, y up.
+    pub strokes: Vec<[[f64; 2]; 2]>,
+    /// Draw in the warning colour rather than ordinary ink.
+    pub warning: bool,
+}
+
+/// World-space line work drawn over a render.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlaySegment {
+    pub a: Point3,
+    pub b: Point3,
+    pub warning: bool,
+}
+
+/// Annotation ink for [`render_with_overlay`] — line work in world space
+/// plus text runs anchored to world points.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Overlay {
+    pub segments: Vec<OverlaySegment>,
+    pub labels: Vec<OverlayLabel>,
+}
+
+impl Overlay {
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty() && self.labels.is_empty()
+    }
+}
+
 /// Renders the items. Deterministic: identical inputs give identical
 /// bytes, whatever the platform.
 pub fn render(
@@ -241,6 +283,20 @@ pub fn render(
     camera: &Camera,
     width: u32,
     height: u32,
+) -> Result<Rendered, RenderError> {
+    render_with_overlay(items, camera, width, height, &Overlay::default())
+}
+
+/// [`render`], plus annotation ink drawn over the finished image.
+///
+/// The overlay is drawn last and depth-tested like any other line, so a
+/// dimension in front of a wall is visible and one behind it is not.
+pub fn render_with_overlay(
+    items: &[RenderItem],
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    overlay: &Overlay,
 ) -> Result<Rendered, RenderError> {
     if items.len() > u16::MAX as usize {
         // One past this and `palette.len() as u16` would wrap to the
@@ -327,6 +383,44 @@ pub fn render(
         }
     }
 
+    let perspective = matches!(camera.projection, Projection::Perspective { .. });
+    for seg in &overlay.segments {
+        let ink = if seg.warning {
+            WARNING_COLOR
+        } else {
+            EDGE_COLOR
+        };
+        if let (Some(a), Some(b)) = (frame.project(seg.a), frame.project(seg.b)) {
+            draw_line_colored(a, b, perspective, width, height, &mut rgba, &mut depth, ink);
+        }
+    }
+    for label in &overlay.labels {
+        let Some(anchor) = frame.project(label.at) else {
+            continue;
+        };
+        let ink = if label.warning {
+            WARNING_COLOR
+        } else {
+            EDGE_COLOR
+        };
+        for stroke in &label.strokes {
+            // Pixel offsets, y up against a top-row-first buffer. Depth
+            // is the anchor's throughout, so a run does not tilt into
+            // the scene or self-occlude.
+            let a = (
+                anchor.0 + stroke[0][0] as f32,
+                anchor.1 - stroke[0][1] as f32,
+                anchor.2,
+            );
+            let b = (
+                anchor.0 + stroke[1][0] as f32,
+                anchor.1 - stroke[1][1] as f32,
+                anchor.2,
+            );
+            draw_line_colored(a, b, perspective, width, height, &mut rgba, &mut depth, ink);
+        }
+    }
+
     Ok(Rendered {
         width,
         height,
@@ -410,6 +504,20 @@ fn draw_line(
     rgba: &mut [u8],
     depth: &mut [f32],
 ) {
+    draw_line_colored(a, b, perspective, width, height, rgba, depth, EDGE_COLOR);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_line_colored(
+    a: (f32, f32, f32),
+    b: (f32, f32, f32),
+    perspective: bool,
+    width: u32,
+    height: u32,
+    rgba: &mut [u8],
+    depth: &mut [f32],
+    ink: [u8; 4],
+) {
     let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil().max(1.0) as usize;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
@@ -427,7 +535,7 @@ fn draw_line(
         let idx = (y as usize) * (width as usize) + (x as usize);
         if z <= depth[idx] {
             depth[idx] = z;
-            rgba[idx * 4..idx * 4 + 4].copy_from_slice(&EDGE_COLOR);
+            rgba[idx * 4..idx * 4 + 4].copy_from_slice(&ink);
         }
     }
 }
@@ -829,6 +937,94 @@ mod tests {
         let r = render(&items, &camera, 96, 96).expect("renders");
         let center = r.ids[48 * 96 + 48] as usize;
         assert_eq!(r.id_palette_sids[center - 1], 9, "front box owns the pixel");
+    }
+
+    /// An overlay's world line work lands as ink where the bare render
+    /// had none, and a warning segment lands in the warning colour.
+    #[test]
+    fn overlay_line_work_paints_over_the_render() {
+        let (mesh, _) = box_mesh();
+        let camera = Camera::standard_view(
+            StandardView::Top,
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)),
+        );
+        let items = [RenderItem {
+            mesh: &mesh,
+            pose: Transform::IDENTITY,
+            sid: 42,
+        }];
+        let bare = render(&items, &camera, 128, 128).expect("renders");
+
+        // A line straight across the top face, and a warning line beside it.
+        let overlay = Overlay {
+            segments: vec![
+                OverlaySegment {
+                    a: Point3::new(0.0, 0.5, 1.2),
+                    b: Point3::new(1.0, 0.5, 1.2),
+                    warning: false,
+                },
+                OverlaySegment {
+                    a: Point3::new(0.0, 0.25, 1.2),
+                    b: Point3::new(1.0, 0.25, 1.2),
+                    warning: true,
+                },
+            ],
+            labels: Vec::new(),
+        };
+        let with = render_with_overlay(&items, &camera, 128, 128, &overlay).expect("renders");
+        assert_ne!(bare.rgba, with.rgba, "the overlay changed the image");
+        assert!(
+            with.rgba.chunks_exact(4).any(|px| px == WARNING_COLOR),
+            "a detached annotation is drawn in the warning colour"
+        );
+    }
+
+    /// A label's strokes are pixel offsets from its anchor: they draw at a
+    /// constant size regardless of how far the camera is, which is what
+    /// keeps a measurement readable at any zoom.
+    #[test]
+    fn overlay_label_strokes_are_pixel_sized() {
+        let (mesh, _) = box_mesh();
+        let items = [RenderItem {
+            mesh: &mesh,
+            pose: Transform::IDENTITY,
+            sid: 42,
+        }];
+        // One horizontal stroke, 20 px wide, centred on the box's middle.
+        // Warning ink, so the count below sees the label alone: the
+        // model's own edges are never this colour, and they DO scale
+        // with the camera.
+        let label = OverlayLabel {
+            at: Point3::new(0.5, 0.5, 1.2),
+            strokes: vec![[[-10.0, 0.0], [10.0, 0.0]]],
+            warning: true,
+        };
+        let overlay = Overlay {
+            segments: Vec::new(),
+            labels: vec![label],
+        };
+        let count_ink = |half_height: f64| {
+            let camera = Camera {
+                eye: Point3::new(0.5, 0.5, half_height * 4.0),
+                target: Point3::new(0.5, 0.5, 0.0),
+                up: kernel::Vec3::new(0.0, 1.0, 0.0),
+                projection: Projection::Parallel { half_height },
+            };
+            let r = render_with_overlay(&items, &camera, 128, 128, &overlay).expect("renders");
+            r.rgba
+                .chunks_exact(4)
+                .filter(|px| *px == WARNING_COLOR)
+                .count()
+        };
+        // Four times the zoom-out. A world-sized run would shrink with
+        // it; a pixel-sized one paints the same run either way.
+        let near = count_ink(0.75);
+        let far = count_ink(3.0);
+        assert!(near > 0 && far > 0, "the run drew at both zooms");
+        assert_eq!(
+            near, far,
+            "a pixel-sized run should not scale with the camera"
+        );
     }
 }
 

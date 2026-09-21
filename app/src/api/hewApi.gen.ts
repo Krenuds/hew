@@ -1493,13 +1493,17 @@ export interface ViewLineDrawingResult {
 }
 
 /**
- * `hew.view.snapshot` (v1) — Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
+ * `hew.view.snapshot` (v2) — Render the attached document to PNG, dimensions and leader text included, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_scene
  */
 export interface ViewSnapshotParams {
   /** mutually exclusive with view */
   camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  /** unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m */
+  dimension_units?: "m" | "cm" | "mm" | "arch" | "frac_in" | "dec_in"
+  /** draw the document's dimensions and leader text; defaults to true. A cameraless fit widens to include them. */
+  dimensions?: boolean
   /** defaults to 512; out-of-range values are clamped, not refused */
   height?: number
   /** defaults to false; when true, also returns a per-pixel id-buffer and its palette */

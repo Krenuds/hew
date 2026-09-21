@@ -775,6 +775,8 @@ pub fn print_pdf(
 /// two numbers the app's own vector page uses.
 const ANNOTATION_MM: f64 = 0.25;
 const LABEL_MM: f64 = 2.6;
+/// Padding around a label's knocked-out halo, mm.
+const LABEL_HALO_MM: f64 = 0.5;
 
 /// Draws a projected annotation overlay onto a page.
 ///
@@ -817,6 +819,22 @@ fn push_overlay(
         {
             continue;
         }
+        // A label sits ON the line it measures, so knock a paper-white
+        // hole out from under it first — the halo the SVG page gets from
+        // `paint-order`, which PDF has no equivalent of. Drawn after the
+        // line art and before the text, so it covers both.
+        let w = pdfwrite::text_width_mm(&l.text, LABEL_MM, false);
+        out.push(pdfwrite::Item::Rect {
+            rect: pdfwrite::Rect {
+                x: x - w / 2.0 - LABEL_HALO_MM,
+                y: y - LABEL_MM / 2.0 - LABEL_HALO_MM,
+                w: w + 2.0 * LABEL_HALO_MM,
+                h: LABEL_MM + 2.0 * LABEL_HALO_MM,
+            },
+            stroke_mm: None,
+            fill_gray: Some(1.0),
+            gray: 1.0,
+        });
         out.push(pdfwrite::Item::Text {
             x,
             // Page mm run top-down, so nudging the baseline DOWN by a

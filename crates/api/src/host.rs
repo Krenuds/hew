@@ -111,6 +111,11 @@ pub struct SnapshotParams {
     /// bytes; it is [`Host::write_snapshot`] that a host lacking
     /// filesystem access refuses.
     pub path: Option<String>,
+    /// Draw the document's dimensions and leader text.
+    pub dimensions: bool,
+    /// The unit format their measurement text is lettered in, as on
+    /// `hew.view.line_drawing`.
+    pub dimension_units: LengthFormat,
 }
 
 /// What `hew.view.snapshot` returns (docs/design/headless-snapshot.md).

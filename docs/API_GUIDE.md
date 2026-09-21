@@ -527,10 +527,11 @@ capture one. It refuses `unimplemented` until there is.
 
 ## Draw it to scale
 
-`hew.view.snapshot` renders without dimensions — text in a raster needs a
-glyph rasterizer the headless renderer does not have. For a drawing with
-its dimensions on it, use `hew.view.line_drawing`, which removes hidden
-lines and letters the annotations:
+`hew.view.snapshot` draws dimensions too, lettered as line work from a
+single-stroke font — a PNG has no text of its own, so the characters are
+drawn the way a plotter draws them. For a proper drawing rather than a
+shaded view, `hew.view.line_drawing` removes hidden lines and letters the
+annotations with real type:
 
 ```sh
 hew-cli dispatch hew.view.line_drawing \
@@ -539,6 +540,7 @@ hew-cli dispatch hew.view.line_drawing \
   --file table.hew
 ```
 
+Both commands, and `hew.view.snapshot`, take the same two parameters.
 `dimension_units` is what the measurements read in — `"m"`, `"cm"`,
 `"mm"`, `"arch"` (`5' 3-1/8"`), `"frac_in"`, or `"dec_in"`. It defaults
 to meters, because headless has no app to take a display preference from
