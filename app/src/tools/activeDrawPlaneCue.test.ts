@@ -66,6 +66,7 @@ function makeWasmScene(opts: {
     begin_sketch_on_plane: vi.fn(() => { sketchCounter += 1n; return sketchCounter }),
     pick_face: vi.fn(() => opts.pick?.()),
     pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     face_normal: vi.fn(() => new Float64Array(normal)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 0, ...normal])),

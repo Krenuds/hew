@@ -34,6 +34,7 @@ function makeWasmScene() {
     }),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),

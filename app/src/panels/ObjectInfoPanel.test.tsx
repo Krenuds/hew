@@ -95,3 +95,93 @@ describe('ObjectInfoPanel — imprint selection', () => {
     expect(screen.queryByLabelText('Add tag')).not.toBeInTheDocument()
   })
 })
+
+/**
+ * The Locked-sketch checkbox: a sketch's one toggle in this panel, and the
+ * only UI affordance for the whole feature. Reads straight off the scene
+ * each render (no local mirror), so the row is also the place a refused
+ * flip must visibly not take.
+ */
+describe('ObjectInfoPanel — locked sketches', () => {
+  /** A scene holding one sketch (`1n`) with a single island and edge. */
+  function sketchScene(locked: boolean, overrides: Record<string, unknown> = {}): WasmScene {
+    return makeScene({
+      sketch_ids: () => BigUint64Array.from([1n]),
+      sketch_island_ids: () => BigUint64Array.from([7n]),
+      sketch_edge_island: () => 7n,
+      sketch_locked: () => locked,
+      set_sketch_locked: vi.fn(),
+      ...overrides,
+    })
+  }
+
+  const SKETCH: NodeRef[] = [{ kind: 'sketch-island', id: 7n, sketch: 1n }]
+
+  it('shows an unlocked sketch as Stock, unchecked', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={sketchScene(false)} selectedIds={SKETCH} />)
+    const box = screen.getByLabelText('Locked sketch') as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(screen.getByText('Stock')).toBeInTheDocument()
+  })
+
+  it('shows a locked sketch as Reference, checked', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={sketchScene(true)} selectedIds={SKETCH} />)
+    const box = screen.getByLabelText('Locked sketch') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(screen.getByText('Reference')).toBeInTheDocument()
+  })
+
+  it('flips the flag on the OWNING sketch and reports the change', async () => {
+    const setLocked = vi.fn()
+    const onDocumentChanged = vi.fn()
+    const scene = sketchScene(false, { set_sketch_locked: setLocked })
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        onDocumentChanged={onDocumentChanged}
+        scene={scene}
+        selectedIds={SKETCH}
+      />,
+    )
+    // Selecting ONE line of a sketch still locks the whole sketch — the flag
+    // lives on the owner, not the sub-entity.
+    screen.getByLabelText('Locked sketch').click()
+    expect(setLocked).toHaveBeenCalledWith(1n, true)
+    expect(onDocumentChanged).toHaveBeenCalled()
+  })
+
+  it('surfaces a refusal as a toast and does not report a change', () => {
+    const onDocumentChanged = vi.fn()
+    const onToast = vi.fn()
+    const scene = sketchScene(false, {
+      set_sketch_locked: () => {
+        throw new Error('UnknownSketch: no such sketch')
+      },
+    })
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        onDocumentChanged={onDocumentChanged}
+        onToast={onToast}
+        scene={scene}
+        selectedIds={SKETCH}
+      />,
+    )
+    screen.getByLabelText('Locked sketch').click()
+    expect(onToast).toHaveBeenCalled()
+    expect(onDocumentChanged).not.toHaveBeenCalled()
+  })
+
+  it('offers no Locked row for a non-sketch selection', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }],
+      object_name: () => 'Panel',
+      object_solid: () => true,
+      node_tags: () => [],
+    })
+    render(
+      <ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[{ kind: 'object', id: 1n }]} />,
+    )
+    expect(screen.queryByLabelText('Locked sketch')).toBeNull()
+  })
+})

@@ -71,6 +71,7 @@ function makeWasmScene(opts: { sketchPick?: bigint } = {}) {
     ),
     pick_face: vi.fn(() => undefined), // never an eligible face in these fixtures
     pick_sketch: vi.fn(() => opts.sketchPick),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),

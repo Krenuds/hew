@@ -331,6 +331,10 @@ interface InstanceMeshGroup {
 interface DefSketchGroup {
   group: THREE.Group
   lines: LineSegments2 | null
+  /** The LOCKED sketches' merged line, split out for the same reason the
+   *  world path splits `lockedSketchLines`: reference geometry carries its
+   *  own material. `null` when the definition holds no locked sketch. */
+  lockedLines: LineSegments2 | null
   /** Fill meshes, keyed `${sketchHandle}:${regionHandle}` (region handles
    *  are per-sketch, so they can collide across sketches). */
   regionMeshes: Map<string, THREE.Mesh>
@@ -532,6 +536,13 @@ export class SceneRenderer {
    */
   private textureCache: Map<string, THREE.Texture> = new Map()
   private sketchLines: LineSegments2 | null = null
+  /**
+   * The merged fat line for LOCKED SKETCHES, kept apart from `sketchLines`
+   * so the two can carry different materials. A locked sketch is reference
+   * geometry, not stock — a chalk line you set lumber against — so it draws
+   * dashed in the construction-guide grey and paints no region fill.
+   */
+  private lockedSketchLines: LineSegments2 | null = null
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
@@ -2122,13 +2133,26 @@ export class SceneRenderer {
     this._clearSketchLines()
     this._clearSketchRegions()
 
+    // Two buckets, not one: a LOCKED SKETCH draws as reference geometry
+    // (dashed, construction grey, no fill) and an ordinary one as stock
+    // (solid blue, filled). Splitting the accumulation is what lets a single
+    // merged buffer per bucket keep its own material — the same shape
+    // `_buildDefSketchGroup` already uses for one merged line per instance.
     const allLinePositions: number[] = []
+    const lockedLinePositions: number[] = []
     for (const sketchHandle of this.wasmScene.sketch_ids()) {
+      const locked = this.wasmScene.sketch_locked(sketchHandle)
+      const into = locked ? lockedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
-        allLinePositions.push(linePositions[i])
+        into.push(linePositions[i])
       }
-      this._buildRegionFills(sketchHandle)
+      // No fill for a locked sketch. A 20x20 footprint would otherwise sit
+      // under every board laid on it, z-fighting each one's region and
+      // winning its picks; and a chalk line is an outline, not a surface.
+      // `Scene::register_sketch` drops its inference face to match, so what
+      // is drawn and what is hoverable stay the same thing.
+      if (!locked) this._buildRegionFills(sketchHandle)
     }
 
     if (allLinePositions.length > 0) {
@@ -2149,6 +2173,22 @@ export class SceneRenderer {
         depthBias: DEPTH_BIAS.SKETCH_LINE,
       })
       this.sketchGroup.add(this.sketchLines)
+    }
+
+    if (lockedLinePositions.length > 0) {
+      this.lockedSketchLines = makeFatSegments(new Float32Array(lockedLinePositions), {
+        // Construction grey, shared with guides: a locked sketch belongs to
+        // the same family — durable reference geometry that never becomes a
+        // solid — so it joins that visual language instead of inventing a
+        // fourth line colour. Dashed is what separates it from a guide LINE
+        // (thin, infinite) and from stock (solid blue).
+        color: GUIDE_COLOR,
+        widthPx: SKETCH_LINE_WIDTH_PX,
+        dashed: true,
+        transparent: true,
+        depthBias: DEPTH_BIAS.SKETCH_LINE,
+      })
+      this.sketchGroup.add(this.lockedSketchLines)
     }
 
     // Sketches DRAWN INSIDE A COMPONENT (component-edit-parity.md Finding 1)
@@ -2205,6 +2245,7 @@ export class SceneRenderer {
   private _clearDefSketchGroups(): void {
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) disposeFatSegments(g.lines)
+      if (g.lockedLines !== null) disposeFatSegments(g.lockedLines)
       for (const mesh of g.regionMeshes.values()) {
         mesh.geometry.dispose()
         ;(mesh.material as THREE.Material).dispose()
@@ -2237,13 +2278,21 @@ export class SceneRenderer {
     )
     group.matrixWorldNeedsUpdate = true
 
+    // Same two buckets as the world path in `refreshAllSketches`: a locked
+    // sketch inside a definition is reference geometry too, and must not
+    // come out solid blue and filled just because it reached the scene
+    // through an instance pose.
     const allLinePositions: number[] = []
+    const lockedLinePositions: number[] = []
     const regionMeshes = new Map<string, THREE.Mesh>()
     for (const sketchHandle of sketchIds) {
+      const locked = this.wasmScene.sketch_locked(sketchHandle)
+      const into = locked ? lockedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
-        allLinePositions.push(linePositions[i])
+        into.push(linePositions[i])
       }
+      if (locked) continue // no fill for a chalk line
       const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
       for (let i = 0; i < regionHandles.length; i++) {
         const regionHandle = regionHandles[i]
@@ -2265,10 +2314,22 @@ export class SceneRenderer {
       group.add(lines)
     }
 
-    if (lines === null && regionMeshes.size === 0) return // nothing to show
+    let lockedLines: LineSegments2 | null = null
+    if (lockedLinePositions.length > 0) {
+      lockedLines = makeFatSegments(new Float32Array(lockedLinePositions), {
+        color: GUIDE_COLOR,
+        widthPx: SKETCH_LINE_WIDTH_PX,
+        dashed: true,
+        transparent: true,
+        depthBias: DEPTH_BIAS.SKETCH_LINE,
+      })
+      group.add(lockedLines)
+    }
+
+    if (lines === null && lockedLines === null && regionMeshes.size === 0) return // nothing to show
 
     this.sketchGroup.add(group)
-    this.defSketchGroups.set(instanceId, { group, lines, regionMeshes })
+    this.defSketchGroups.set(instanceId, { group, lines, lockedLines, regionMeshes })
   }
 
   /**
@@ -3478,7 +3539,11 @@ export class SceneRenderer {
         })
       }
       setWidth(this.sketchLines)
-      for (const d of this.defSketchGroups.values()) setWidth(d.lines)
+      setWidth(this.lockedSketchLines)
+      for (const d of this.defSketchGroups.values()) {
+        setWidth(d.lines)
+        setWidth(d.lockedLines)
+      }
     }
 
     if (opts.style === 'lineart') {
@@ -3525,7 +3590,11 @@ export class SceneRenderer {
         })
       }
       inkLine(this.sketchLines)
-      for (const d of this.defSketchGroups.values()) inkLine(d.lines)
+      inkLine(this.lockedSketchLines)
+      for (const d of this.defSketchGroups.values()) {
+        inkLine(d.lines)
+        inkLine(d.lockedLines)
+      }
       undo.push(() => {
         for (const m of cache.values()) m.dispose()
       })
@@ -4528,10 +4597,12 @@ export class SceneRenderer {
   private _applySketchIsolation(): void {
     const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
     const dim = this._dimOpacity()
-    if (this.sketchLines !== null) {
-      const mat = this.sketchLines.material as LineMaterial
+    for (const line of [this.sketchLines, this.lockedSketchLines]) {
+      if (line === null) continue
+      const mat = line.material as LineMaterial
       mat.opacity = anyContextActive ? dim : 1
-      mat.transparent = anyContextActive
+      // A dashed material must stay transparent or its gaps fill in.
+      mat.transparent = anyContextActive || mat.dashed
     }
     for (const mesh of this.sketchRegionMeshes.values()) {
       const mat = mesh.material as THREE.MeshBasicMaterial
@@ -4540,10 +4611,12 @@ export class SceneRenderer {
     for (const [instanceId, g] of this.defSketchGroups) {
       const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
       const dimmed = anyContextActive && !isLit
-      if (g.lines !== null) {
-        const mat = g.lines.material as LineMaterial
+      for (const line of [g.lines, g.lockedLines]) {
+        if (line === null) continue
+        const mat = line.material as LineMaterial
         mat.opacity = dimmed ? dim : 1
-        mat.transparent = dimmed
+        // A dashed material must stay transparent or its gaps fill in.
+        mat.transparent = dimmed || mat.dashed
       }
       for (const mesh of g.regionMeshes.values()) {
         const mat = mesh.material as THREE.MeshBasicMaterial
@@ -4684,6 +4757,11 @@ export class SceneRenderer {
       disposeFatSegments(this.sketchLines)
       this.sketchGroup.remove(this.sketchLines)
       this.sketchLines = null
+    }
+    if (this.lockedSketchLines !== null) {
+      disposeFatSegments(this.lockedSketchLines)
+      this.sketchGroup.remove(this.lockedSketchLines)
+      this.lockedSketchLines = null
     }
   }
 

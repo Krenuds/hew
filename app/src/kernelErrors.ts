@@ -83,6 +83,8 @@ const DESCRIPTIONS: Record<string, string> = {
     'That offset distance is too small to make a new boundary. Drag further, or type an exact distance.',
   OffsetCollapsed:
     "The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.",
+  SketchLocked:
+    "That sketch is locked, so it can't be drawn into, changed, or extruded — it's a reference, not stock. Select it and clear 'Locked sketch' in Object Info to build from it.",
   SketchGestureAlreadyOpen:
     'The drawing tools got out of step. Press Escape and try again.',
   SketchGestureNotOpen:

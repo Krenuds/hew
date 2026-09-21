@@ -373,6 +373,8 @@ pub enum RecordedCall {
     Ungroup { group: u64 },
     /// `delete_sketch(sketch)`.
     DeleteSketch { sketch: u64 },
+    /// `set_sketch_locked(sketch, locked)`.
+    SetSketchLocked { sketch: u64, locked: bool },
     /// `transform_group(group, affine)`.
     TransformGroup { group: u64, affine: [f64; 12] },
     /// `make_component(kinds, ids)`.

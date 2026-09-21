@@ -30,6 +30,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_ids: () => new BigUint64Array(),
     instance_ids: () => new BigUint64Array(),
     sketch_ids: () => new BigUint64Array(),
+    sketch_locked: () => false,
     sketch_island_ids: (sid: bigint) => new BigUint64Array([sid + 100n]),
     sketch_edge_island: () => undefined,
     sketch_edge_curve: () => undefined as bigint | undefined,
@@ -887,6 +888,7 @@ describe('ObjectInfoPanel', () => {
     const n = opts.facets ?? 24
     return makeScene({
       sketch_ids: () => new BigUint64Array([5n]),
+      sketch_locked: () => false,
       sketch_island_ids: () => new BigUint64Array([50n]),
       sketch_edge_island: () => 50n,
       sketch_edge_curve: () => 9n,

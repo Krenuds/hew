@@ -90,6 +90,7 @@ function makeWasmScene(opts: {
     pick_sketch_edge: vi.fn(() => opts.edgePick),
     sketch_edge_endpoints: vi.fn(() => opts.edgeEndpoints),
     sketch_regions: vi.fn(() => BigUint64Array.from([7n])),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     face_boundary: vi.fn(() => squareBoundary(1)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),

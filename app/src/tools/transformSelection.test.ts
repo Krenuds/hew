@@ -355,6 +355,7 @@ function makeReplayScene(opts: { failAfterAdds?: number } = {}): ReplayFake {
       s === 3n && (e === 10n || e === 11n) ? 7n : undefined,
     ),
     sketch_curve_geom: vi.fn(() => [1, 2, 0, 0.5]),
+    sketch_locked: vi.fn(() => false),
     sketch_plane: vi.fn(() => [0, 0, 0, 0, 0, 1]),
     history_generation: vi.fn(() => generation),
     sketch_begin_gesture: vi.fn((s: bigint) => {
@@ -657,6 +658,7 @@ describe('duplicateSketchSelectionByAffine — data-driven plane routing', () =>
     const raw = {
       sketch_island_ids: vi.fn((s: bigint) => (s === 1n ? [10n] : s === 900n ? [77n] : [])),
       sketch_edge_island: vi.fn((_s: bigint, e: bigint) => (e >= 200n ? 99n : e === 100n ? 10n : undefined)),
+      sketch_locked: vi.fn(() => false),
       sketch_plane: vi.fn((s: bigint) => (s === 1n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined)),
       sketch_island_edges: vi.fn((_s: bigint, island: bigint) => (island === 10n ? [100n] : [])),
       sketch_edge_endpoints: vi.fn((_s: bigint, e: bigint) => (e === 100n ? [0, 0, 0, 1, 0, 0] : undefined)),

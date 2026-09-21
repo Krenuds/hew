@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `16`**, and **geometry buffer format version `6`**. Both are covered
+version `17`**, and **geometry buffer format version `6`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 16,
+  "format_version": 17,
   "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
@@ -162,7 +162,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `16`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `17`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -261,6 +261,7 @@ of the manifest:
 | `sketches[].curves` | 10 | empty list (every curve chain is identity-only, no analytic definition) |
 | `sketches[].curves[].kind` | 12 | `"circle"` — the chain's edges are chord facets approximating the stored circle, which is what a `curves[]` entry meant at v10/v11 |
 | `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
+| `sketches[].locked` | 17 | absent — an ordinary sketch (the only kind before v17) |
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 | `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
 | `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
@@ -312,6 +313,12 @@ with any subset of them, or none, is perfectly ordinary.
   field is optional (absence means no dictionaries), but a present one
   must satisfy the field reference's shape rules — an empty namespace or
   key string, or an unrepresentable number, is a fatal, typed error.
+- **`sketches[].locked` (v17)** is version-gated the same single direction,
+  for the same reason: a file declaring a version older than 17 that carries
+  a `locked` field is malformed for its own declared version and MUST be
+  rejected. At v17+ the field is optional and written only when `true`, so a
+  document with no locked sketch is byte-identical to the v16 output of the
+  same document.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -745,6 +752,31 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   reaches the scene only through that definition's instances, at each
   instance's pose, exactly like a member object. A reader MUST reject an
   out-of-range `owner`, like any other dangling reference.
+
+- `locked` (v17+, optional) — `true` marks a **locked sketch**: one drawn
+  *against* rather than *into*. A locked sketch is a measurement, not stock —
+  a chalk line an editor sets geometry against and never consumes. It never
+  welds (no drawing gesture may target it, so a stroke over it lands in a
+  different sketch instead of splitting its edges), nothing is ever extruded
+  or swept out of it, and it stays fully available as a snap source. Only its
+  own contents are frozen: a rigid whole-sketch transform still moves it, and
+  deleting it works like deleting any other sketch. Absent means `false` — an
+  ordinary sketch, the only kind before v17.
+
+  A writer emits the key ONLY when `true`, so a document containing no locked
+  sketch produces a byte-identical `sketches[]` across the version bump. A
+  reader MUST reject a `locked` field in a manifest declaring a version older
+  than 17: no pre-v17 writer emitted one, so its presence means a hand-edited
+  or broken file, and honoring it would hand a sketch a protection its own
+  declared version says cannot exist (reject-not-repair).
+
+  Nothing else in the format depends on it. A reader that ignores `locked`
+  loses only the protection, never shape — the sketch's vertices, edges,
+  regions and curves are stored exactly as any other sketch's.
+
+  Not to be confused with the axis or plane constraint an editor may apply to
+  a drawing gesture while drawing: that is transient UI state and is never
+  serialized.
 
 ### 4.7 Guides
 

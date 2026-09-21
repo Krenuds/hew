@@ -20,7 +20,7 @@
  *   lands in the same sketch, the same shared-ground-sketch feel Phase 1
  *   had, now generalized to every plane.
  *
- * Handles a cached PLANE handle going bad two ways, both caught by a
+ * Handles a cached PLANE handle going bad three ways, all caught by a
  * PRE-CHECK before the gesture opens:
  *
  * - The gesture that created the sketch was undone: the sketch is hidden and
@@ -35,6 +35,12 @@
  *   already-committed edges on the tilted sketch and record a spurious undo
  *   step. Checking the plane up front makes recovery decision happen before
  *   anything is submitted.
+ *
+ * - The sketch was LOCKED (a locked sketch — one drawn *against* rather than
+ *   *into*, a chalk line). It never welds, so it is not a legal gesture
+ *   target at all; dropping it mints a fresh sketch and the next stroke lands
+ *   beside it instead of splitting its edges. The locked sketch itself stays
+ *   live, visible and fully snappable throughout.
  *
  * An EXISTING (sketch-mode) target gets the same up-front liveness check,
  * but on failure it's a genuine refusal — never a silent retarget onto a
@@ -97,11 +103,20 @@ export function makeSketchPlaneCache(): SketchPlaneCache {
 const PLANE_EPS = 1e-9
 
 /**
- * True iff `sketch` is live and its plane is still the SAME plane as
- * `plane` — any point on it, any way its normal faces. Orientation-free
- * (mirrors `isGroundPlane`'s rationale): a flipped-but-coincident sketch
- * plane still accepts every point plane-mode tools compute. `false` for a
- * stale or hidden handle (`sketch_plane` reads `undefined`).
+ * True iff `sketch` is still a usable target for a plane-mode gesture: live,
+ * NOT a locked sketch, and still on the SAME plane as `plane` — any point on
+ * it, any way its normal faces. Orientation-free (mirrors `isGroundPlane`'s
+ * rationale): a flipped-but-coincident sketch plane still accepts every
+ * point plane-mode tools compute. `false` for a stale or hidden handle
+ * (`sketch_plane` reads `undefined`).
+ *
+ * A LOCKED SKETCH is the third way a cached handle goes bad, and the reason
+ * it is checked HERE rather than left to the kernel: a locked sketch never
+ * welds, so `sketch_begin_gesture` would refuse it outright. Dropping it from
+ * the cache up front turns that refusal into the behaviour the lock is for —
+ * the next stroke on this plane mints a FRESH sketch and draws beside the
+ * chalk line instead of into it. Unlike the other two, this one is not a
+ * handle going stale; the sketch is perfectly alive and still snapped to.
  *
  * `instance`, when set, means `sketch` is DEFINITION-owned: `sketch_plane`
  * then answers in DEFINITION-local space, not world, so `plane` (always
@@ -115,7 +130,7 @@ const PLANE_EPS = 1e-9
  * never produce wrong geometry, since every actual commit goes through the
  * kernel's own exact pose⁻¹ mapping regardless of this check's outcome.
  */
-function isStillOnPlane(
+function isEligibleDrawTarget(
   wasmScene: WasmScene,
   sketch: bigint,
   plane: DrawPlane,
@@ -123,6 +138,7 @@ function isStillOnPlane(
 ): boolean {
   const sketchPlane = wasmScene.sketch_plane(sketch)
   if (sketchPlane === undefined) return false
+  if (wasmScene.sketch_locked(sketch)) return false
   let [px, py, pz, nx, ny, nz] = sketchPlane
 
   if (instance !== null) {
@@ -206,12 +222,19 @@ export function runSketchGesture<T>(
     if (wasmScene.sketch_plane(target.handle) === undefined) {
       throw new Error('UnknownSketch: the hovered sketch is no longer there')
     }
+    // Backstop for the locked case. `resolveIdleDrawTarget` already declines
+    // to adopt a locked sketch, so reaching here means a stale target that
+    // was locked mid-gesture — a genuine refusal, never a silent retarget
+    // onto a fresh sketch the user never aimed at.
+    if (wasmScene.sketch_locked(target.handle)) {
+      throw new Error('SketchLocked: that sketch is locked; unlock it to draw into it')
+    }
     handle = target.handle
   } else {
     const key = `${target.instance ?? 'world'}:${planeKey(target.plane)}`
     let cached = cache.get(key)
-    if (cached !== null && !isStillOnPlane(wasmScene, cached, target.plane, target.instance)) {
-      cached = null // stale, hidden, or departed — retarget before opening
+    if (cached !== null && !isEligibleDrawTarget(wasmScene, cached, target.plane, target.instance)) {
+      cached = null // stale, hidden, departed, or LOCKED — retarget before opening
     }
     if (cached === null) {
       const { plane, instance } = target

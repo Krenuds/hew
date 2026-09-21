@@ -39,15 +39,16 @@ below.
   refused whole), a chain of interior points closing on its start imprints
   a sub-face, and placed-but-uncommitted face segments are drawn as the
   chain grows. Mixed-tool profiles close into regions in one shared
-  sketch PER plane (ground drawing keeps its own single shared ground
-  sketch, generalized rather than replaced); arcs optionally close as a pie
-  or a chord segment (Alt cycles); polygon side count is typed (`Ns`) and
-  persists for the session. Editing (select, delete, transform) is
-  plane-blind and already worked on a rotated sketch. TapeMeasure and
-  Protractor aren't limited to the ground plane either — a guide or
-  measurement follows a hovered sketch's plane, an idle arrow-key plane
-  lock, or (Tape Measure's parallel guides) the plane a picked face or
-  edge actually lies in
+  UNLOCKED sketch PER plane (ground drawing keeps its own single shared
+  ground sketch, generalized rather than replaced; a locked sketch is
+  never a gesture target, so a stroke over one lands beside it); arcs
+  optionally close as a pie or a chord segment (Alt cycles); polygon
+  side count is typed (`Ns`) and persists for the session. Editing
+  (select, delete, transform) is plane-blind and already worked on a
+  rotated sketch. TapeMeasure and Protractor aren't limited to the
+  ground plane either — a guide or measurement follows a hovered
+  sketch's plane, an idle arrow-key plane lock, or (Tape Measure's
+  parallel guides) the plane a picked face or edge actually lies in
 - Exact-dimension typing works both mid-gesture (before the committing
   click) and right after the shape is already drawn, on every draw tool
   that takes a typed measurement: Rectangle's `W,D` (each dimension dotted
@@ -128,6 +129,23 @@ below.
   island — selected, deleted, and transformed (moved, rotated, scaled;
   out-of-plane rotations included, detaching the shape into its own
   sketch when it shares one) without touching anything else
+- **Locked sketches** — a sketch drawn *against* instead of *into*, a
+  chalk line: the footprint you set lumber against and never consume.
+  Locked, it never welds (a drawing gesture cannot target it, so a
+  stroke over it lands in a fresh sketch beside it instead of splitting
+  its edges), nothing is extruded or swept out of it, and it stays fully
+  live for inference — endpoints, midpoints, edge snaps, curve
+  quadrants, tangents. Locking freezes SHAPE, not pose: a rigid
+  whole-sketch move still works, per-vertex and per-island edits refuse
+  with a typed `SketchLocked`, and its lines, islands and curves stay
+  individually selectable so a tape measure or a copy can still work off
+  them. It renders as dashed construction grey with no region fill and
+  registers no inference face, so a footprint never occludes the boards
+  laid on it. Unlocking returns an ordinary sketch with no residue;
+  deleting one works normally. A property on the Sketch itself — no
+  container, no group — toggled from Object Info, persisted as
+  `sketches[].locked` (manifest v17). Distinct from the axis/plane lock a
+  draw tool applies to a gesture, which is transient cursor state
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a

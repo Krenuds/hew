@@ -2265,8 +2265,19 @@ impl Scene {
             // twice.
             self.inference
                 .add_sketch_polygon_centers(id, &s.polygon_centers());
-            self.inference
-                .add_sketch_faces(id, &Self::live_sketch_faces(s));
+            // A LOCKED SKETCH registers no face. It is reference geometry, not
+            // stock — a chalk line, drawn as edges with no fill — and a
+            // footprint you lay boards on top of would otherwise occlude the
+            // ground under every one of them and win their OnFace picks. Every
+            // other candidate above still registers, so the guarantee that a
+            // locked sketch stays fully live for inference (endpoints,
+            // midpoints, edges, quadrants, tangents, centres) is untouched;
+            // the one thing given up is snapping to the region's interior,
+            // which is exactly the fill that is no longer drawn.
+            if !self.doc.is_sketch_locked(id) {
+                self.inference
+                    .add_sketch_faces(id, &Self::live_sketch_faces(s));
+            }
         }
     }
 
@@ -2361,7 +2372,11 @@ impl Scene {
                     }
                 })
                 .collect();
-            self.inference.add_sketch_faces(sid, &faces);
+            // Same locked-sketch rule as `register_sketch`'s world path: a
+            // locked sketch draws no fill, so it registers no face.
+            if !self.doc.is_sketch_locked(sid) {
+                self.inference.add_sketch_faces(sid, &faces);
+            }
             self.active_inference_sketches.push(sid);
         }
     }
@@ -4341,6 +4356,42 @@ impl Scene {
         let change = self.doc.delete_sketch(sketch_id(sketch)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteSketch { sketch });
+        Ok(())
+    }
+
+    /// Is this a LOCKED SKETCH — one drawn *against* rather than *into*?
+    ///
+    /// A locked sketch is a measurement, not stock: a chalk line you set
+    /// lumber against and never consume. It never welds (a draw gesture
+    /// cannot open on it, so drawing over it mints a fresh sketch instead of
+    /// splitting its edges), nothing is ever extruded out of it, and it stays
+    /// fully live for inference, picking and selection. Rigid whole-sketch
+    /// transform is the one change it allows — locking freezes shape, not
+    /// pose.
+    ///
+    /// NOT the axis/plane lock a draw tool applies to a gesture: that is a
+    /// transient cursor constraint, this is durable document state.
+    ///
+    /// `false` for a stale or hidden handle — a pure query that never fails.
+    pub fn sketch_locked(&self, sketch: u64) -> bool {
+        self.doc.is_sketch_locked(sketch_id(sketch))
+    }
+
+    /// Lock or unlock a sketch (undoable). Unlocking leaves no residue: the
+    /// sketch welds and extrudes again exactly as before it was locked.
+    ///
+    /// Setting the flag to the value it already holds is a no-op that costs
+    /// no undo step.
+    ///
+    /// # Errors
+    /// - `UnknownSketch` — stale, hidden, or foreign handle.
+    pub fn set_sketch_locked(&mut self, sketch: u64, locked: bool) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_sketch_locked(sketch_id(sketch), locked)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetSketchLocked { sketch, locked });
         Ok(())
     }
 
@@ -9608,6 +9659,9 @@ impl Scene {
                     }
                     DeleteSketch { sketch } => {
                         self.delete_sketch(sketch)?;
+                    }
+                    SetSketchLocked { sketch, locked } => {
+                        self.set_sketch_locked(sketch, locked)?;
                     }
                     TransformGroup { group, affine } => {
                         self.transform_group(group, &affine)?;

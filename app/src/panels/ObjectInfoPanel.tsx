@@ -178,6 +178,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         feature === null ? null : feature.kind === 'sub_face' ? feature.loop.length : feature.path.length
       return {
         sketchId: undefined as bigint | undefined,
+        // An imprint lives on a solid's face, not in a sketch — never locked.
+        locked: null as boolean | null,
         curveId: null as bigint | null,
         segments: null as number | null,
         node,
@@ -245,6 +247,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
 
       return {
         sketchId,
+        // Whether the owning sketch is a LOCKED SKETCH — reference geometry
+        // rather than stock. Read off the owner, so selecting one line of a
+        // locked sketch still shows (and can flip) the lock.
+        locked: scene.sketch_locked(sketchId),
         curveId,
         segments,
         node,
@@ -318,6 +324,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     return {
       // Curve-only fields: an Object/Group/Instance never has a Segments row.
       sketchId: undefined as bigint | undefined,
+      // Only a sketch can be a locked sketch.
+      locked: null as boolean | null,
       curveId: null as bigint | null,
       segments: null as number | null,
       node,
@@ -430,6 +438,34 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     if (nodeInfo === null || nodeInfo.instanceIds.length === 0) return
     onSelectMany(nodeInfo.instanceIds.map((id) => ({ kind: 'instance' as const, id })))
   }, [nodeInfo, onSelectMany])
+
+  // --------------------------------------------------------------------------
+  // Locked (sketches only) — is this a LOCKED SKETCH?
+  //
+  // A locked sketch is drawn *against* rather than *into*: a chalk line you
+  // set stock against and never consume. Nothing welds into it, nothing is
+  // extruded out of it, and it stays fully snappable throughout. Locking is
+  // one undo step and freezes SHAPE only — the sketch still moves as a whole.
+  //
+  // Nothing to mirror in local state: it is a boolean read straight off the
+  // scene each render, and a failed flip leaves the checkbox where it was.
+  // --------------------------------------------------------------------------
+  const toggleLocked = useCallback(
+    (next: boolean) => {
+      const sketchId = nodeInfo?.sketchId
+      if (sketchId === undefined) return
+      try {
+        scene.set_sketch_locked(sketchId, next)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const raw = err instanceof Error ? err.message : String(err)
+        onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
+        return
+      }
+      onDocumentChanged()
+    },
+    [nodeInfo, scene, onDocumentChanged, onToast],
+  )
 
   // --------------------------------------------------------------------------
   // Segments (drawn circles only) — SketchUp's Entity Info "Segments".
@@ -814,6 +850,26 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         <div>
           <div style={LABEL_STYLE}>Points</div>
           <div style={VALUE_STYLE}>{nodeInfo.points}</div>
+        </div>
+      )}
+
+      {/* Locked — a sketch only. A locked sketch is reference geometry: it
+       * never welds, nothing is extruded out of it, and it renders as a
+       * dashed chalk line with no fill. Unlocking returns it to an ordinary
+       * sketch with no residue. */}
+      {nodeInfo.locked !== null && (
+        <div>
+          <div style={LABEL_STYLE}>Locked sketch</div>
+          <label style={{ ...VALUE_STYLE, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              aria-label="Locked sketch"
+              checked={nodeInfo.locked}
+              onChange={(e) => toggleLocked(e.currentTarget.checked)}
+              title="Draw against this sketch instead of into it. Locked, it never welds and is never extruded, but still snaps."
+            />
+            <span>{nodeInfo.locked ? 'Reference' : 'Stock'}</span>
+          </label>
         </div>
       )}
 

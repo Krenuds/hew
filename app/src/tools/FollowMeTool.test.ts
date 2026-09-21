@@ -1091,6 +1091,7 @@ describe('FollowMeTool — start verdict', () => {
       sketch_edge_curve: vi.fn(() => 44n),
       sketch_curve_geom: vi.fn(() => new Float64Array([0, 0, 0, 1])),
       // The PATH sketch is the ground; the PROFILE sketch is the argument.
+      sketch_locked: () => false,
       sketch_plane: vi.fn((s: bigint) =>
         s === 9n ? new Float64Array([0, 0, 0, 0, 0, 1]) : new Float64Array(profilePlane),
       ),
@@ -1248,6 +1249,7 @@ describe('FollowMeTool — start verdict, the other outcomes', () => {
       }),
       sketch_edge_curve: vi.fn(() => undefined), // plain segments, no curve
       sketch_curve_geom: vi.fn(() => undefined),
+      sketch_locked: () => false,
       sketch_plane: vi.fn((s: bigint) =>
         s === 9n ? new Float64Array([0, 0, 0, 0, 0, 1]) : new Float64Array(profilePlane),
       ),
@@ -1397,6 +1399,7 @@ describe('FollowMeTool — open-path carried (detached-but-perpendicular) end', 
       sketch_edge_endpoints: vi.fn(() => new Float64Array([0, 0, 0, 4, 0, 0])),
       sketch_edge_curve: vi.fn(() => undefined),
       sketch_curve_geom: vi.fn(() => undefined),
+      sketch_locked: () => false,
       sketch_plane: vi.fn((s: bigint) =>
         s === 9n ? new Float64Array([0, 0, 0, 0, 0, 1]) : new Float64Array(profilePlane),
       ),
@@ -1454,6 +1457,7 @@ describe('FollowMeTool — drag-to-partial-sweep (E4)', () => {
       sketch_edge_endpoints: vi.fn(() => new Float64Array([0, 0, 0, 4, 0, 0])),
       sketch_edge_curve: vi.fn(() => undefined),
       sketch_curve_geom: vi.fn(() => undefined),
+      sketch_locked: () => false,
       sketch_plane: vi.fn((s: bigint) =>
         s === 9n ? new Float64Array([0, 0, 0, 0, 0, 1]) : new Float64Array([0, 0, 0, 1, 0, 0]),
       ),
@@ -1679,6 +1683,7 @@ describe('FollowMeTool — K2 direction-aware drag (signed partial sweep)', () =
       ),
       sketch_edge_curve: vi.fn(() => undefined),
       sketch_curve_geom: vi.fn(() => undefined),
+      sketch_locked: () => false,
       sketch_plane: vi.fn((s: bigint) =>
         s === 20n ? new Float64Array([0, 0, 0, 1, 0, 0]) : new Float64Array([0, 0, 0, 0, 0, 1]),
       ),

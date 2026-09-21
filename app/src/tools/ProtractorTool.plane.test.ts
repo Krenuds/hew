@@ -28,6 +28,7 @@ function makeWasmScene(opts: { sketchPick?: bigint } = {}): WasmScene {
     face_normal: vi.fn(() => { throw new Error('not a live world-object face') }),
     add_guide_line: vi.fn(() => 1n),
     pick_sketch: vi.fn(() => opts.sketchPick),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     // World-identity drawing axes (tool-parity §4) — this file doesn't
     // exercise a moved frame, only the disk's frame-aware color path

@@ -76,6 +76,7 @@ function makeWasmScene(opts: {
     // Every picked object is plain/ungrouped by default (top-level eligibility).
     node_parent: vi.fn(() => undefined),
     // Every non-stale sketch lies on the ground plane (origin point, +Z).
+    sketch_locked: () => false,
     sketch_plane: vi.fn((sketch: bigint) =>
       (opts.staleSketchHandles ?? []).includes(sketch)
         ? undefined

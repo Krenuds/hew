@@ -50,6 +50,11 @@ Drives a fresh `Scene` through each named scenario in `generate.mjs`
   whose operand is itself a boolean result (handle reuse across a replacing op).
 - `hex-prism` — a 6-gon ground profile (the Circle tool's N-gon shape) extruded,
   exercising extrude over a non-quad loop.
+- `locked-sketch` — a reference outline LOCKED, a second outline drawn beside
+  it and extruded, then the reference unlocked. The only fixture driving
+  `set_sketch_locked`, and it drives it both ways; the lock lands BETWEEN the
+  two sketches, so a replay that dropped or reordered it would either refuse
+  the second sketch's segments or leave the reference consumed.
 
 To regenerate a single scenario: `node generate.mjs <name>` (or
 `node generate.mjs` with no arg to run every scenario, same as

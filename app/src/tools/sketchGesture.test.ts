@@ -22,6 +22,7 @@ describe('runSketchGesture — plane targets', () => {
   it('mints a sketch when the cache is empty, brackets the body, and passes its return value through', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -43,6 +44,7 @@ describe('runSketchGesture — plane targets', () => {
   it('reuses a cached handle whose sketch still lies on the target plane', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -62,6 +64,7 @@ describe('runSketchGesture — plane targets', () => {
     // on a plane that merely faces the other way.
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, -1])),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -78,6 +81,7 @@ describe('runSketchGesture — plane targets', () => {
   it('pre-checks a stale cached handle (sketch_plane undefined) and mints a fresh sketch BEFORE the gesture opens', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 8n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => undefined), // creating gesture was undone
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -106,6 +110,7 @@ describe('runSketchGesture — plane targets', () => {
     // is submitted.
     const scene = {
       begin_ground_sketch: vi.fn(() => 8n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => UPRIGHT),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -130,6 +135,7 @@ describe('runSketchGesture — plane targets', () => {
   it('propagates a genuine begin_gesture failure instead of retrying', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 2n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(() => {
         throw new Error('SketchGestureAlreadyOpen: gestures never nest')
@@ -149,6 +155,7 @@ describe('runSketchGesture — plane targets', () => {
   it('still closes the gesture (recording whatever succeeded) when the body throws mid-commit', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -170,6 +177,7 @@ describe('runSketchGesture — plane targets', () => {
     // handler can't sneak back in on an instanceof check.
     const scene = {
       begin_ground_sketch: vi.fn(() => 8n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -199,6 +207,7 @@ describe('runSketchGesture — plane targets', () => {
     const scene = {
       begin_ground_sketch: vi.fn(),
       begin_sketch_on_plane: vi.fn(() => 9n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => undefined),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -220,6 +229,7 @@ describe('runSketchGesture — plane targets', () => {
     const scene = {
       begin_ground_sketch: vi.fn(),
       begin_sketch_on_plane: vi.fn(() => 9n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, -1, 0])), // live, on TILTED_PLANE
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -236,6 +246,7 @@ describe('runSketchGesture — plane targets', () => {
   it('two DrawPlane instances that key the same share one cached handle (one sketch per plane)', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -259,6 +270,7 @@ describe('runSketchGesture — existing (sketch-mode) targets', () => {
   it('uses the target handle as-is when its sketch is live — no plane lookup, no minting', () => {
     const scene = {
       begin_ground_sketch: vi.fn(),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => UPRIGHT), // live, on some arbitrary non-ground plane
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -279,6 +291,7 @@ describe('runSketchGesture — existing (sketch-mode) targets', () => {
   it('a vanished existing target throws an UnknownSketch-prefixed error and never opens a gesture or mints a ground sketch', () => {
     const scene = {
       begin_ground_sketch: vi.fn(),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => undefined),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -302,6 +315,7 @@ describe('runSketchGesture — instance (definition-owned) targets', () => {
     const scene = {
       begin_ground_sketch: vi.fn(),
       begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => undefined),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -326,6 +340,7 @@ describe('runSketchGesture — instance (definition-owned) targets', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
       begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => undefined),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -351,6 +366,7 @@ describe('runSketchGesture — instance (definition-owned) targets', () => {
     const scene = {
       begin_ground_sketch: vi.fn(),
       begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => undefined),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -374,6 +390,7 @@ describe('runSketchGesture — instance (definition-owned) targets', () => {
   it('toLocal is a plain pass-through for a world (instance: null) target', () => {
     const scene = {
       begin_ground_sketch: vi.fn(() => 1n),
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => GROUND),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -392,6 +409,7 @@ describe('runSketchGesture — instance (definition-owned) targets', () => {
 
   it('an "existing" (sketch-mode) target on a def-owned sketch still maps points via toLocal', () => {
     const scene = {
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => UPRIGHT),
       sketch_begin_gesture: vi.fn(),
       sketch_end_gesture: vi.fn(),
@@ -426,5 +444,93 @@ describe('SketchPlaneCache', () => {
     expect(cache.get('b')).toBe(2n) // untouched
     cache.clear()
     expect(cache.get('b')).toBeNull()
+  })
+})
+
+describe('runSketchGesture — locked sketches', () => {
+  it('drops a cached handle that has been locked and mints a fresh sketch on the same plane', () => {
+    // The deck case. The footprint was the ground plane's cached sketch;
+    // locking it must send the next board somewhere else rather than let it
+    // weld in and split the 20x20.
+    const scene = {
+      begin_ground_sketch: vi.fn(() => 2n),
+      sketch_locked: vi.fn((s: bigint) => s === 1n),
+      sketch_plane: vi.fn(() => GROUND),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 1n) // the locked footprint
+
+    runSketchGesture(scene, cache, GROUND_PLANE, (sketch) => {
+      expect(sketch).toBe(2n)
+    })
+
+    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(2n)
+    // Never opened on the locked one — the refusal happens before the door.
+    expect(scene.sketch_begin_gesture).not.toHaveBeenCalledWith(1n)
+    expect(cache.get(GROUND_KEY)).toBe(2n) // and the fresh one takes its place
+  })
+
+  it('keeps sending later strokes to the SAME fresh sketch, not one per stroke', () => {
+    // Six joists on one plane belong together; only the locked sketch is
+    // excluded, not the plane's caching behaviour.
+    const scene = {
+      begin_ground_sketch: vi.fn(() => 2n),
+      sketch_locked: vi.fn((s: bigint) => s === 1n),
+      sketch_plane: vi.fn(() => GROUND),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 1n)
+
+    runSketchGesture(scene, cache, GROUND_PLANE, () => {})
+    runSketchGesture(scene, cache, GROUND_PLANE, () => {})
+    runSketchGesture(scene, cache, GROUND_PLANE, () => {})
+
+    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses an "existing" target that is locked instead of silently retargeting', () => {
+    const scene = {
+      begin_ground_sketch: vi.fn(() => 9n),
+      sketch_locked: vi.fn(() => true),
+      sketch_plane: vi.fn(() => UPRIGHT),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+    } as unknown as WasmScene
+    const body = vi.fn()
+
+    expect(() =>
+      runSketchGesture(
+        scene,
+        makeSketchPlaneCache(),
+        { kind: 'existing', handle: 5n, instance: null },
+        body,
+      ),
+    ).toThrow(/^SketchLocked/)
+
+    expect(body).not.toHaveBeenCalled()
+    expect(scene.sketch_begin_gesture).not.toHaveBeenCalled()
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+  })
+
+  it('leaves an unlocked cached handle alone', () => {
+    const scene = {
+      begin_ground_sketch: vi.fn(() => 2n),
+      sketch_locked: vi.fn(() => false),
+      sketch_plane: vi.fn(() => GROUND),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 1n)
+
+    runSketchGesture(scene, cache, GROUND_PLANE, () => {})
+
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(1n)
   })
 })

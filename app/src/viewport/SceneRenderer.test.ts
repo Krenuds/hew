@@ -130,6 +130,7 @@ function makeScene(opts: {
     // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
     // rendering describe block below).
     component_member_sketches: () => new BigUint64Array(),
+    sketch_locked: () => false,
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
   } as unknown as WasmScene
@@ -1949,6 +1950,7 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       instance_pose: () => undefined,
       component_member_objects: () => new BigUint64Array(),
       component_member_sketches: () => new BigUint64Array(),
+      sketch_locked: () => false,
       sketch_ids: () => new BigUint64Array(),
       guide_ids: () => new BigUint64Array(),
     } as unknown as WasmScene
@@ -2310,6 +2312,7 @@ describe('SceneRenderer — untextured painted materials', () => {
         instance_expanded_members: () => new BigUint64Array(),
         instance_expanded_local_poses: () => new Float64Array(),
         component_member_sketches: () => new BigUint64Array(),
+        sketch_locked: () => false,
         sketch_ids: () => new BigUint64Array(),
         guide_ids: () => new BigUint64Array(),
         material_info: () => materialInfo,
@@ -2325,5 +2328,90 @@ describe('SceneRenderer — untextured painted materials', () => {
     } finally {
       warnSpy.mockRestore()
     }
+  })
+})
+
+describe('SceneRenderer — locked sketches render as reference, not stock', () => {
+  const SQUARE = new Float32Array([
+    0, 0, 0, 1, 0, 0,
+    1, 0, 0, 1, 1, 0,
+    1, 1, 0, 0, 1, 0,
+    0, 1, 0, 0, 0, 0,
+  ])
+
+  /** A world scene with one locked sketch (`1n`) and one ordinary one (`2n`). */
+  function sceneWithALockedSketch(): WasmScene {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from([1n, 2n])
+    scene.sketch_locked = (id: bigint) => id === 1n
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => BigUint64Array.from([10n])
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+    return scene as unknown as WasmScene
+  }
+
+  function lines(r: SceneRenderer): {
+    stock: { material: LineMaterial } | null
+    locked: { material: LineMaterial } | null
+  } {
+    const priv = r as unknown as {
+      sketchLines: { material: LineMaterial } | null
+      lockedSketchLines: { material: LineMaterial } | null
+    }
+    return { stock: priv.sketchLines, locked: priv.lockedSketchLines }
+  }
+
+  it('splits the merged buffer so a locked sketch carries its own material', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), sceneWithALockedSketch())
+    renderer.refreshAllSketches()
+
+    const { stock, locked } = lines(renderer)
+    expect(stock).not.toBeNull()
+    expect(locked).not.toBeNull()
+    // Construction grey and dashed: the guide family, not the stock blue.
+    expect(locked?.material.color.getHex()).toBe(0x555555)
+    expect(locked?.material.dashed).toBe(true)
+    expect(stock?.material.color.getHex()).toBe(0x2266cc)
+    expect(stock?.material.dashed).toBe(false)
+  })
+
+  it('paints no region fill for a locked sketch', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), sceneWithALockedSketch())
+    renderer.refreshAllSketches()
+
+    const meshes = (renderer as unknown as { sketchRegionMeshes: Map<string, unknown> })
+      .sketchRegionMeshes
+    // Both sketches report region 10n; only the unlocked one gets a fill.
+    expect([...meshes.keys()]).toEqual(['2:10'])
+  })
+
+  it('builds no locked buffer at all when nothing is locked', () => {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from([1n])
+    scene.sketch_locked = () => false
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => new BigUint64Array()
+    scene.region_boundary = () => new Float32Array()
+
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refreshAllSketches()
+
+    expect(lines(renderer).locked).toBeNull()
+  })
+
+  it('fades the locked buffer with the stock one under an edit context', () => {
+    // The isolation fade assumed exactly one world-sketch line material; a
+    // second bucket that skipped it would sit at full contrast while
+    // everything around it dimmed.
+    const renderer = new SceneRenderer(new THREE.Scene(), sceneWithALockedSketch())
+    renderer.refresh()
+    renderer.refreshAllSketches()
+    renderer.setActiveContext(new Set([2n]), new Set())
+
+    const { stock, locked } = lines(renderer)
+    expect(locked?.material.opacity).toBeCloseTo(stock?.material.opacity ?? -1)
+    expect(locked?.material.opacity).toBeLessThan(1)
+    // A dashed material must stay transparent or the gaps fill in.
+    expect(locked?.material.transparent).toBe(true)
   })
 })

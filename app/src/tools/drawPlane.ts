@@ -100,7 +100,7 @@ export function groundDrawPlane(): DrawPlane {
  * refuses a def-owned sketch rather than silently answer in the wrong
  * frame). The plane is posed forward through `instance` before being
  * returned, so every caller gets a genuinely WORLD-space `DrawPlane` either
- * way — mirrors `sketchGesture.ts`'s `isStillOnPlane`, including its
+ * way — mirrors `sketchGesture.ts`'s `isEligibleDrawTarget`, including its
  * approximate (linear-part, re-normalized) normal transform rather than the
  * exact inverse-transpose a non-uniform-scale pose would technically need;
  * see that function's doc for why that's safe here (this only gates
@@ -473,7 +473,7 @@ function isDefMemberSketch(wasmScene: WasmScene, component: bigint, sketch: bigi
  * member sketch's `sketch_plane`/`sketch_lines` answer in DEFINITION-LOCAL
  * space and must be posed forward through `instance` before being compared
  * against the real WORLD-space `ray` (`planeFromSketch`/`rayLandsOnSketch`'s
- * own `instance` param, mirroring `sketchGesture.ts`'s `isStillOnPlane`) —
+ * own `instance` param, mirroring `sketchGesture.ts`'s `isEligibleDrawTarget`) —
  * a plain world sketch needs no such mapping. Getting this backwards (map
  * unconditionally, or not at all) either corrupts a world sketch's plane or
  * leaves a member sketch's plane in the wrong frame, silently missing every
@@ -505,7 +505,18 @@ export function resolveIdleDrawTarget(
           !plane.ground &&
           rayLandsOnSketch(wasmScene, sketchHandle, plane, ray, instance)
         ) {
-          return { plane, target: { kind: 'existing', handle: sketchHandle, instance } }
+          // A LOCKED SKETCH is drawn *against*, not *into*: keep its PLANE
+          // (you aimed at that wall, not the ground) but decline to adopt
+          // the sketch itself, so the stroke goes to the plane's ordinary
+          // cached handle — a fresh sketch beside the chalk line. Falling
+          // all the way through to the ground plane instead would draw the
+          // next click somewhere the user never aimed; minting a bespoke
+          // sketch per stroke would scatter boards drawn on one wall across
+          // a sketch each. The locked sketch stays hovered, snapped to, and
+          // fully visible throughout.
+          return wasmScene.sketch_locked(sketchHandle)
+            ? { plane, target: { kind: 'plane', plane, instance } }
+            : { plane, target: { kind: 'existing', handle: sketchHandle, instance } }
         }
       }
     }

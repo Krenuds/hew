@@ -36,6 +36,7 @@ function makeWasmScene() {
     }),
     // Every minted sketch lies on the ground plane — exercises the cache's
     // "still on this plane" pre-check on the second (circle) commit.
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),

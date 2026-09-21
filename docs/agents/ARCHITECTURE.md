@@ -175,6 +175,27 @@ and removes the solid in the same atomic step. "What you see is what you
 have" is the invariant this buys: every entity in the document is either
 visible geometry or nothing.
 
+A **locked sketch** is the one sketch that is not larval. It is a
+measurement rather than stock — a chalk line you set lumber against, draw
+*against* instead of *into* — so it opts out of that lifecycle entirely
+until it is unlocked. Locked, it never welds (a drawing gesture cannot
+target it, so a stroke over it mints a separate sketch rather than
+splitting its edges) and nothing is ever consumed out of it: extrude,
+Follow Me and 3D Text all refuse it with a typed `SketchLocked`. It stays
+wholly visible and wholly snappable throughout, which is the point — a
+reference you cannot snap to is worthless.
+
+This is a property on the Sketch, not a container around it: Hew has
+first-class Sketch nodes, so protection is something a sketch carries
+rather than something a wrapper confers. It adds no lifecycle state —
+there is no dimmed, half-consumed husk to find — and it changes nothing
+about how an ordinary sketch behaves. Locking freezes shape, not pose: the
+sketch still moves as a rigid whole, and deleting it works normally.
+
+Guides (§2.9) are the existing sibling — durable reference geometry that
+never extrudes. A locked sketch is that idea given a closed region, so a
+footprint can be measured and snapped to rather than only sighted along.
+
 Re-extruding occupied ground is allowed. Hew's solids interpenetrate
 freely, so drawing a region over a visible solid's base and extruding it
 simply produces a second, coincident solid — exactly as any other overlap

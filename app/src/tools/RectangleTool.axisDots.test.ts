@@ -53,6 +53,7 @@ function makeWasmScene(opts: {
     })),
     pick_face: vi.fn(() => (n === null ? undefined : makePick(7n, 3n))),
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     node_parent: vi.fn(() => undefined),
     face_normal: vi.fn(() => new Float64Array(n ?? [0, 0, 1])),

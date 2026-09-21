@@ -60,6 +60,7 @@ function makeWasmScene() {
   const radialCalls: unknown[][] = []
   const scene = {
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((_s: bigint) => new Float64Array([0, 0, 0, 0, 0, 1])),
     sketch_edge_curve: vi.fn((_s: bigint, _e: bigint) => 9n),
     sketch_curve_geom: vi.fn((_s: bigint, _c: bigint) => new Float64Array([0, 0, 0, 2])),

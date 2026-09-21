@@ -563,7 +563,7 @@ export class PushPullTool implements Tool {
             // A def-owned sketch's plane is DEFINITION-LOCAL — `sketch_plane`
             // has no `_in_instance` sibling, so the normal is pose-mapped
             // here the same approximate way `sketchGesture.ts`'s
-            // `isStillOnPlane` does (linear part, re-normalized): exact for
+            // `isEligibleDrawTarget` does (linear part, re-normalized): exact for
             // rotation/uniform-scale/mirror/translation, and even a non-
             // uniform-scale pose can only skew the drag axis/preview, never
             // the actual commit, which goes through the kernel's own exact

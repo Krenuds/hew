@@ -1120,6 +1120,11 @@ enum DocAction {
     /// delete — the `SketchId` stays valid for redo). Undo un-hides it; redo
     /// re-hides it. Mirrors [`DocAction::DeletedGuide`].
     DeletedSketch { sketch: SketchId },
+    /// `set_sketch_locked` changed a sketch's locked-sketch flag. `was` is
+    /// the flag's value BEFORE the call; undo restores it, redo re-applies
+    /// its negation. Pure flag flip — no geometry moves, so there is nothing
+    /// to snapshot. Mirrors [`DocAction::DeletedSketch`]'s shape.
+    SetSketchLocked { sketch: SketchId, was: bool },
     /// `transform_instance` changed an instance's pose. Undo restores
     /// `prev` exactly; redo re-applies `next`. No bake — the pose is mutable
     /// instance state, so this is exact rather than an inverse-transform.
@@ -1787,6 +1792,7 @@ impl DocAction {
             | DocAction::DeletedAnnotation { .. }
             | DocAction::UpdatedAnnotation { .. }
             | DocAction::DeletedSketch { .. }
+            | DocAction::SetSketchLocked { .. }
             | DocAction::TransformInstance { .. } => Vec::new(),
             DocAction::DefObjectOp { object, .. } => vec![*object],
             DocAction::Exploded { created, .. } => created.clone(),
@@ -1892,7 +1898,9 @@ impl DocAction {
             | DocAction::CreatedAnnotation { .. }
             | DocAction::DeletedAnnotation { .. }
             | DocAction::UpdatedAnnotation { .. } => Vec::new(),
-            DocAction::DeletedSketch { sketch } => vec![*sketch],
+            DocAction::DeletedSketch { sketch } | DocAction::SetSketchLocked { sketch, .. } => {
+                vec![*sketch]
+            }
             DocAction::TransformInstance { .. } | DocAction::DefObjectOp { .. } => Vec::new(),
             DocAction::Exploded {
                 created_sketches, ..
@@ -2215,6 +2223,13 @@ fn visible_world_bottom_center(doc: &Document) -> Option<Point3> {
 pub enum DocumentError {
     /// The sketch handle is stale or from another Document.
     UnknownSketch,
+    /// The sketch is LOCKED ([`Document::set_sketch_locked`]) and the
+    /// operation would have changed its contents. Distinct from
+    /// [`DocumentError::UnknownSketch`] on purpose: a locked sketch is
+    /// present, findable, and fully snappable — calling it unknown would be
+    /// a lie, and DEVELOPMENT.md rule 4 wants the refusal to say what is
+    /// actually wrong. Unlock it, or draw on a different sketch.
+    SketchLocked,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
     /// `rename_tag`'s target path (or a nested path it would produce) is
@@ -2506,6 +2521,9 @@ impl std::fmt::Display for DocumentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
+            DocumentError::SketchLocked => {
+                write!(f, "this sketch is locked; unlock it to change it")
+            }
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
             DocumentError::DuplicateTag => write!(f, "a tag with that path already exists"),
             DocumentError::InvalidTagPath => write!(f, "tag path is empty or nested under itself"),
@@ -2888,6 +2906,24 @@ pub struct Document {
     /// instance visibility lives on their `*Record` wrappers rather than the
     /// payload type.
     hidden_sketches: BTreeSet<SketchId>,
+    /// Sketches the user has LOCKED ([`Document::set_sketch_locked`]): a
+    /// sketch drawn *against* rather than *into* — a chalk line. A locked
+    /// sketch refuses every mutation of its own contents; rigid whole-sketch
+    /// transform is the single exception, and reads are untouched, so it
+    /// stays fully live for inference, picking, and rendering.
+    ///
+    /// Distinct from the axis/plane "lock" the drawing tools apply to a
+    /// gesture — that is a transient cursor constraint, this is durable
+    /// entity state. Always spell it "locked sketch".
+    ///
+    /// A side table, not a field on [`Sketch`] itself, mirroring
+    /// `hidden_sketches`/`def_sketches`: the exceptional per-sketch state
+    /// stays out of every `self.sketches` call site, out of `Sketch`'s
+    /// `PartialEq`, and out of the sketch construction sites.
+    ///
+    /// Persisted as the sketch record's `locked` field (manifest v17+),
+    /// written only when true.
+    locked_sketches: BTreeSet<SketchId>,
     /// Palette materials the user DELETED ([`Document::delete_material`]):
     /// tombstoned, never removed, so the [`MaterialId`] stays valid for
     /// undo (a slotmap cannot re-insert at a key). Invariant, checked by
@@ -3526,6 +3562,14 @@ impl Document {
             .map(|(&id, &cid)| (id, cid))
             .collect();
 
+        // ── Locked sketches (manifest v17+), live sketches only ───────────
+        let locked_sketches: BTreeSet<SketchId> = self
+            .locked_sketches
+            .iter()
+            .filter(|id| !self.hidden_sketches.contains(id))
+            .copied()
+            .collect();
+
         // ── Collect live guides (in slotmap key order) ─────────────────
         let guides: Vec<(GuideId, Guide)> = self
             .guides
@@ -3561,6 +3605,7 @@ impl Document {
             instances,
             sketches,
             sketch_owner,
+            locked_sketches,
             guides,
             annotations,
             roots,
@@ -3712,6 +3757,16 @@ impl Document {
                             what: format!("sketch {i} owner component dense id {cd} out of range"),
                         })?;
                 doc.def_sketches.insert(sketch_ids[i], cid);
+            }
+        }
+
+        // ── 4c. Locked sketches (manifest v17+): `raw.sketch_locked` runs
+        // parallel to the sketch list and is `false` for every sketch in a
+        // pre-v17 file (the field-by-version default). No resolution needed
+        // — the flag names nothing outside its own sketch.
+        for (i, locked) in raw.sketch_locked.iter().enumerate() {
+            if *locked {
+                doc.locked_sketches.insert(sketch_ids[i]);
             }
         }
 
@@ -5745,6 +5800,8 @@ impl Document {
     /// - [`DocumentError::SketchGestureAlreadyOpen`] — gestures never nest or
     ///   interleave.
     /// - [`DocumentError::UnknownSketch`] — stale or hidden handle.
+    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
+    ///   a locked sketch never welds, so no gesture may open on it.
     ///
     /// On `Err` the document is untouched.
     pub fn begin_sketch_gesture(&mut self, sketch: SketchId) -> Result<(), DocumentError> {
@@ -5753,6 +5810,12 @@ impl Document {
         }
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch never welds: refusing the gesture at the door is
+        // what makes drawing over one mint a fresh sketch instead of
+        // splitting its edges. See `Document::set_sketch_locked`.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         let s = self
             .sketches
@@ -5777,6 +5840,8 @@ impl Document {
     /// - [`DocumentError::SketchGestureNotOpen`] — no gesture is open, or the
     ///   open one is for a different sketch.
     /// - [`DocumentError::UnknownSketch`] — the sketch vanished mid-gesture.
+    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
+    ///   a locked sketch never welds, so no gesture may open on it.
     pub fn end_sketch_gesture(&mut self, sketch: SketchId) -> Result<DocChange, DocumentError> {
         // A curve bracket never outlives its gesture: a tool that aborted
         // mid-commit (add_segment error, thrown callback) must not leave
@@ -5795,6 +5860,12 @@ impl Document {
             .expect("matched Some above");
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch never welds: refusing the gesture at the door is
+        // what makes drawing over one mint a fresh sketch instead of
+        // splitting its edges. See `Document::set_sketch_locked`.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         let Some(s) = self.sketches.get(sketch) else {
             return Err(DocumentError::UnknownSketch);
@@ -5845,13 +5916,22 @@ impl Document {
         self.sketches.get(id)
     }
 
-    /// A mutable sketch by handle, or `None` if stale or hidden (deleted).
+    /// A mutable sketch by handle, or `None` if stale, hidden (deleted), or a
+    /// LOCKED SKETCH ([`Document::set_sketch_locked`]).
+    ///
+    /// This is the chokepoint that makes "a locked sketch never welds"
+    /// structural rather than per-call-site: every `&mut Sketch` path —
+    /// `add_segment`, `remove_edge`, `offset_region`, `refacet_curve` — can
+    /// only be reached through this handle, so refusing it here refuses them
+    /// all at once. [`Document::sketch`] stays open, so inference, rendering,
+    /// and picking are untouched. Document-internal ops that reach
+    /// `self.sketches` directly carry their own locked guard.
     ///
     /// Sketch edits do not flow through the document undo log (sketch-level undo
     /// is a later milestone); they are surfaced to the caller via the returned
     /// handle and reconciled through [`Document::sketch`] reads.
     pub fn sketch_mut(&mut self, id: SketchId) -> Option<&mut Sketch> {
-        if self.hidden_sketches.contains(&id) {
+        if self.hidden_sketches.contains(&id) || self.locked_sketches.contains(&id) {
             return None;
         }
         self.sketches.get_mut(id)
@@ -5936,6 +6016,87 @@ impl Document {
             instances_touched,
             ..Default::default()
         })
+    }
+
+    /// Is `sketch` a LOCKED SKETCH — one drawn *against* rather than *into*?
+    ///
+    /// A locked sketch is a measurement, not stock: a chalk line you set
+    /// lumber against and never consume. It refuses every mutation of its own
+    /// contents (nothing welds into it, nothing is extruded out of it) while
+    /// staying fully live for inference, picking, selection, and rendering.
+    /// Rigid whole-sketch transform is the single allowed change — locking
+    /// freezes shape, not pose.
+    ///
+    /// Distinct from the axis/plane lock a drawing tool applies to a gesture:
+    /// that is a transient cursor constraint, this is durable entity state.
+    ///
+    /// `false` for a stale, hidden, or unknown handle — a pure query that
+    /// never refuses. Set it with [`Document::set_sketch_locked`].
+    pub fn is_sketch_locked(&self, id: SketchId) -> bool {
+        self.locked_sketches.contains(&id)
+    }
+
+    /// Lock or unlock `sketch`. Unlocking returns it to an ordinary sketch
+    /// with no residue: the next gesture on its plane may adopt it again, and
+    /// its regions extrude normally.
+    ///
+    /// Setting the flag to the value it already has is a no-op that pushes
+    /// nothing onto the undo log and reports nothing touched — a redundant
+    /// call must not cost the user an undo step.
+    ///
+    /// Undoable ([`DocAction::SetSketchLocked`]).
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale, hidden, or from another
+    ///   Document.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn set_sketch_locked(
+        &mut self,
+        sketch: SketchId,
+        locked: bool,
+    ) -> Result<DocChange, DocumentError> {
+        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let was = self.locked_sketches.contains(&sketch);
+        if was == locked {
+            return Ok(DocChange::default());
+        }
+        self.set_locked_flag(sketch, locked);
+        self.undo.push(DocAction::SetSketchLocked { sketch, was });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(DocChange {
+            sketches_touched: vec![sketch],
+            ..Default::default()
+        })
+    }
+
+    /// Carry the locked-sketch flag from `from` onto a freshly minted copy
+    /// `to`, within one document. A copy of a chalk line is still a chalk
+    /// line, so every path that deep-copies a sketch AS THE SAME SKETCH —
+    /// `make_unique`, `explode_instance`, a library copy — calls this right
+    /// beside its `copy_attrs`.
+    ///
+    /// [`Document::copy_sketch_islands`] deliberately does NOT: copying
+    /// geometry *off* a locked sketch is how you get ordinary stock to build
+    /// from, and a locked copy would defeat the point.
+    fn carry_sketch_locked(&mut self, from: SketchId, to: SketchId) {
+        if self.locked_sketches.contains(&from) {
+            self.locked_sketches.insert(to);
+        }
+    }
+
+    /// Set the locked-sketch flag with no undo record and no validation —
+    /// the shared body of [`Document::set_sketch_locked`] and its undo/redo
+    /// arms, which must move the flag without recording a fresh action.
+    fn set_locked_flag(&mut self, sketch: SketchId, locked: bool) {
+        if locked {
+            self.locked_sketches.insert(sketch);
+        } else {
+            self.locked_sketches.remove(&sketch);
+        }
     }
 
     /// The extrudable regions of `sketch`: simply its closed regions. Every
@@ -8639,6 +8800,10 @@ impl Document {
     /// was dropped as inconsistent with the freely-interpenetrating-solids
     /// model).
     ///
+    /// Refuses [`DocumentError::SketchLocked`] on a LOCKED SKETCH: that one
+    /// is a measurement rather than stock — it is never the larval form of a
+    /// solid, so nothing is consumed out of it. Unlock, extrude, relock.
+    ///
     /// Returns the new Object's handle and the [`DocChange`] it caused (the
     /// new Object plus the sketch that lost the scaffolding).
     pub fn extrude_region(
@@ -8651,6 +8816,12 @@ impl Document {
         self.explode_scope_sketch(sketch)?;
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         // World-op guard (component-edit-parity.md phase K1): a def-owned
         // sketch lives in DEFINITION-local space; birthing a WORLD Object
@@ -8702,6 +8873,8 @@ impl Document {
     ///   owned by `instance`'s own definition (extruding a world sketch, or
     ///   one owned by a *different* definition, into this instance is not a
     ///   meaningful op).
+    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
+    ///   nothing is ever consumed out of one. Unlock it to build from it.
     /// - [`DocumentError::AmbiguousInstanceScale`] — the instance's pose is
     ///   not a similarity (non-uniform scale).
     /// - [`DocumentError::Sketch`] — the region handle is stale.
@@ -8734,6 +8907,12 @@ impl Document {
 
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         let s = self
             .sketches
@@ -8825,6 +9004,12 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
+        }
         // World-op guard (component-edit-parity.md phase K1): see
         // `extrude_region`'s matching guard.
         if self.sketch_owner_component(sketch).is_some() {
@@ -8878,6 +9063,12 @@ impl Document {
         };
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         // World-op guard (component-edit-parity.md phase K1): see
         // `extrude_region`'s matching guard.
@@ -9060,6 +9251,8 @@ impl Document {
     /// - [`DocumentError::UnknownInstance`] — `instance` is stale/hidden.
     /// - [`DocumentError::UnknownSketch`] — `sketch` is stale/hidden or not
     ///   owned by `instance`'s own definition.
+    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
+    ///   nothing is ever consumed out of one. Unlock it to build from it.
     /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownFace`] —
     ///   a `FaceLoop` path object is not a live member of the same
     ///   definition, or has no such face.
@@ -9084,6 +9277,12 @@ impl Document {
             .transpose()?;
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
@@ -9137,6 +9336,12 @@ impl Document {
             .transpose()?;
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
@@ -11176,6 +11381,8 @@ impl Document {
     ///
     /// # Errors
     /// - [`DocumentError::UnknownSketch`] — stale or hidden sketch.
+    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
+    ///   locking freezes shape, so unlock it before moving its geometry.
     /// - [`DocumentError::Sketch`] — stale island
     ///   ([`SketchError::UnknownIsland`]), or an in-plane landing that would
     ///   cross or merge other geometry ([`SketchError::WouldRetopologize`]).
@@ -11198,6 +11405,11 @@ impl Document {
         }
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch freezes SHAPE (pose stays free — see
+        // `transform_sketch`), so anything that moves its geometry refuses.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         // Snapshot the WHOLE sketch's PRE-transform state before mutating
         // anything (rule 9 posture — see the `DocAction::TransformSketchIsland`
@@ -11267,6 +11479,11 @@ impl Document {
         }
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch freezes SHAPE (pose stays free — see
+        // `transform_sketch`), so anything that moves its geometry refuses.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         let s = &self.sketches[sketch];
         match s.validate_transform_island(island, t) {
@@ -11425,6 +11642,8 @@ impl Document {
     ///
     /// # Errors
     /// - [`DocumentError::UnknownSketch`] — stale or hidden (deleted) sketch.
+    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
+    ///   locking freezes shape, so unlock it before moving its geometry.
     /// - [`DocumentError::Sketch`] — the move was refused (off-plane, would
     ///   collapse an incident edge, or would cross/merge geometry); the sketch
     ///   is left untouched (the [`Sketch::move_vertex`] strong guarantee).
@@ -11436,6 +11655,11 @@ impl Document {
     ) -> Result<DocChange, DocumentError> {
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
+        }
+        // A locked sketch freezes SHAPE (pose stays free — see
+        // `transform_sketch`), so anything that moves its geometry refuses.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
         }
         let old_pos = self.sketches[sketch]
             .move_vertex(vertex, new_pos)
@@ -12908,6 +13132,12 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // A locked sketch is a measurement, not stock: nothing is ever
+        // consumed out of it, so no region of it is ever born into a solid.
+        // Unlock it if you meant to build from it.
+        if self.locked_sketches.contains(&sketch) {
+            return Err(DocumentError::SketchLocked);
+        }
         if regions.is_empty() {
             return Err(DocumentError::EmptyComponent);
         }
@@ -13367,6 +13597,7 @@ impl Document {
                 .map_err(DocumentError::Transform)?;
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
+            self.carry_sketch_locked(sid, new_sid);
             created_sketches.push(new_sid);
         }
 
@@ -13796,6 +14027,7 @@ impl Document {
             let clone = self.sketches[sid].clone();
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
+            self.carry_sketch_locked(sid, new_sid);
             self.def_sketches.insert(new_sid, new_def);
             cloned_sketches.push(new_sid);
         }
@@ -15804,6 +16036,9 @@ impl Document {
                 )
             }
             DocAction::DeletedSketch { .. } => "Delete sketch".to_string(),
+            DocAction::SetSketchLocked { was, .. } => {
+                if *was { "Unlock sketch" } else { "Lock sketch" }.to_string()
+            }
             DocAction::TransformInstance { prev, next, .. } => {
                 let forward = prev.inverse().map(|inv| inv.then(next)).unwrap_or(*next);
                 format!("{} instance", transform_verb(&forward))
@@ -17594,6 +17829,13 @@ impl Document {
                 }
                 DocChange::default()
             }
+            &DocAction::SetSketchLocked { sketch, was } => {
+                self.set_locked_flag(sketch, was);
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
             &DocAction::DeletedSketch { sketch } => {
                 self.hidden_sketches.remove(&sketch);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -19048,6 +19290,13 @@ impl Document {
                 }
                 DocChange::default()
             }
+            &DocAction::SetSketchLocked { sketch, was } => {
+                self.set_locked_flag(sketch, !was);
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
             &DocAction::DeletedSketch { sketch } => {
                 self.hidden_sketches.insert(sketch);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -19513,6 +19762,22 @@ impl Document {
             self.debug_validate_tree();
             self.debug_validate_sids();
             self.debug_validate_materials();
+            self.debug_validate_locked_sketches();
+        }
+    }
+
+    /// Every locked-sketch id names a real sketch slot (DEVELOPMENT.md
+    /// rule 2). The side table is keyed by [`SketchId`] and nothing ever
+    /// removes an entry, so a stale id could only arrive from a copy path
+    /// that minted the wrong handle — a kernel bug, not a recoverable state.
+    /// Hidden ids are fine: `delete_sketch` is a tombstone, and undoing it
+    /// must bring the sketch back still locked.
+    fn debug_validate_locked_sketches(&self) {
+        for sid in &self.locked_sketches {
+            assert!(
+                self.sketches.contains_key(*sid),
+                "locked-sketch table holds a dead sketch id — kernel bug"
+            );
         }
     }
 
@@ -20268,6 +20533,9 @@ fn library_copy_def(
     for s in def_sketches {
         let new_s = dst.insert_sketch_record(src.sketches[s].clone());
         library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
+        if src.locked_sketches.contains(&s) {
+            dst.locked_sketches.insert(new_s);
+        }
         dst.def_sketches.insert(new_s, new_cid);
         ctx.all_sketches.push(new_s);
     }

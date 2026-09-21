@@ -82,6 +82,7 @@ function makeWasmScene(opts: {
     node_parent: vi.fn((_kind: number, id: bigint) => opts.parents?.get(id)),
     face_normal: vi.fn(() => new Float64Array(faceNormal)),
     face_plane: vi.fn(() => new Float64Array(facePlane)),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     region_boundary: vi.fn(() => new Float32Array([])),
     face_boundary: vi.fn(() => new Float32Array([])),

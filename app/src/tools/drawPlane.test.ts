@@ -30,6 +30,7 @@ function makeScene(
   frame: number[] = WORLD_FRAME_FLAT,
 ): WasmScene {
   return {
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => sketchPlanes.get(h)),
     pick_sketch: vi.fn(),
     axes: vi.fn(() => new Float64Array(frame)),
@@ -111,6 +112,7 @@ describe('planeFromSketch', () => {
   describe('instance pose mapping (component-edit-parity.md phase A2)', () => {
     function instanceScene(plane: Float64Array, pose: Float64Array | undefined): WasmScene {
       return {
+        sketch_locked: () => false,
         sketch_plane: vi.fn(() => plane),
         instance_pose: vi.fn(() => pose),
       } as unknown as WasmScene
@@ -497,6 +499,7 @@ describe('rayLandsOnSketch', () => {
 
   function wallScene(lines: Float32Array | (() => never) = SQUARE): WasmScene {
     return {
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 1, 0])),
       pick_sketch: vi.fn(() => WALL_SKETCH),
       sketch_lines: vi.fn(() => (typeof lines === 'function' ? lines() : lines)),
@@ -560,6 +563,7 @@ describe('rayLandsOnSketch', () => {
     // treat an explicit `undefined` argument the same as an omitted one).
     function posedScene(pose: Float64Array | undefined): WasmScene {
       return {
+        sketch_locked: () => false,
         sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 1, 0])),
         pick_sketch: vi.fn(() => WALL_SKETCH),
         sketch_lines: vi.fn(() => SQUARE), // LOCAL coordinates, unmapped
@@ -605,6 +609,7 @@ describe('resolveIdleDrawTarget', () => {
   /** `pick: null` means `pick_sketch` MISSES (returns undefined). */
   function scene(plane: Float64Array, pick: bigint | null = WALL_SKETCH): WasmScene {
     return {
+      sketch_locked: () => false,
       sketch_plane: vi.fn(() => plane),
       pick_sketch: vi.fn(() => pick ?? undefined),
       sketch_lines: vi.fn(() => SQUARE),
@@ -617,6 +622,34 @@ describe('resolveIdleDrawTarget', () => {
   }
 
   const WALL_PLANE_ARR = new Float64Array([0, 0, 0, 0, 1, 0])
+
+  /** The same wall sketch, but LOCKED. */
+  function lockedScene(plane: Float64Array, pick: bigint | null = WALL_SKETCH): WasmScene {
+    return {
+      sketch_locked: () => true,
+      sketch_plane: vi.fn(() => plane),
+      pick_sketch: vi.fn(() => pick ?? undefined),
+      sketch_lines: vi.fn(() => SQUARE),
+    } as unknown as WasmScene
+  }
+
+  it('declines to adopt a LOCKED hovered sketch but keeps its plane', () => {
+    // A locked sketch is drawn *against*, not *into*. You aimed at that
+    // wall, so the plane is right; the stroke just goes to the plane's own
+    // cached handle instead of welding into the chalk line.
+    const resolved = resolveIdleDrawTarget(
+      lockedScene(WALL_PLANE_ARR),
+      new SketchPickCache(),
+      rayThrough([0, 0, 0.4]),
+      TOP,
+    )
+    expect(resolved.target.kind).toBe('plane')
+    expect(resolved.plane.ground).toBe(false)
+    expect(resolved.plane.normal).toEqual([0, 1, 0])
+    // Emphatically NOT a fall-through to the ground, which would draw the
+    // next click on the floor instead of the wall the user is pointing at.
+    expect(resolved.plane.origin).toEqual([0, 0, 0])
+  })
 
   it('adopts the hovered sketch when the ray lands on it', () => {
     const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0.4]), TOP)
@@ -657,6 +690,7 @@ describe('resolveIdleDrawTarget', () => {
       pose: Float64Array = IDENTITY_POSE,
     ): WasmScene {
       return {
+        sketch_locked: () => false,
         sketch_plane: vi.fn(() => plane),
         pick_sketch: vi.fn(() => pick ?? undefined),
         sketch_lines: vi.fn(() => SQUARE),

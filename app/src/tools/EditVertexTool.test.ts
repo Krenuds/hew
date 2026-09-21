@@ -47,6 +47,7 @@ function makeWasmScene(opts: {
   return {
     pick_sketch_vertex: vi.fn(() => opts.pick),
     sketch_lines: vi.fn(() => opts.lines ?? new Float64Array([])),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     move_sketch_vertex: vi.fn(() => {
       if (opts.moveThrows) throw new Error('WouldRetopologize: the move would cross or merge sketch geometry')

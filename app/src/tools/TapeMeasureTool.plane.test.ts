@@ -81,6 +81,7 @@ function makeWasmScene(opts: {
     add_guide_line: vi.fn(),
     add_guide_point: vi.fn((x: number, y: number, z: number) => { guidePoints.push([x, y, z]) }),
     pick_sketch: vi.fn(() => opts.sketchPick),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     // No face under the cursor by default (WP-4's offset-plane face-pick
     // fallback, case 3 of `_resolveOffsetPlane`) — most tests in this suite

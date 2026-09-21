@@ -813,6 +813,14 @@ export interface HewTestHarness {
    * deleting a shared partition edge merges the two regions it divided. */
   getSketchRegionCount(sketch: string): number
 
+  /** Is `sketch` a LOCKED SKETCH — one drawn *against* rather than *into*? */
+  isSketchLocked(sketch: string): boolean
+
+  /** Lock or unlock `sketch` (one undo step). A locked sketch never welds,
+   * is never extruded out of, and stays fully snappable — the probe for
+   * asserting that stock drawn over a chalk line lands beside it. */
+  setSketchLocked(sketch: string, locked: boolean): void
+
   /**
    * Follow Me along sketch edges (the follow-me design): sweeps the
    * closed profile `region` of `sketch` along the chain the `edges` of
@@ -1934,6 +1942,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       ),
 
     getSketchRegionCount: (sketch) => query((s) => s.sketch_regions(BigInt(sketch)).length),
+
+    isSketchLocked: (sketch) => query((s) => s.sketch_locked(BigInt(sketch))),
+
+    setSketchLocked: (sketch, locked) => {
+      act((s) => s.set_sketch_locked(BigInt(sketch), locked))
+    },
 
     followMeAlongEdges: (sketch, region, pathSketch, edges, group, stopLen) =>
       act((s) =>

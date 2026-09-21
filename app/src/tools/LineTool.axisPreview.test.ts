@@ -60,6 +60,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     ),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),

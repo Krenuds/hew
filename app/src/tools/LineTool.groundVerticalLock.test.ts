@@ -58,6 +58,7 @@ function makeWasmScene() {
     ),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => {
       const p = planes.get(h)
       return p === undefined ? undefined : new Float64Array(p)

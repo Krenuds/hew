@@ -108,6 +108,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     // An IN-PLANE replay lands its new edges/island on the SAME sketch
     // (island 78); an OUT-OF-PLANE (or flipping) copy lands a new sketch id
     // whose sole island is 77.
+    sketch_locked: () => false,
     sketch_plane: vi.fn((sketch: bigint) =>
       sketch === 3n || sketch === 6n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined,
     ),

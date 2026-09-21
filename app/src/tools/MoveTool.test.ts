@@ -84,6 +84,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     ),
     sketch_edge_curve: vi.fn(() => undefined),
     sketch_curve_geom: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => [0, 0, 0, 0, 0, 1]),
     sketch_island_lines: vi.fn(() => new Float32Array(0)),
     sketch_begin_gesture: vi.fn(),

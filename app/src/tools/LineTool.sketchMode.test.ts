@@ -69,6 +69,7 @@ function makeWasmScene(opts: {
     }),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => opts.sketchPick),
+    sketch_locked: () => false,
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     // Mirrors the real `Scene.sketch_lines`: the sketch's segments, and a
     // throw for a sketch that is no longer there.

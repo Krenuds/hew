@@ -205,6 +205,27 @@ function buildHexPrism(scene) {
   return scene.take_recording();
 }
 
+/**
+ * Builds a LOCKED SKETCH scenario: a reference outline that is locked, a
+ * second outline drawn beside it and extruded, then the reference unlocked
+ * again. The only fixture driving `set_sketch_locked`, and it drives it in
+ * both directions — a recorded call nothing replays is a call nothing tests.
+ *
+ * The ordering matters: the lock lands BETWEEN the two sketches, so a replay
+ * that dropped or reordered it would either refuse the second sketch's
+ * segments or leave the reference consumed, and the state hash would move.
+ */
+function buildLockedSketch(scene) {
+  scene.start_recording();
+  const [reference] = groundUnitSquare(scene);
+  scene.set_sketch_locked(reference, true);
+  const [stock, region] = groundRegularPolygon(scene, 4, 3, 0, 1);
+  scene.extrude_region(stock, region, 1.0);
+  scene.set_sketch_locked(reference, false);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
 /** Named scenarios, each producing a `take_recording()` JSON string. */
 const SCENARIOS = {
   'two-boxes-union-slice': buildTwoBoxesUnionSlice,
@@ -215,6 +236,7 @@ const SCENARIOS = {
   'multi-object-scene': buildMultiObjectScene,
   'chained-boolean': buildChainedBoolean,
   'hex-prism': buildHexPrism,
+  'locked-sketch': buildLockedSketch,
 };
 
 /** Runs scenario `name`'s build and writes `fixtures/<name>.json`. */

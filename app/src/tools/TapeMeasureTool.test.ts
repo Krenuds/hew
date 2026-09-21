@@ -65,6 +65,7 @@ function makeWasmScene() {
     // No committed sketches under the cursor in these fixtures (plane-lock /
     // sketch-hover-adopt is covered separately in TapeMeasureTool.plane.test.ts).
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => undefined),
     rescale_document: vi.fn(),
     rescale_session: vi.fn(),

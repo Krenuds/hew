@@ -49,6 +49,7 @@ function makeScene() {
       return makePick(7n, splits === 0 ? 3n : 8n) // a sub-face probe from just above the face
     }),
     pick_sketch: vi.fn(() => undefined),
+    sketch_locked: () => false,
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     node_parent: vi.fn(() => undefined),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),

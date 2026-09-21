@@ -9,7 +9,7 @@ use std::io::{Cursor, Read, Write};
 
 use kernel::{
     CameraProjection, CameraState, DisplayState, Document, DocumentError, EntityRef, LoadError,
-    NodeId, Plane, Point3, SceneProps, SectionPlaneState, Vec3, tol,
+    MANIFEST_FORMAT_VERSION, NodeId, Plane, Point3, SceneProps, SectionPlaneState, Vec3, tol,
 };
 
 // ----------------------------------------------------------------- helpers
@@ -696,7 +696,10 @@ fn scenes_round_trip_byte_identical_with_every_property_shape() {
 
     let bytes = f.doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 16);
+    // The current manifest version, not a literal: a scenes document saves
+    // at whatever version the writer is on, and a later additive bump must
+    // not read as a scenes regression.
+    assert_eq!(m["format_version"], MANIFEST_FORMAT_VERSION);
     assert_eq!(m["scenes"].as_array().unwrap().len(), 3);
     assert_eq!(m["scenes"][0]["name"], "Cam only");
     assert!(

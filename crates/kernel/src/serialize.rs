@@ -203,7 +203,23 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// hidden node/tag sids must name live entities (the writer prunes dead
 /// ones; a reader rejects a dangling one). Geometry buffer unchanged
 /// (`GEOMETRY_FORMAT_VERSION` stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 16;
+/// **v17** (locked sketches): one optional per-sketch boolean,
+/// `sketches[].locked` — a sketch drawn *against* rather than *into*, a
+/// chalk line that never welds and is never consumed. Written ONLY when
+/// true, so a document with no locked sketch produces a byte-identical
+/// manifest to v16 output. Gated one way by [`LOCKED_MIN_VERSION`], the
+/// [`ATTRS_MIN_VERSION`] posture. Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 17;
+
+/// The manifest version at which `sketches[].locked` (the locked-sketch
+/// flag) was introduced. Version-gated one way, the [`ATTRS_MIN_VERSION`]
+/// posture: a file declaring an OLDER version that carries a `locked` field
+/// is malformed for its own declared version and rejected, never silently
+/// honored (reject-not-repair). Optional at v17+ — absence means `false`,
+/// which keeps a document with no locked sketch byte-identical to one
+/// written before the field existed.
+pub(crate) const LOCKED_MIN_VERSION: u32 = 17;
 
 /// The manifest version at which `section_plane` and `scenes`
 /// (docs/design/scenes.md) were introduced. Version-gated like every
@@ -1971,6 +1987,14 @@ pub(crate) struct SketchDto {
     /// def-owned sketch still writes byte-identical output to v12.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// The LOCKED-SKETCH flag (manifest v17+): this sketch is drawn
+    /// *against* rather than *into* — a chalk line that never welds, is
+    /// never consumed, and stays fully live for inference. Written only
+    /// when `true`, so a document with no locked sketch is byte-identical
+    /// to v16 output; absent means `false`. Presence in a pre-v17 file is a
+    /// smuggled field and rejected ([`LOCKED_MIN_VERSION`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2153,6 +2177,10 @@ pub(crate) struct DocSaveData {
     /// from this map is world-owned. Keyed the same way as `obj_names`/
     /// `obj_tags`.
     pub sketch_owner: std::collections::BTreeMap<SketchId, ComponentId>,
+    /// The LOCKED sketches among `sketches` (manifest v17+). A sketch absent
+    /// from this set is an ordinary sketch; the writer emits `locked` only
+    /// for members, so a document with none writes v16-identical output.
+    pub locked_sketches: std::collections::BTreeSet<SketchId>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
@@ -2404,6 +2432,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             dto.sid = sid_for(crate::document::EntityRef::Sketch(*sk_id));
             dto.attrs = attrs_for(crate::document::EntityRef::Sketch(*sk_id));
             dto.owner = data.sketch_owner.get(sk_id).map(|cid| comp_to_dense[cid]);
+            dto.locked = data.locked_sketches.contains(sk_id);
             dto
         })
         .collect();
@@ -2647,7 +2676,8 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         edges: edge_dtos,
         regions: region_dtos,
         curves: curve_dtos,
-        owner: None, // patched by the caller (`encode_document`), like `id`
+        owner: None,   // patched by the caller (`encode_document`), like `id`
+        locked: false, // patched by the caller (`encode_document`), like `id`
     }
 }
 
@@ -2808,6 +2838,10 @@ pub(crate) struct DocLoadRaw {
     /// belongs to, or `None` for world-owned — parallel to `sketches`, in the
     /// same dense sketch-id order. All `None` for pre-v13 files.
     pub sketch_owner: Vec<Option<u32>>,
+    /// Per-sketch LOCKED flag (manifest v17+), parallel to `sketch_owner`:
+    /// `false` for every sketch in a pre-v17 file, which is the default the
+    /// field-by-version table gives it.
+    pub sketch_locked: Vec<bool>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
@@ -2948,6 +2982,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     }
     // `SketchOwner` (manifest v13+; absent/`None` in older files → world).
     let sketch_owner: Vec<Option<u32>> = manifest.sketches.iter().map(|s| s.owner).collect();
+    let sketch_locked: Vec<bool> = manifest.sketches.iter().map(|s| s.locked).collect();
 
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
@@ -3234,6 +3269,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         instance_owners: manifest.instances.iter().map(|i| i.owner).collect(),
         sketches,
         sketch_owner,
+        sketch_locked,
         guides,
         annotations,
         consumed: manifest.consumed.clone(),
@@ -3385,6 +3421,19 @@ fn validate_manifest_references(
                 what: format!(
                     "sketch {} carries an owner in a v{} manifest (introduced at v{})",
                     sk.id, manifest.format_version, SKETCH_OWNER_MIN_VERSION
+                ),
+            });
+        }
+        // The locked-sketch flag is gated the same way, and for the same
+        // reason: no pre-v17 writer emitted one, so a `locked` in an older
+        // manifest is hand-edited or a broken writer. Honoring it silently
+        // would hand a sketch a protection its own declared version says
+        // cannot exist (reject-not-repair, DEVELOPMENT.md rule 4).
+        if sk.locked && manifest.format_version < LOCKED_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} is locked in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, LOCKED_MIN_VERSION
                 ),
             });
         }
