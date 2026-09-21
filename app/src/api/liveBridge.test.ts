@@ -51,7 +51,12 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 const emitMock = vi.fn(() => Promise.resolve())
 vi.mock('@tauri-apps/api/event', () => ({ emit: emitMock }))
 
-import { installLiveBridge, shouldRefreshAfterDispatch, type LiveBridgeDeps } from './liveBridge'
+import {
+  installLiveBridge,
+  shouldRefreshAfterDispatch,
+  type LiveBridgeDeps,
+  type LiveTransport,
+} from './liveBridge'
 import type { Scene } from '../wasm/loader'
 import type { ViewportApi } from '../viewport/Viewport'
 import { getLengthUnit, setLengthUnit, subscribe as subscribeLengthUnit } from '../settings/units'
@@ -322,6 +327,57 @@ describe('installLiveBridge', () => {
     for (const unlisten of unlistenSpies.values()) {
       expect(unlisten).toHaveBeenCalledTimes(1)
     }
+  })
+
+  // The same handlers, driven through the seam instead of Tauri events
+  // (docs/agents/HEW_API.md §11.5): `installLiveBridge` is written against
+  // `LiveTransport`, and the desktop's events are one implementation of it.
+  // A fake transport therefore reaches every behavior above with no Tauri
+  // in the picture at all — which is exactly what the hosted web build's
+  // WebSocket transport (api/wsTransport.ts) relies on.
+  it('drives the same handlers through a non-Tauri transport', () => {
+    const replies: Array<{ connId: number; frame: string }> = []
+    let open: (connId: number) => void = () => {}
+    let close: (connId: number) => void = () => {}
+    let frame: (connId: number, frame: string) => void = () => {}
+    const closed = vi.fn()
+    const transport: LiveTransport = {
+      onConnectionOpen: (cb) => {
+        open = cb
+      },
+      onConnectionClose: (cb) => {
+        close = cb
+      },
+      onFrame: (cb) => {
+        frame = cb
+      },
+      sendReply: (connId, f) => replies.push({ connId, frame: f }),
+      close: closed,
+    }
+
+    const uninstall = installLiveBridge(deps, transport)
+
+    open(11)
+    expect(scene.api_connection_open).toHaveBeenCalledTimes(1)
+
+    scene.api_dispatch.mockReturnValue('{"jsonrpc":"2.0","id":1,"result":{}}')
+    frame(11, '{"jsonrpc":"2.0","id":1,"method":"hew.solid.push_pull","params":{}}')
+    expect(scene.api_dispatch).toHaveBeenCalledWith(7, '{"jsonrpc":"2.0","id":1,"method":"hew.solid.push_pull","params":{}}')
+    expect(replies).toEqual([{ connId: 11, frame: '{"jsonrpc":"2.0","id":1,"result":{}}' }])
+    // A mutating dispatch still refreshes the viewport — the refresh
+    // contract belongs to the bridge, not to any one wire.
+    expect(refreshScene).toHaveBeenCalledTimes(1)
+
+    close(11)
+    expect(scene.api_connection_close).toHaveBeenCalledWith(7)
+
+    // No Tauri listener was ever registered, and no reply went out over
+    // 'hew://api-reply': the seam really is the only path.
+    expect(listenMock).not.toHaveBeenCalled()
+    expect(emitMock).not.toHaveBeenCalled()
+
+    uninstall()
+    expect(closed).toHaveBeenCalledTimes(1)
   })
 
   // hew.view.camera / zoom_extents / units: `LiveHost` (Rust) cannot reach

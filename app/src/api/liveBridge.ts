@@ -1,33 +1,36 @@
 /**
- * The webview half of `--live` (docs/agents/HEW_API.md §11.2, §12): forwards
- * newline-delimited JSON-RPC frames the Tauri shell reads off its local
- * socket, dispatches each against the SAME live kernel `Document` the
- * viewport renders — via `Scene.api_dispatch`
- * (crates/wasm-api/src/live.rs) — and sends the reply back. This module
- * owns exactly the transport plumbing (Tauri events) and the
+ * The webview half of `--live` (docs/agents/HEW_API.md §11.2, §11.5, §12):
+ * receives JSON-RPC frames a host read off its own transport, dispatches
+ * each against the SAME live kernel `Document` the viewport renders — via
+ * `Scene.api_dispatch` (crates/wasm-api/src/live.rs) — and sends the
+ * reply back. This module owns exactly the connection bookkeeping and the
  * refresh-after-mutation contract; the protocol itself (hello, profile
  * enforcement, transactions, refusals) lives entirely in `crates/api` and
  * is opaque here — every frame/reply is treated as raw JSON-RPC text.
  *
- * Wire contract with the Rust shell
- * (`shells/tauri/src-tauri/src/live.rs`, whose own doc comment is the
- * Rust-facing half of this same contract):
+ * The wire underneath is a `LiveTransport`, not a fixed one: the desktop
+ * shell's Tauri events (`createTauriTransport` below) and the hosted web
+ * build's WebSocket to `crates/hew-bridge` (`api/wsTransport.ts`, §11.5)
+ * are two implementations of the same four-method interface, and every
+ * handler below is written against it rather than against either. The
+ * Tauri wire contract (`shells/tauri/src-tauri/src/live.rs`, whose own doc
+ * comment is the Rust-facing half of it) is:
  *
  *   Rust -> JS  'hew://api-connection-open'  { connId }
  *   Rust -> JS  'hew://api-connection-close' { connId }
  *   Rust -> JS  'hew://api-frame'            { connId, frame }
  *   JS -> Rust  'hew://api-reply'            { connId, frame }
  *
- * `connId` is the SHELL's id for one accepted socket connection — this
+ * `connId` is the HOST's id for one accepted connection — this
  * module keeps its own map to whatever id `Scene.api_connection_open()`
  * mints for it (`crates/wasm-api` self-assigns; there is no reason for
  * the two numbering spaces to be the same one, and tying them together
  * would mean changing an already-tested WASM surface for no functional
- * gain). Every event is window-scoped (the shell resolves one target
- * window per connection at accept time and `emit_to`s only that window —
- * see `live.rs`'s `spawn_accept_loop` doc comment), so this listens on
- * `getCurrentWebviewWindow()`, the same convention `App.tsx` already uses
- * for `menu-action`/`menu-open-path`.
+ * gain). Every Tauri event is window-scoped (the shell resolves one
+ * target window per connection at accept time and `emit_to`s only that
+ * window — see `live.rs`'s `spawn_accept_loop` doc comment), so that
+ * transport listens on `getCurrentWebviewWindow()`, the same convention
+ * `App.tsx` already uses for `menu-action`/`menu-open-path`.
  *
  * There is no module-level `Scene` singleton (`App.tsx` owns it in a
  * `useRef`, set once the WASM module loads) — this module is wired in
@@ -243,30 +246,48 @@ export function applyPendingViewDirective(
 }
 
 /**
- * Wires the live API bridge to this window's Tauri events. A no-op
- * outside Tauri (the web build never has a socket to speak to). Returns
- * an uninstall function (HMR / unmount), the same shape
- * `installTestHarness` returns.
+ * One wire under the bridge (docs/agents/HEW_API.md §11.2, §11.5). Every
+ * handler in `installLiveBridge` is a pure function of "a host says a
+ * connection opened, closed, or carried this frame", so a transport owes
+ * this module exactly those three notifications, a way to send a reply
+ * back, and a teardown.
+ *
+ * Registration is push-style (`onX(cb)`) rather than a constructor taking
+ * all three at once because a transport's real wiring is asynchronous on
+ * both implementations — the Tauri one's dynamic `import()`, the
+ * WebSocket one's session fetch and open handshake. Constructing first
+ * and attaching handlers synchronously right after means no frame can
+ * arrive before there is somewhere to put it.
+ *
+ * `connId` is whatever the host calls one connection; nothing here
+ * assumes more than "the same number means the same connection".
  */
-export function installLiveBridge(deps: LiveBridgeDeps): () => void {
-  if (!isTauri) return () => {}
+export interface LiveTransport {
+  /** The host accepted a connection. */
+  onConnectionOpen(cb: (connId: number) => void): void
+  /** That connection ended, for any reason. */
+  onConnectionClose(cb: (connId: number) => void): void
+  /** One inbound JSON-RPC frame, verbatim. */
+  onFrame(cb: (connId: number, frame: string) => void): void
+  /** Sends one JSON-RPC reply back. Fire-and-forget: a connection that
+   * went away between dispatch and reply is the host's problem — its own
+   * reply timeout covers it — never an error this module handles. */
+  sendReply(connId: number, frame: string): void
+  /** Tears the wire down: HMR, unmount, or the user revoking consent. */
+  close(): void
+}
 
-  // Shell connId -> the wasm-minted connection id for it. Entries are
-  // added on 'hew://api-connection-open' (or, lazily, on the first
-  // 'hew://api-frame' for a connId that raced ahead of its own wasm-side
-  // open — see `handleFrame`) and removed on
-  // 'hew://api-connection-close' (or if the frame handler ever finds the
-  // Scene gone — a mid-session reload/unmount race).
-  const wasmConnOf = new Map<number, number>()
-
-  // Every shell connId the shell has told us about via
-  // 'hew://api-connection-open', whether or not the Scene was ready to
-  // open its wasm side at the time — the set `handleFrame` consults to
-  // decide "lazily open" (a connId the shell genuinely accepted, just
-  // racing the Scene's own startup) from "never opened at all" (a connId
-  // that should never dispatch, shell bug or otherwise). Cleared on
-  // 'hew://api-connection-close', same lifetime as `wasmConnOf`.
-  const openConnIds = new Set<number>()
+/**
+ * The desktop transport — this window's `hew://api-*` Tauri events (the
+ * wire contract in this file's module doc). Outside Tauri it is inert: it
+ * registers no listener and sends nothing, since the web build has no
+ * shell socket. Choosing a remote transport instead is `App.tsx`'s job,
+ * not this function's.
+ */
+export function createTauriTransport(): LiveTransport {
+  let openCb: (connId: number) => void = () => {}
+  let closeCb: (connId: number) => void = () => {}
+  let frameCb: (connId: number, frame: string) => void = () => {}
 
   let cancelled = false
   let unlistenOpen: (() => void) | undefined
@@ -274,22 +295,105 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
   let unlistenFrame: (() => void) | undefined
   let tauriEmit: ((event: string, payload?: unknown) => Promise<void>) | null = null
 
-  const emitReply = (connId: number, frame: string): void => {
-    const payload = { connId, frame }
-    if (tauriEmit !== null) {
-      tauriEmit('hew://api-reply', payload).catch(() => {
-        /* the connection is gone — the shell's own reply-timeout covers it */
+  if (isTauri) {
+    import('@tauri-apps/api/webviewWindow')
+      .then(({ getCurrentWebviewWindow }) => {
+        const win = getCurrentWebviewWindow()
+        return Promise.all([
+          win.listen<{ connId: number }>('hew://api-connection-open', (event) => {
+            openCb(event.payload.connId)
+          }),
+          win.listen<{ connId: number }>('hew://api-connection-close', (event) => {
+            closeCb(event.payload.connId)
+          }),
+          win.listen<{ connId: number; frame: string }>('hew://api-frame', (event) => {
+            frameCb(event.payload.connId, event.payload.frame)
+          }),
+        ])
       })
-      return
-    }
-    import('@tauri-apps/api/event')
-      .then(({ emit }) => {
-        tauriEmit = emit
-        return emit('hew://api-reply', payload)
+      .then(([openFn, closeFn, frameFn]) => {
+        if (cancelled) {
+          openFn()
+          closeFn()
+          frameFn()
+          return
+        }
+        unlistenOpen = openFn
+        unlistenClose = closeFn
+        unlistenFrame = frameFn
       })
       .catch(() => {
-        /* ignore — not in Tauri, or emission failed */
+        /* not in Tauri (shouldn't happen — gated above), or registration failed */
       })
+  }
+
+  return {
+    onConnectionOpen(cb) {
+      openCb = cb
+    },
+    onConnectionClose(cb) {
+      closeCb = cb
+    },
+    onFrame(cb) {
+      frameCb = cb
+    },
+    sendReply(connId, frame) {
+      if (!isTauri) return
+      const payload = { connId, frame }
+      if (tauriEmit !== null) {
+        tauriEmit('hew://api-reply', payload).catch(() => {
+          /* the connection is gone — the shell's own reply-timeout covers it */
+        })
+        return
+      }
+      import('@tauri-apps/api/event')
+        .then(({ emit }) => {
+          tauriEmit = emit
+          return emit('hew://api-reply', payload)
+        })
+        .catch(() => {
+          /* ignore — not in Tauri, or emission failed */
+        })
+    },
+    close() {
+      cancelled = true
+      unlistenOpen?.()
+      unlistenClose?.()
+      unlistenFrame?.()
+    },
+  }
+}
+
+/**
+ * Wires the live API bridge to `transport`, defaulting to this window's
+ * Tauri events — so a desktop call site keeps working with one argument,
+ * and the hosted web build passes `createWebSocketTransport()` instead
+ * (§11.5). Returns an uninstall function (HMR / unmount), the same shape
+ * `installTestHarness` returns.
+ */
+export function installLiveBridge(
+  deps: LiveBridgeDeps,
+  transport: LiveTransport = createTauriTransport(),
+): () => void {
+
+  // Host connId -> the wasm-minted connection id for it. Entries are
+  // added when the transport reports a connection open (or, lazily, on
+  // the first frame for a connId that raced ahead of its own wasm-side
+  // open — see `handleFrame`) and removed on close (or if the frame
+  // handler ever finds the Scene gone — a mid-session reload/unmount
+  // race).
+  const wasmConnOf = new Map<number, number>()
+
+  // Every host connId the transport has told us about, whether or not the
+  // Scene was ready to open its wasm side at the time — the set
+  // `handleFrame` consults to tell "lazily open" (a connId the host
+  // genuinely accepted, just racing the Scene's own startup) from "never
+  // opened at all" (a connId that should never dispatch, host bug or
+  // otherwise). Cleared on close, same lifetime as `wasmConnOf`.
+  const openConnIds = new Set<number>()
+
+  const emitReply = (connId: number, frame: string): void => {
+    transport.sendReply(connId, frame)
   }
 
   const refreshAfterMutation = (): void => {
@@ -314,17 +418,17 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
   }
 
   const handleFrame = (connId: number, frame: string): void => {
-    if (!openConnIds.has(connId)) return // never accepted by the shell — never dispatched
+    if (!openConnIds.has(connId)) return // never accepted by the host — never dispatched
     const scene = deps.getScene()
     if (scene === null) {
       // The Scene hasn't finished loading yet — a startup race between
-      // the shell accepting a socket connection and the webview's WASM
-      // module coming up. There used to be nothing this could do but
-      // drop the frame silently, permanently: `handleOpen` never retried,
-      // so a connection accepted this early was dead for its whole
-      // lifetime, hello included. Answer honestly instead — the client
-      // gets a typed "not ready" now rather than waiting out the shell's
-      // own reply timeout for every single frame.
+      // the host accepting a connection and the webview's WASM module
+      // coming up. There used to be nothing this could do but drop the
+      // frame silently, permanently: `handleOpen` never retried, so a
+      // connection accepted this early was dead for its whole lifetime,
+      // hello included. Answer honestly instead — the client gets a typed
+      // "not ready" now rather than waiting out the host's own reply
+      // timeout for every single frame.
       const reply = notReadyReply(frame)
       if (reply !== undefined) emitReply(connId, reply)
       return
@@ -354,40 +458,11 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     }
   }
 
-  import('@tauri-apps/api/webviewWindow')
-    .then(({ getCurrentWebviewWindow }) => {
-      const win = getCurrentWebviewWindow()
-      return Promise.all([
-        win.listen<{ connId: number }>('hew://api-connection-open', (event) => {
-          handleOpen(event.payload.connId)
-        }),
-        win.listen<{ connId: number }>('hew://api-connection-close', (event) => {
-          handleClose(event.payload.connId)
-        }),
-        win.listen<{ connId: number; frame: string }>('hew://api-frame', (event) => {
-          handleFrame(event.payload.connId, event.payload.frame)
-        }),
-      ])
-    })
-    .then(([openFn, closeFn, frameFn]) => {
-      if (cancelled) {
-        openFn()
-        closeFn()
-        frameFn()
-        return
-      }
-      unlistenOpen = openFn
-      unlistenClose = closeFn
-      unlistenFrame = frameFn
-    })
-    .catch(() => {
-      /* not in Tauri (shouldn't happen — gated by isTauri above), or registration failed */
-    })
+  transport.onConnectionOpen(handleOpen)
+  transport.onConnectionClose(handleClose)
+  transport.onFrame(handleFrame)
 
   return () => {
-    cancelled = true
-    unlistenOpen?.()
-    unlistenClose?.()
-    unlistenFrame?.()
+    transport.close()
   }
 }
