@@ -1338,6 +1338,95 @@ exchanging the same envelopes over `postMessage`, isolation and
 capability-granting per the sandboxed-plugin position of ARCHITECTURE.md
 §4. Specified with the plugin system.
 
+### 11.5 WebSocket (remote)
+
+A browser tab is not on the machine a client runs on, and has no socket to
+listen on, so §11.2 cannot reach the document a user of the hosted web
+build is actually looking at. This is the transport that does. It carries
+the same envelopes as every other transport, one envelope per WebSocket
+**text message** — the message boundary the WebSocket protocol already
+provides replaces §11.2's newline delimiter, and a trailing newline, if a
+peer sends one, is ignored. Binary messages are not part of this transport.
+
+The remote end is a **bridge daemon** (`crates/hew-bridge`) running on the
+machine that serves the app, reachable only through that app's own origin
+under `/bridge`. It has two faces:
+
+- **Browser side.** `GET /bridge/session` answers an authenticated request
+  with the per-launch token; `GET /bridge/ws` upgrades and binds that token
+  to the socket. Both are same-origin with the app, so the web build's
+  `connect-src 'self'` admits the `wss://` with no CSP change.
+- **Local side.** The bridge publishes a §11.2 discovery file and serves
+  the same JSON-RPC over the same owner-only socket a desktop instance
+  would, so a `--live` client discovers and dials it without knowing — or
+  needing to know — that the document is in a browser somewhere else.
+  §12.1's client-side `hew.library.*` pre-resolve is unaffected: the
+  library folder lives on the machine the client itself runs on, which
+  remains the correct answer.
+
+**Trust model.** §11.2 says the local socket is never a TCP listener and
+means it; this is the one section that departs from that, so it states
+what replaces it. Three things stand in for owner-only filesystem
+permissions, and all three are required:
+
+1. **An authenticated identity at the edge.** The browser-facing routes are
+   served only behind an authenticating reverse proxy (Cloudflare Access or
+   equivalent). The bridge verifies that proxy's signed assertion itself —
+   `Cf-Access-Jwt-Assertion`, checked against the team's JWKS for
+   signature, issuer, audience and expiry — rather than trusting that it
+   was fronted at all. Verification fails closed, and every way it can fail
+   collapses to one indistinguishable refusal: this is defense in depth
+   against a misconfigured or bypassed edge, and an attacker must not be
+   able to probe which check to attack next.
+2. **The per-launch token.** Identical in kind and grammar to §11.2's — 256
+   random bits, minted once per bridge launch, handed to an authenticated
+   browser by `/bridge/session`, carried by the mandatory first-frame
+   `hello`, and stripped from every frame before the document sees it.
+3. **A loopback-only daemon.** The bridge binds loopback and is never
+   exposed directly; the proxy is the only route to its browser face. Its
+   local face keeps §11.2's posture exactly — owner-only socket, owner-only
+   discovery file, in a directory whose ownership is verified before
+   anything is written into it.
+
+Remove any one of the three and this is a different, weaker transport. A
+bridge whose edge verification is unconfigured refuses every browser-facing
+request rather than falling open.
+
+**Consent.** Attaching to a live document is the invasive act (§12), and
+over a network it is more invasive, not less. A tab therefore never joins a
+session automatically: remote control is an explicit, off-by-default user
+preference in the application, and enabling it is what fetches the session
+token and opens the socket. Disabling it closes the socket, after which a
+client meets the same honest "no running instance" a closed desktop app
+gives.
+
+**Ownership.** One tab owns a bridge's session at a time. The most recent
+tab to enable the preference takes the session and any earlier socket is
+closed with a typed refusal, never silently multiplexed: two tabs are two
+documents, and a client that dispatched into "the" document must never be
+left uncertain which one it got.
+
+**Profile.** A remote connection is granted `app`, like any other live
+connection — the network changes nothing about what that grant means, and
+no new profile is introduced. The live host already withholds
+`hew.doc.new`/`open` and refuses the filesystem-touching `hew.library.*`
+methods (§10, §12.1), so a remote client reaches exactly the surface a
+local one does.
+
+**Correlation.** Replies are correlated by request id rather than by
+connection alone. §11.2's host keeps one request in flight per connection
+and closes the connection when it gives up waiting, because a late reply
+would otherwise answer the next request; across a WAN hop that is too
+brittle a basis for the rule. A reply whose id matches no outstanding
+request is dropped, and a request that goes unanswered past the bridge's
+reply timeout is answered with the same `-32003` a desktop host
+synthesizes, under its own id, leaving the connection usable.
+
+**Notifications.** This is the protocol's first bidirectional transport: a
+WebSocket carries server→client messages natively, where §11.2's
+request/reply loop and §11.3's stdio do not. §4.5's reserved `hew.event.*`
+notifications are expected to ride here first once they are specified.
+
 ## 12. `hew-cli`
 
 One binary, two modes, chosen per invocation:
@@ -1355,7 +1444,12 @@ One binary, two modes, chosen per invocation:
   desktop instance is started first and its socket awaited, for the
   agent-opens-the-app flow. Several live instances at once are an error
   listing the candidates, unless `--instance <id>` disambiguates. Live
-  connections are granted the `app` profile by the application.
+  connections are granted the `app` profile by the application. The
+  instance a discovery file names is not necessarily a desktop app: a
+  remote bridge (§11.5) publishes the same file and speaks the same
+  socket, so `--live` may be driving a browser tab on another machine.
+  The client cannot tell the two apart, and deliberately does not need
+  to.
 
 Headless is the default deliberately. Attaching to — and mutating — a
 user's live document is the invasive act, and a CLI invocation or a
