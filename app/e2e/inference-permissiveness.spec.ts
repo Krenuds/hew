@@ -104,15 +104,17 @@ test('Rectangle: a first click on a vertical edge midpoint draws on that face, n
   expect(await chip(page)).toBe('Midpoint')
   await click(page, ctx, [0, 0, 0.5])
   await hover(page, ctx, [0.6, 0, 0.8])
-  // Second corner on the south face: 0.6 wide, 0.3 tall — not "0.6 × 0"
-  // projected to the ground, and never "projected".
+  // Second corner on the south face: 0.3 tall, 0.6 wide — not "0.6 × 0"
+  // projected to the ground, and never "projected". The pair reads along the
+  // face basis, which on this face resolves to +Z then -X, so the height
+  // comes first: that is the order typing the pair back applies it.
   expect(await chip(page)).toBe('On Face')
-  expect(await vcb(page, 'Value')).toBe('0.6 m × 0.3 m')
+  expect(await vcb(page, 'Value')).toBe('0.3 m × 0.6 m')
   // …and the opposite corner honours an Endpoint snap exactly, a few
   // pixels off the corner's own pixel (the chip and the shape agree).
   await hover(page, ctx, [1, 0, 1], 4, 3)
   expect(await chip(page)).toBe('Endpoint')
-  expect(await vcb(page, 'Value')).toBe('1 m × 0.5 m')
+  expect(await vcb(page, 'Value')).toBe('0.5 m × 1 m')
 })
 
 test('Rectangle: Shift over a face pins its plane, so a rectangle clicked over the ground lands on that plane (GitHub issue 14)', async ({ page }) => {

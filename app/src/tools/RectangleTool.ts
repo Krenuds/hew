@@ -579,9 +579,10 @@ export class RectangleTool implements Tool {
       }
       this._lastFaceCursor = cursorOnPlane
       const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
-      if (corners !== null) {
+      const extents = this._planeExtents(anchor, cursorOnPlane, normal)
+      if (corners !== null && extents !== null) {
         this._drawRubberBandCorners(corners)
-        this._reportMeasurement(corners)
+        this._reportMeasurement(extents[0], extents[1])
       } else {
         this._clearPreview()
         if (this.typed === '') this.onMeasurementCb('')
@@ -606,12 +607,13 @@ export class RectangleTool implements Tool {
         // EXACT legacy ground fast path — no basis math.
         const corners = rectangleCorners([anchor[0], anchor[1]], [cursor[0], cursor[1]])
         this._drawRubberBandCorners(corners)
-        this._reportMeasurement(corners)
+        this._reportMeasurement(Math.abs(cursor[0] - anchor[0]), Math.abs(cursor[1] - anchor[1]))
       } else {
         const corners = faceRectangleCorners(anchor, cursor, plane.normal)
-        if (corners !== null) {
+        const extents = this._planeExtents(anchor, cursor, plane.normal)
+        if (corners !== null && extents !== null) {
           this._drawRubberBandCorners(corners)
-          this._reportMeasurement(corners)
+          this._reportMeasurement(extents[0], extents[1])
         } else {
           this._clearPreview()
           if (this.typed === '') this.onMeasurementCb('')
@@ -824,15 +826,38 @@ export class RectangleTool implements Tool {
     this.cancel()
   }
 
-  /** Report the live W × D measurement from the four rubber-band corners. */
-  private _reportMeasurement(corners: readonly [V3, V3, V3, V3]): void {
+  /**
+   * The two dimensions of a rubber band, in the order `_commitTyped` applies
+   * a typed `W,D` pair: the extent along the plane basis's `u` first, then
+   * along its `v`.
+   *
+   * Deliberately NOT derived from the spacing of the four preview corners.
+   * `faceRectangleCorners` swaps corners B and D when the drag's two signed
+   * extents have opposite signs (to keep the winding CCW from +normal), so
+   * corner spacing reports the pair the other way round for half of all
+   * drags — while `_commitTyped` always applies the first typed number along
+   * `u`. Reading the extents off the basis is what keeps the readout and the
+   * commit talking about the same two numbers.
+   */
+  private _planeExtents(anchor: V3, cursor: V3, normal: V3): [number, number] | null {
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return null
+    const { u, v } = basis
+    const dx = cursor[0] - anchor[0]
+    const dy = cursor[1] - anchor[1]
+    const dz = cursor[2] - anchor[2]
+    return [
+      Math.abs(dx * u[0] + dy * u[1] + dz * u[2]),
+      Math.abs(dx * v[0] + dy * v[1] + dz * v[2]),
+    ]
+  }
+
+  /** Report the live W × D measurement. */
+  private _reportMeasurement(width: number, depth: number): void {
     if (this.typed !== '') {
       this.onMeasurementCb(typedReadout(this.typed))
       return
     }
-    const [c0, c1, c2] = corners
-    const width = Math.hypot(c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2])
-    const depth = Math.hypot(c2[0] - c1[0], c2[1] - c1[1], c2[2] - c1[2])
     this.onMeasurementCb(`${formatLength(width)} × ${formatLength(depth)}`)
   }
 
