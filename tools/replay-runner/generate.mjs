@@ -206,19 +206,22 @@ function buildHexPrism(scene) {
 }
 
 /**
- * Builds a LOCKED SKETCH scenario: a reference outline that is locked, a
- * second outline drawn beside it and extruded, then the reference unlocked
- * again. The only fixture driving `set_sketch_locked`, and it drives it in
- * both directions — a recorded call nothing replays is a call nothing tests.
+ * Builds a LOCKED SKETCH scenario: a reference outline that is locked and
+ * built from by copy, a second outline drawn beside it and extruded, then
+ * the reference unlocked again. The only fixture driving
+ * `set_sketch_locked`, and it drives it in both directions — a recorded call
+ * nothing replays is a call nothing tests.
  *
- * The ordering matters: the lock lands BETWEEN the two sketches, so a replay
- * that dropped or reordered it would either refuse the second sketch's
- * segments or leave the reference consumed, and the state hash would move.
+ * The ordering matters: the lock lands BEFORE the reference is extruded and
+ * BETWEEN the two sketches, so a replay that dropped or reordered it would
+ * either consume the reference, or refuse the second sketch's segments, and
+ * the state hash would move.
  */
 function buildLockedSketch(scene) {
   scene.start_recording();
-  const [reference] = groundUnitSquare(scene);
+  const [reference, referenceRegion] = groundUnitSquare(scene);
   scene.set_sketch_locked(reference, true);
+  scene.extrude_region(reference, referenceRegion, 0.5);
   const [stock, region] = groundRegularPolygon(scene, 4, 3, 0, 1);
   scene.extrude_region(stock, region, 1.0);
   scene.set_sketch_locked(reference, false);

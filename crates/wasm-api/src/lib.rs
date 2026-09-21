@@ -4361,11 +4361,12 @@ impl Scene {
 
     /// Is this a LOCKED SKETCH — one drawn *against* rather than *into*?
     ///
-    /// A locked sketch is a measurement, not stock: a chalk line you set
+    /// A locked sketch is a drawing, not stock: a chalk line you set
     /// lumber against and never consume. It never welds (a draw gesture
     /// cannot open on it, so drawing over it mints a fresh sketch instead of
-    /// splitting its edges), nothing is ever extruded out of it, and it stays
-    /// fully live for inference, picking and selection. Rigid whole-sketch
+    /// splitting its edges), `extrude_region` and the `follow_me_*` calls
+    /// build from it by copy so nothing is ever consumed out of it, and it
+    /// stays fully live for inference, picking and selection. Rigid whole-sketch
     /// transform is the one change it allows — locking freezes shape, not
     /// pose.
     ///
@@ -4378,7 +4379,8 @@ impl Scene {
     }
 
     /// Lock or unlock a sketch (undoable). Unlocking leaves no residue: the
-    /// sketch welds and extrudes again exactly as before it was locked.
+    /// sketch welds and is consumed by extrusion exactly as before it was
+    /// locked.
     ///
     /// Setting the flag to the value it already holds is a no-op that costs
     /// no undo step.

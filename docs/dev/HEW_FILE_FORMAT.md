@@ -754,11 +754,12 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   out-of-range `owner`, like any other dangling reference.
 
 - `locked` (v17+, optional) — `true` marks a **locked sketch**: one drawn
-  *against* rather than *into*. A locked sketch is a measurement, not stock —
+  *against* rather than *into*. A locked sketch is a drawing, not stock —
   a chalk line an editor sets geometry against and never consumes. It never
   welds (no drawing gesture may target it, so a stroke over it lands in a
-  different sketch instead of splitting its edges), nothing is ever extruded
-  or swept out of it, and it stays fully available as a snap source. Only its
+  different sketch instead of splitting its edges), an extrusion or sweep
+  builds from it by copy so nothing is ever consumed out of it, and it stays
+  fully available as a snap source. Only its
   own contents are frozen: a rigid whole-sketch transform still moves it, and
   deleting it works like deleting any other sketch. Absent means `false` — an
   ordinary sketch, the only kind before v17.

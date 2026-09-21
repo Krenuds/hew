@@ -133,8 +133,9 @@ below.
   chalk line: the footprint you set lumber against and never consume.
   Locked, it never welds (a drawing gesture cannot target it, so a
   stroke over it lands in a fresh sketch beside it instead of splitting
-  its edges), nothing is extruded or swept out of it, and it stays fully
-  live for inference — endpoints, midpoints, edge snaps, curve
+  its edges), Push/Pull and Follow Me build from it by copy so the
+  outline is never used up (a floor plan survives every wall raised from
+  it), and it stays fully live for inference — endpoints, midpoints, edge snaps, curve
   quadrants, tangents. Locking freezes SHAPE, not pose: a rigid
   whole-sketch move still works, per-vertex and per-island edits refuse
   with a typed `SketchLocked`, and its lines, islands and curves stay

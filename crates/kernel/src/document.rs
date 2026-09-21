@@ -2910,7 +2910,9 @@ pub struct Document {
     /// sketch drawn *against* rather than *into* — a chalk line. A locked
     /// sketch refuses every mutation of its own contents; rigid whole-sketch
     /// transform is the single exception, and reads are untouched, so it
-    /// stays fully live for inference, picking, and rendering.
+    /// stays fully live for inference, picking, and rendering. Extrude and
+    /// Follow Me build from it by copy ([`Document::consumed_scaffolding`]):
+    /// the solid is born and the outline stays.
     ///
     /// Distinct from the axis/plane "lock" the drawing tools apply to a
     /// gesture — that is a transient cursor constraint, this is durable
@@ -8800,9 +8802,9 @@ impl Document {
     /// was dropped as inconsistent with the freely-interpenetrating-solids
     /// model).
     ///
-    /// Refuses [`DocumentError::SketchLocked`] on a LOCKED SKETCH: that one
-    /// is a measurement rather than stock — it is never the larval form of a
-    /// solid, so nothing is consumed out of it. Unlock, extrude, relock.
+    /// A LOCKED SKETCH is built from by copy: it is a drawing rather than
+    /// stock, so the solid is born and nothing leaves the sketch
+    /// ([`Document::consumed_scaffolding`]). Undo then only hides the solid.
     ///
     /// Returns the new Object's handle and the [`DocChange`] it caused (the
     /// new Object plus the sketch that lost the scaffolding).
@@ -8817,12 +8819,6 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        // A locked sketch is a measurement, not stock: nothing is ever
-        // consumed out of it, so no region of it is ever born into a solid.
-        // Unlock it if you meant to build from it.
-        if self.locked_sketches.contains(&sketch) {
-            return Err(DocumentError::SketchLocked);
-        }
         // World-op guard (component-edit-parity.md phase K1): a def-owned
         // sketch lives in DEFINITION-local space; birthing a WORLD Object
         // straight from it would place the result in the wrong frame — the
@@ -8836,9 +8832,7 @@ impl Document {
             .get(sketch)
             .ok_or(DocumentError::UnknownSketch)?;
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
-        let scaffolding = s
-            .region_scaffolding(region)
-            .map_err(DocumentError::Sketch)?;
+        let scaffolding = self.consumed_scaffolding(sketch, region)?;
         let object = Object::from_extrusion(&profile, distance).map_err(DocumentError::Extrude)?;
 
         // Everything that can fail has succeeded; commit.
@@ -8873,8 +8867,6 @@ impl Document {
     ///   owned by `instance`'s own definition (extruding a world sketch, or
     ///   one owned by a *different* definition, into this instance is not a
     ///   meaningful op).
-    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
-    ///   nothing is ever consumed out of one. Unlock it to build from it.
     /// - [`DocumentError::AmbiguousInstanceScale`] — the instance's pose is
     ///   not a similarity (non-uniform scale).
     /// - [`DocumentError::Sketch`] — the region handle is stale.
@@ -8908,20 +8900,12 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        // A locked sketch is a measurement, not stock: nothing is ever
-        // consumed out of it, so no region of it is ever born into a solid.
-        // Unlock it if you meant to build from it.
-        if self.locked_sketches.contains(&sketch) {
-            return Err(DocumentError::SketchLocked);
-        }
         let s = self
             .sketches
             .get(sketch)
             .ok_or(DocumentError::UnknownSketch)?;
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
-        let scaffolding = s
-            .region_scaffolding(region)
-            .map_err(DocumentError::Sketch)?;
+        let scaffolding = self.consumed_scaffolding(sketch, region)?;
         let object =
             Object::from_extrusion(&profile, local_distance).map_err(DocumentError::Extrude)?;
 
@@ -9004,12 +8988,6 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        // A locked sketch is a measurement, not stock: nothing is ever
-        // consumed out of it, so no region of it is ever born into a solid.
-        // Unlock it if you meant to build from it.
-        if self.locked_sketches.contains(&sketch) {
-            return Err(DocumentError::SketchLocked);
-        }
         // World-op guard (component-edit-parity.md phase K1): see
         // `extrude_region`'s matching guard.
         if self.sketch_owner_component(sketch).is_some() {
@@ -9020,9 +8998,7 @@ impl Document {
             .get(sketch)
             .ok_or(DocumentError::UnknownSketch)?;
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
-        let scaffolding = s
-            .region_scaffolding(region)
-            .map_err(DocumentError::Sketch)?;
+        let scaffolding = self.consumed_scaffolding(sketch, region)?;
 
         let (points, closed, curves) = self.resolve_follow_me_path(path)?;
         let object = match stop_len {
@@ -9064,12 +9040,6 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        // A locked sketch is a measurement, not stock: nothing is ever
-        // consumed out of it, so no region of it is ever born into a solid.
-        // Unlock it if you meant to build from it.
-        if self.locked_sketches.contains(&sketch) {
-            return Err(DocumentError::SketchLocked);
-        }
         // World-op guard (component-edit-parity.md phase K1): see
         // `extrude_region`'s matching guard.
         if self.sketch_owner_component(sketch).is_some() {
@@ -9080,9 +9050,7 @@ impl Document {
             .get(sketch)
             .ok_or(DocumentError::UnknownSketch)?;
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
-        let scaffolding = s
-            .region_scaffolding(region)
-            .map_err(DocumentError::Sketch)?;
+        let scaffolding = self.consumed_scaffolding(sketch, region)?;
         let (points, closed, curves) = self.resolve_follow_me_path(path)?;
         let swept = match stop_len {
             None => Object::from_follow_me(&profile, &points, closed, &curves),
@@ -9251,8 +9219,6 @@ impl Document {
     /// - [`DocumentError::UnknownInstance`] — `instance` is stale/hidden.
     /// - [`DocumentError::UnknownSketch`] — `sketch` is stale/hidden or not
     ///   owned by `instance`'s own definition.
-    /// - [`DocumentError::SketchLocked`] — the sketch is a locked sketch;
-    ///   nothing is ever consumed out of one. Unlock it to build from it.
     /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownFace`] —
     ///   a `FaceLoop` path object is not a live member of the same
     ///   definition, or has no such face.
@@ -9278,12 +9244,6 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        // A locked sketch is a measurement, not stock: nothing is ever
-        // consumed out of it, so no region of it is ever born into a solid.
-        // Unlock it if you meant to build from it.
-        if self.locked_sketches.contains(&sketch) {
-            return Err(DocumentError::SketchLocked);
-        }
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
@@ -9292,9 +9252,7 @@ impl Document {
             .get(sketch)
             .ok_or(DocumentError::UnknownSketch)?;
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
-        let scaffolding = s
-            .region_scaffolding(region)
-            .map_err(DocumentError::Sketch)?;
+        let scaffolding = self.consumed_scaffolding(sketch, region)?;
         let (points, closed, curves) = self.resolve_follow_me_path_in_component(component, path)?;
         let object = match local_stop {
             None => Object::from_follow_me(&profile, &points, closed, &curves),
@@ -9337,12 +9295,6 @@ impl Document {
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        // A locked sketch is a measurement, not stock: nothing is ever
-        // consumed out of it, so no region of it is ever born into a solid.
-        // Unlock it if you meant to build from it.
-        if self.locked_sketches.contains(&sketch) {
-            return Err(DocumentError::SketchLocked);
-        }
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
@@ -9351,9 +9303,7 @@ impl Document {
             .get(sketch)
             .ok_or(DocumentError::UnknownSketch)?;
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
-        let scaffolding = s
-            .region_scaffolding(region)
-            .map_err(DocumentError::Sketch)?;
+        let scaffolding = self.consumed_scaffolding(sketch, region)?;
         let (points, closed, curves) = self.resolve_follow_me_path_in_component(component, path)?;
         let swept = match local_stop {
             None => Object::from_follow_me(&profile, &points, closed, &curves),
@@ -9721,6 +9671,26 @@ impl Document {
             }
             FollowMePath::InstanceFaceLoop { .. } => Err(DocumentError::UnknownInstance),
         }
+    }
+
+    /// The edges a solid born from `region` takes out of `sketch`: the
+    /// region's exclusive scaffolding (Model D) for an ordinary sketch, and
+    /// NOTHING for a locked sketch. A locked sketch is a drawing rather than
+    /// stock — solids are built from it by copy, so its outline is never
+    /// consumed and the same region can be built from again.
+    fn consumed_scaffolding(
+        &self,
+        sketch: SketchId,
+        region: SketchRegionId,
+    ) -> Result<BTreeSet<SketchEdgeId>, DocumentError> {
+        if self.locked_sketches.contains(&sketch) {
+            return Ok(BTreeSet::new());
+        }
+        self.sketches
+            .get(sketch)
+            .ok_or(DocumentError::UnknownSketch)?
+            .region_scaffolding(region)
+            .map_err(DocumentError::Sketch)
     }
 
     /// Shared commit for the region-consuming solid births

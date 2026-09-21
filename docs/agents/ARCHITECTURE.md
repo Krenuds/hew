@@ -176,14 +176,18 @@ have" is the invariant this buys: every entity in the document is either
 visible geometry or nothing.
 
 A **locked sketch** is the one sketch that is not larval. It is a
-measurement rather than stock — a chalk line you set lumber against, draw
-*against* instead of *into* — so it opts out of that lifecycle entirely
-until it is unlocked. Locked, it never welds (a drawing gesture cannot
-target it, so a stroke over it mints a separate sketch rather than
-splitting its edges) and nothing is ever consumed out of it: extrude,
-Follow Me and 3D Text all refuse it with a typed `SketchLocked`. It stays
-wholly visible and wholly snappable throughout, which is the point — a
-reference you cannot snap to is worthless.
+drawing rather than stock — a chalk line you set lumber against, a floor
+plan you raise walls from, drawn *against* instead of *into* — so it opts
+out of that lifecycle entirely until it is unlocked. Locked, it never
+welds (a drawing gesture cannot target it, so a stroke over it mints a
+separate sketch rather than splitting its edges) and nothing is ever
+consumed out of it: extrude and Follow Me build from it by copy, so the
+solid is born and the outline stays, ready to be built from again. Undo of
+such a build only removes the solid. It stays wholly visible and wholly
+snappable throughout, which is the point — a reference you cannot snap to
+is worthless. Locking is how a sketch is finished and unlocking is how it
+is edited: per-vertex, per-island and drawing edits, and 3D Text, all
+refuse a locked sketch with a typed `SketchLocked`.
 
 This is a property on the Sketch, not a container around it: Hew has
 first-class Sketch nodes, so protection is something a sketch carries

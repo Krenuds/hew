@@ -5,7 +5,8 @@
 //!
 //! 1. It never welds. Drawing over it snaps and infers against it but never
 //!    splits its edges or merges into its islands.
-//! 2. Nothing is ever consumed out of it. No extrusion takes its geometry.
+//! 2. Nothing is ever consumed out of it. Extrude and Follow Me build from it
+//!    by copy: the solid is born and the outline stays.
 //! 3. It stays fully live for inference — every snap source survives.
 //! 4. Unlocking returns it to an ordinary sketch; deleting works normally.
 //!
@@ -254,20 +255,210 @@ fn a_sketch_over_a_locked_one_is_wholly_independent() {
 
 // ============================================ 2. nothing is consumed out
 
+/// A locked sketch is a drawing, not stock: the solid is born from a COPY of
+/// the profile, and the sketch is exactly what it was.
 #[test]
-fn a_locked_region_refuses_to_extrude() {
+fn a_locked_region_extrudes_by_copy() {
     let mut doc = Document::new();
     let s = rect_sketch(&mut doc, 0.0, 0.0, 20.0, 20.0);
     let r = only_region(&doc, s);
     doc.set_sketch_locked(s, true).unwrap();
+    let drawn = doc.sketch(s).unwrap().clone();
 
+    doc.extrude_region(s, r, 1.0)
+        .expect("a locked region builds a solid");
+
+    assert_eq!(doc.visible_object_ids().len(), 1, "the solid was born");
     assert_eq!(
-        doc.extrude_region(s, r, 1.0).err(),
-        Some(DocumentError::SketchLocked),
-        "a measurement is never the larval form of a solid"
+        doc.sketch(s).expect("the sketch is still in the document"),
+        &drawn,
+        "and nothing left the sketch — not an edge, a region, or a vertex"
     );
-    assert_eq!(edge_count(&doc, s), 4, "and the refusal touched nothing");
+    assert_eq!(only_region(&doc, s), r, "the region keeps its handle");
+}
+
+/// Building from EVERY region of an ordinary sketch empties it and removes
+/// it. A locked one is never emptied, so it never leaves — and the same
+/// region can be built from again.
+#[test]
+fn building_from_every_region_never_removes_a_locked_sketch() {
+    let mut doc = Document::new();
+    let s = rect_sketch(&mut doc, 0.0, 0.0, 4.0, 4.0);
+    draw_rect(&mut doc, s, 10.0, 0.0, 14.0, 4.0);
+    doc.set_sketch_locked(s, true).unwrap();
+
+    for r in doc.extrudable_regions(s).unwrap() {
+        doc.extrude_region(s, r, 1.0).expect("each room goes up");
+    }
+    assert_eq!(doc.visible_object_ids().len(), 2);
+    assert!(doc.sketch(s).is_some(), "the plan is still on the table");
+    assert_eq!(region_count(&doc, s), 2);
+    assert_eq!(edge_count(&doc, s), 8);
+
+    let again = doc.extrudable_regions(s).unwrap()[0];
+    doc.extrude_region(s, again, 2.0)
+        .expect("a drawing can be built from twice");
+    assert_eq!(doc.visible_object_ids().len(), 3);
+}
+
+/// Undo of a locked extrude has no outline to put back: it hides the solid
+/// and leaves the sketch identical. Redo brings the solid back and still
+/// takes nothing.
+#[test]
+fn a_locked_extrude_undoes_and_redoes_around_an_untouched_sketch() {
+    let mut doc = Document::new();
+    let s = rect_sketch(&mut doc, 0.0, 0.0, 20.0, 20.0);
+    let r = only_region(&doc, s);
+    doc.set_sketch_locked(s, true).unwrap();
+    let drawn = doc.sketch(s).unwrap().clone();
+    doc.extrude_region(s, r, 1.0).unwrap();
+
+    doc.undo().expect("undo the extrude");
     assert_eq!(doc.visible_object_ids().len(), 0);
+    assert_eq!(doc.sketch(s).unwrap(), &drawn);
+    assert!(doc.is_sketch_locked(s), "only the extrude was undone");
+
+    doc.redo().expect("redo the extrude");
+    assert_eq!(doc.visible_object_ids().len(), 1);
+    assert_eq!(doc.sketch(s).unwrap(), &drawn);
+}
+
+/// The two lifecycles interleave on ONE sketch and unwind exactly: built
+/// from by copy while locked, consumed as stock once unlocked.
+#[test]
+fn a_copy_extrude_and_a_consuming_extrude_unwind_in_order() {
+    let mut doc = Document::new();
+    let s = rect_sketch(&mut doc, 0.0, 0.0, 20.0, 20.0);
+    let r = only_region(&doc, s);
+
+    doc.set_sketch_locked(s, true).unwrap();
+    doc.extrude_region(s, r, 1.0).expect("by copy");
+    doc.set_sketch_locked(s, false).unwrap();
+    doc.extrude_region(s, r, 2.0).expect("as stock");
+    assert_eq!(doc.visible_object_ids().len(), 2);
+    assert!(
+        doc.sketch(s).is_none(),
+        "the unlocked extrude consumed the outline, and the sketch with it"
+    );
+
+    for _ in 0..4 {
+        doc.undo().expect("each step unwinds");
+    }
+    assert_eq!(doc.visible_object_ids().len(), 0);
+    // The consuming extrude's undo re-inserts the outline under fresh
+    // handles, so the comparison is by geometry rather than by identity.
+    assert_eq!(edge_count(&doc, s), 4, "the sketch is back");
+    assert_eq!(only_region_area(&doc, s), 400.0);
+    assert!(!doc.is_sketch_locked(s));
+
+    for _ in 0..4 {
+        doc.redo().expect("and replays");
+    }
+    assert_eq!(doc.visible_object_ids().len(), 2);
+    assert!(doc.sketch(s).is_none());
+}
+
+/// A drawn circle's analytic identity rides the copy: the walls of a solid
+/// built from a locked circle carry the cylinder, and the circle keeps its
+/// curve chain.
+#[test]
+fn a_locked_circle_builds_a_claimed_cylinder_and_keeps_its_curve() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 2.0,
+        })
+        .expect("a fresh curve chain opens");
+        let n = 16;
+        for i in 0..n {
+            let a = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+            let b = std::f64::consts::TAU * f64::from(i + 1) / f64::from(n);
+            sk.add_segment(
+                Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0),
+                Point3::new(2.0 * b.cos(), 2.0 * b.sin(), 0.0),
+            )
+            .unwrap();
+        }
+        sk.end_curve();
+    }
+    let r = only_region(&doc, s);
+    doc.set_sketch_locked(s, true).unwrap();
+    let drawn = doc.sketch(s).unwrap().clone();
+
+    let (post, _) = doc.extrude_region(s, r, 3.0).expect("a post goes up");
+
+    let radius = doc
+        .object(post)
+        .expect("live")
+        .faces()
+        .values()
+        .find_map(|f| match f.surface {
+            Some(kernel::SurfaceRef::Cylinder { radius, .. }) => Some(radius),
+            _ => None,
+        })
+        .expect("a wall face carries the cylinder");
+    assert!((radius - 2.0).abs() < 1e-12);
+    assert_eq!(
+        doc.sketch(s).unwrap(),
+        &drawn,
+        "the circle is still a circle"
+    );
+}
+
+/// Follow Me commits through the same door as extrude: a locked PROFILE is
+/// swept by copy.
+#[test]
+fn a_locked_profile_sweeps_by_copy() {
+    let mut doc = Document::new();
+    let path = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(path).unwrap();
+        sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 4.0, 0.0))
+            .unwrap();
+    }
+    let path_edges: Vec<_> = doc.sketch(path).unwrap().edges().keys().collect();
+
+    let profile_plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 0.0, 1.0),
+    ])
+    .unwrap();
+    let profile = doc.add_sketch(profile_plane);
+    {
+        let sk = doc.sketch_mut(profile).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 1.0)),
+            (Point3::new(1.0, 0.0, 1.0), Point3::new(0.0, 0.0, 1.0)),
+            (Point3::new(0.0, 0.0, 1.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+    }
+    let region = only_region(&doc, profile);
+    doc.set_sketch_locked(profile, true).unwrap();
+    let drawn = doc.sketch(profile).unwrap().clone();
+
+    doc.follow_me(
+        profile,
+        region,
+        &kernel::FollowMePath::SketchEdges {
+            sketch: path,
+            edges: path_edges,
+        },
+    )
+    .expect("a locked profile sweeps");
+
+    assert_eq!(doc.visible_object_ids().len(), 1);
+    assert_eq!(doc.sketch(profile).unwrap(), &drawn);
+
+    doc.undo().expect("undo the sweep");
+    assert_eq!(doc.visible_object_ids().len(), 0);
+    assert_eq!(doc.sketch(profile).unwrap(), &drawn);
 }
 
 /// `SketchLocked`, never `UnknownSketch`: a locked sketch is present,
@@ -277,10 +468,9 @@ fn a_locked_region_refuses_to_extrude() {
 fn the_refusal_names_the_lock_rather_than_pretending_the_sketch_is_gone() {
     let mut doc = Document::new();
     let s = rect_sketch(&mut doc, 0.0, 0.0, 1.0, 1.0);
-    let r = only_region(&doc, s);
     doc.set_sketch_locked(s, true).unwrap();
 
-    let err = doc.extrude_region(s, r, 1.0).unwrap_err();
+    let err = doc.begin_sketch_gesture(s).unwrap_err();
     assert_eq!(err, DocumentError::SketchLocked);
     assert_ne!(err, DocumentError::UnknownSketch);
     assert!(
@@ -320,8 +510,7 @@ fn a_locked_sketch_moves_as_a_rigid_whole_but_its_vertices_are_frozen() {
 }
 
 /// A locked sketch is a fine Follow Me PATH — a sweep rides along the chalk
-/// line without consuming it. Only the PROFILE sketch loses scaffolding, and
-/// that one can never be locked.
+/// line without consuming it. A path is never consumed, locked or not.
 #[test]
 fn a_locked_sketch_serves_as_a_follow_me_path() {
     let mut doc = Document::new();
@@ -688,6 +877,24 @@ fn explode_instance_carries_the_locked_flag_onto_the_baked_world_sketch() {
     );
 }
 
+/// The in-instance door builds by copy too: a locked definition-owned sketch
+/// births a new member of the definition and stays exactly as drawn.
+#[test]
+fn a_locked_definition_sketch_extrudes_by_copy() {
+    let mut doc = Document::new();
+    let (comp, inst, sid) = definition_with_a_locked_sketch(&mut doc);
+    let r = only_region(&doc, sid);
+    let drawn = doc.sketch(sid).unwrap().clone();
+    let members_before = doc.def_members(comp).unwrap().len();
+
+    doc.extrude_region_in_instance(inst, sid, r, 1.0)
+        .expect("a locked definition sketch builds a member");
+
+    assert_eq!(doc.def_members(comp).unwrap().len(), members_before + 1);
+    assert_eq!(doc.sketch(sid).unwrap(), &drawn);
+    assert!(doc.is_sketch_locked(sid));
+}
+
 /// `copy_sketch_islands` deliberately does NOT carry the flag: copying
 /// geometry OFF a chalk line is how you get ordinary stock to build from,
 /// and a locked copy would defeat the point.
@@ -712,4 +919,37 @@ fn copying_islands_off_a_locked_sketch_yields_ordinary_stock() {
         .expect("and it extrudes like anything else");
     assert!(doc.is_sketch_locked(chalk), "the chalk line is untouched");
     assert_eq!(only_region_area(&doc, chalk), 400.0);
+}
+
+// =================================================== property: by copy
+
+proptest::proptest! {
+    /// Property: whatever two rectangles are drawn into a locked sketch —
+    /// apart, touching, or overlapping into several regions — building from
+    /// any one region leaves the sketch identical, in memory and in the
+    /// saved manifest.
+    #[test]
+    fn building_from_any_region_of_a_locked_sketch_leaves_it_identical(
+        w in 1.0..20.0f64,
+        h in 1.0..20.0f64,
+        dx in -15.0..25.0f64,
+        dy in -15.0..25.0f64,
+        pick in 0usize..8,
+        distance in 0.1..10.0f64,
+    ) {
+        let mut doc = Document::new();
+        let s = rect_sketch(&mut doc, 0.0, 0.0, 10.0, 10.0);
+        draw_rect(&mut doc, s, dx, dy, dx + w, dy + h);
+        doc.set_sketch_locked(s, true).unwrap();
+
+        let drawn = doc.sketch(s).unwrap().clone();
+        let saved = manifest_json(&doc.save())["sketches"].clone();
+        let regions = doc.extrudable_regions(s).unwrap();
+        let region = regions[pick % regions.len()];
+
+        doc.extrude_region(s, region, distance).expect("any region builds");
+
+        proptest::prop_assert_eq!(doc.sketch(s).unwrap(), &drawn);
+        proptest::prop_assert_eq!(&manifest_json(&doc.save())["sketches"], &saved);
+    }
 }

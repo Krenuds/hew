@@ -149,9 +149,15 @@ enum DocOp {
     /// below; a non-uniformly-scaled instance's typed `AmbiguousInstanceScale`
     /// refusal is an accepted no-op, not a fuzz failure (same treatment as
     /// every other typed refusal in this harness).
+    ///
+    /// `locked` locks the drawn sketch before extruding it, so the solid is
+    /// built BY COPY: the step's `CreatedObject` carries no scaffolding, its
+    /// undo and redo restore and remove nothing, and the locked sketch
+    /// survives LIVE for later steps to clone, bake, and build from again.
     DrawAndExtrudeInInstance {
         inst_sel: usize,
         distance: f64,
+        locked: bool,
     },
     /// [`DocOp::DrawAndExtrudeInInstance`]'s draw-only half (component-edit-
     /// parity.md phase K1 follow-up): draws the same fixed 1×1 rectangle
@@ -447,9 +453,11 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
                 comp_sel, member_sel, face_sel, distance,
             }
         ),
-        1 => (any::<usize>(), distance()).prop_map(|(inst_sel, distance)| {
-            DocOp::DrawAndExtrudeInInstance { inst_sel, distance }
-        }),
+        1 => (any::<usize>(), distance(), any::<bool>()).prop_map(
+            |(inst_sel, distance, locked)| {
+                DocOp::DrawAndExtrudeInInstance { inst_sel, distance, locked }
+            }
+        ),
         1 => any::<usize>().prop_map(|inst_sel| DocOp::DrawInInstance { inst_sel }),
         1 => (any::<usize>(), any::<usize>()).prop_map(|(comp_sel, member_sel)| {
             DocOp::DeleteDefMember { comp_sel, member_sel }
@@ -1379,7 +1387,11 @@ fn apply_doc_op(
                 },
             );
         }
-        DocOp::DrawAndExtrudeInInstance { inst_sel, distance } => {
+        DocOp::DrawAndExtrudeInInstance {
+            inst_sel,
+            distance,
+            locked,
+        } => {
             let Some(iid) = nth(&doc.instance_ids(), *inst_sel) else {
                 return Ok(true);
             };
@@ -1413,6 +1425,9 @@ fn apply_doc_op(
             let Some(region) = doc.sketch(sid).and_then(|s| s.regions().keys().next()) else {
                 return Ok(true);
             };
+            if *locked && doc.set_sketch_locked(sid, true).is_err() {
+                return Ok(true);
+            }
             let _ = doc.extrude_region_in_instance(iid, sid, region, *distance);
         }
         DocOp::DrawInInstance { inst_sel } => {

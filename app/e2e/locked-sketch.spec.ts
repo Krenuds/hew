@@ -12,7 +12,7 @@ import {
  * A locked sketch is one you draw *against* instead of *into*: a chalk line.
  * Frame a deck and the footprint is a measurement, not stock — you set lumber
  * against it and never consume it, and it has to still be there for the next
- * board.
+ * board. Building from the footprint itself is by copy, for the same reason.
  *
  * Unlocked, it is not. The draw tools funnel everything drawn on one plane
  * into one sketch, so each joist welds into the footprint and splits it;
@@ -187,6 +187,51 @@ test('a locked footprint survives the joists laid on it', async ({ page }) => {
   // the emptied sketch went with it (Model D). The stock sketches were eaten,
   // exactly as they should be; the chalk line was not.
   expect(final.sketchIds).toEqual([footprint])
+})
+
+test('a locked footprint is built from without being used up', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+
+  await drawRect(page, ctx, 0, 0, FOOT, FOOT)
+  const footprint = (await page.evaluate(() => window.__hew_test!.getSketchIds()))[0]
+  await page.evaluate((s) => window.__hew_test!.setSketchLocked(s, true), footprint)
+
+  // Push/Pull the locked footprint itself into a slab, with REAL input.
+  await page.keyboard.press('p')
+  await clickWorld(page, ctx, FOOT / 2, FOOT / 2, 0)
+  await page.keyboard.type('0.2')
+  await page.keyboard.press('Enter')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+
+  const read = (s: string) =>
+    page.evaluate(
+      (id) => ({
+        objectCount: window.__hew_test!.getObjectCount(),
+        lastError: window.__hew_test!.getLastError(),
+        locked: window.__hew_test!.isSketchLocked(id),
+        lines: window.__hew_test!.getSketchLines(id),
+        regionCount: window.__hew_test!.getSketchRegionCount(id),
+        sketchIds: window.__hew_test!.getSketchIds(),
+      }),
+      s,
+    )
+
+  // The slab went up and the drawing is exactly what it was: an ordinary
+  // sketch would have been emptied into the slab and left the document.
+  const built = await read(footprint)
+  expect(built.lastError).toBeNull()
+  expect(built.locked).toBe(true)
+  expect(built.sketchIds).toEqual([footprint])
+  expect(built.lines).toHaveLength(4 * 6)
+  expect(built.regionCount).toBe(1)
+
+  // Undo has no outline to put back: it takes the slab and nothing else.
+  await page.evaluate(() => window.__hew_test!.undo())
+  const undone = await read(footprint)
+  expect(undone.objectCount).toBe(0)
+  expect(undone.locked).toBe(true)
+  expect(undone.lines).toEqual(built.lines)
+  expect(undone.regionCount).toBe(1)
 })
 
 test('unlocking returns the footprint to ordinary stock', async ({ page }) => {

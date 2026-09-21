@@ -84,7 +84,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner."
         }
         "SketchLocked" => {
-            "That sketch is locked, so it can't be drawn into, changed, or extruded — it's a reference, not stock. Select it and clear 'Locked sketch' in Object Info to build from it."
+            "That sketch is locked, so it can't be drawn into or changed — it's a drawing to build from, not stock. Select it and clear 'Locked sketch' in Object Info to edit it."
         }
         "SketchGestureAlreadyOpen" => {
             "The drawing tools got out of step. Press Escape and try again."

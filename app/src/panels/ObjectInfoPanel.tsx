@@ -853,10 +853,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         </div>
       )}
 
-      {/* Locked — a sketch only. A locked sketch is reference geometry: it
-       * never welds, nothing is extruded out of it, and it renders as a
-       * dashed chalk line with no fill. Unlocking returns it to an ordinary
-       * sketch with no residue. */}
+      {/* Locked — a sketch only. A locked sketch is a drawing: it never
+       * welds, solids are built from it by copy so nothing is consumed out
+       * of it, and it renders as a dashed chalk line with no fill. Unlocking
+       * returns it to an ordinary sketch with no residue. */}
       {nodeInfo.locked !== null && (
         <div>
           <div style={LABEL_STYLE}>Locked sketch</div>
@@ -866,7 +866,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
               aria-label="Locked sketch"
               checked={nodeInfo.locked}
               onChange={(e) => toggleLocked(e.currentTarget.checked)}
-              title="Draw against this sketch instead of into it. Locked, it never welds and is never extruded, but still snaps."
+              title="Draw against this sketch instead of into it. Locked, it never welds and still snaps, and Push/Pull builds from it without using it up."
             />
             <span>{nodeInfo.locked ? 'Reference' : 'Stock'}</span>
           </label>

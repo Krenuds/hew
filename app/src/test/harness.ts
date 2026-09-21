@@ -817,8 +817,9 @@ export interface HewTestHarness {
   isSketchLocked(sketch: string): boolean
 
   /** Lock or unlock `sketch` (one undo step). A locked sketch never welds,
-   * is never extruded out of, and stays fully snappable — the probe for
-   * asserting that stock drawn over a chalk line lands beside it. */
+   * is never consumed (solids are built from it by copy), and stays fully
+   * snappable — the probe for asserting that stock drawn over a chalk line
+   * lands beside it. */
   setSketchLocked(sketch: string, locked: boolean): void
 
   /**
