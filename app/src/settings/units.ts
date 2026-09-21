@@ -579,6 +579,22 @@ export function parseLengthToMeters(
  * Returns null if the string is empty/malformed or any component is not a
  * finite length > 0.
  */
+/**
+ * Splits a TWO-DIMENSION readout for display, keeping the delimiter.
+ *
+ * A superset of `parseDimensionsToMeters`'s input separators plus the `×`
+ * the live readout prints. The capture group means `split` returns the
+ * delimiter as its own part, so re-joining the pieces reproduces the original
+ * string byte for byte — what lets `MeasurementBox` put a dot in front of
+ * each dimension without rewriting the text between them.
+ *
+ * Display only. The input grammar stays `parseDimensionsToMeters`'s; nothing
+ * here decides what a typed buffer means. Safe because neither
+ * `formatLengthIn` nor `editDimsBuffer` ever emits `,`, `x`, `X` or `×`
+ * except as the separator itself.
+ */
+export const DIMS_DISPLAY_SPLIT_RE = /(\s*[×,xX]\s*)/
+
 export function parseDimensionsToMeters(
   input: string,
   format: LengthFormat = getLengthUnit(),

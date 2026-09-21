@@ -50,7 +50,8 @@ below.
   edge actually lies in
 - Exact-dimension typing works both mid-gesture (before the committing
   click) and right after the shape is already drawn, on every draw tool
-  that takes a typed measurement: Rectangle's `W,D`, Circle's and
+  that takes a typed measurement: Rectangle's `W,D` (each dimension dotted
+  with the axis it runs along — see Inference & precision), Circle's and
   Polygon's radius (Polygon's side count too, via `Ns`), Arc's bulge, and
   Line's last segment length. Typing a value and pressing Enter redraws
   the just-drawn shape in place — same anchor, same growth direction (and
@@ -353,6 +354,17 @@ below.
   user-scalable — Settings ▸ Viewport ▸ Snap dot size, 60–150% of the
   shipped size — which changes only how big the marker draws, never the
   snap tolerance that decides when a point is acquired
+- Axis dots in the Measurements box: a colored dot in front of each typed
+  dimension, naming the drawing axis that dimension runs along. Rectangle's
+  `W,D` carries two — which is what makes the pair readable on a wall or a
+  tilted sketch, where the order comes from the plane's own basis and not
+  from anything the user chose (on a wall facing +X the first number is the
+  height); Move, Line, and Push/Pull carry one, for the axis the gesture is
+  on or locked to. A direction along no axis shows neutral rather than
+  vanishing, so the box never changes width mid-entry, and a dimension not
+  yet typed shows its dot faded. Shares the `--axis-*` tokens and the one
+  10° labeling tolerance with the inference chip and Line's rubber band, so
+  the three can never disagree about the same direction
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range

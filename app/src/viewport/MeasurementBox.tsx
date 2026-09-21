@@ -10,6 +10,13 @@
  * label is derived from the active tool name (a small local map) since
  * `onMeasurement` only ever carried the formatted value, never a label.
  *
+ * `axes` (the four tools that know their directions — Rectangle, Move, Line,
+ * Push/Pull): one axis index per dimension the readout prints, drawn as a
+ * coloured dot in front of each. Which axis a typed dimension drives is
+ * otherwise unguessable — see `measurementAxes.ts`. Omitting it renders the
+ * value exactly as it always has, which is what every other tool and today's
+ * Shop Mode do.
+ *
  * `frozen` (Tape Measure only, tape-measure-rework part 1): the blinking
  * caret's PRESENCE now specifically means "a typed buffer is live and Enter
  * will act on it"; its ABSENCE on a non-empty value means "a finished
@@ -18,6 +25,10 @@
  * than clearing immediately, and the caret says whether typing right now
  * would do anything.
  */
+import { Fragment } from 'react'
+import { AXIS_NAME, axisAriaLabel, type AxisIndex, type MeasurementAxes } from './measurementAxes'
+import { DIMS_DISPLAY_SPLIT_RE } from '../settings/units'
+
 const VCB_LABEL: Record<string, string> = {
   'Move': 'Distance',
   'Push/Pull': 'Push depth',
@@ -40,6 +51,18 @@ export interface MeasurementBoxProps {
    *  rather than a live typed buffer (Tape Measure only) — hides the caret.
    *  Defaults to false (every other tool). */
   frozen?: boolean
+  /**
+   * One axis index per dimension the readout prints, in printing order
+   * (0 = red, 1 = green, 2 = blue; null = this dimension runs along no
+   * drawing axis). The length is the GESTURE's dimension count, not how many
+   * the user has typed — an untyped dimension still draws a faded dot, so
+   * both are visible from the first keystroke and the box never resizes
+   * mid-entry.
+   *
+   * Omitted by every tool that hasn't opted in, in which case `value` renders
+   * exactly as it did before this prop existed.
+   */
+  axes?: MeasurementAxes
   /**
    * Shop-mode playtest finding 4: the editor's top-right docking sits
    * directly under Shop Mode's own ⋯ menu button, hiding the readout behind
@@ -101,10 +124,96 @@ const shopChipChromeStyle: React.CSSProperties = {
   zIndex: 36,
 }
 
+/** One axis dot. Empty by design: the dots must add NO text content, because
+ *  two E2E specs read the whole readout as the label's `parentElement.
+ *  textContent` (`follow-me-partial-sweep`, `camera-playtest2`). `role="img"`
+ *  plus `aria-label` names an empty element without putting anything in it;
+ *  `title` is what actually reaches the colourblind user, on hover. */
+function AxisDot({ axis, neutral, faded }: {
+  axis: AxisIndex | null
+  neutral: string
+  faded: boolean
+}) {
+  const label = axisAriaLabel(axis)
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className="hew-vcb-axis-dot"
+      style={{
+        background: axis === null ? neutral : `var(--axis-${AXIS_NAME[axis]})`,
+        opacity: faded ? 0.35 : 1,
+      }}
+    />
+  )
+}
+
+/**
+ * The readout itself, shared by the editor and shop chrome so the two can
+ * never drift on how a value is drawn.
+ *
+ * Three cases, narrowest first:
+ *  - no axes: the value verbatim. Byte-identical to the render that existed
+ *    before axis dots, and what every un-opted tool still gets.
+ *  - one axis: one dot, then the value verbatim. Nothing is split, so Move's
+ *    array readout ("3×5" — a copy count, not two lengths) and its
+ *    "Copy · " prefix pass through untouched.
+ *  - two or more: split on the separator, keeping it, and put a dot in front
+ *    of each dimension. A dimension not yet typed renders as a faded dot with
+ *    no text and, deliberately, no invented separator before it.
+ */
+function VcbValue({ value, axes, neutral, caretColor, frozen }: {
+  value: string
+  axes: MeasurementAxes | undefined
+  neutral: string
+  caretColor: string
+  frozen: boolean
+}) {
+  const caret = frozen
+    ? null
+    : <span aria-hidden="true" className="hew-vcb-caret" style={{ color: caretColor }}>|</span>
+
+  if (axes === undefined || axes.length === 0) {
+    return <>{value}{caret}</>
+  }
+
+  if (axes.length === 1) {
+    return <><AxisDot axis={axes[0]} neutral={neutral} faded={false} />{value}{caret}</>
+  }
+
+  // Even indices are field texts, odd indices the delimiters between them.
+  const parts = value.split(DIMS_DISPLAY_SPLIT_RE)
+  const texts = parts.filter((_, i) => i % 2 === 0)
+  const delims = parts.filter((_, i) => i % 2 === 1)
+  // More fields than the tool claims dimensions means this readout is not the
+  // shape we think it is. Fall back to the plain render rather than guess.
+  if (texts.length > axes.length) {
+    return <>{value}{caret}</>
+  }
+
+  return (
+    <>
+      {axes.map((axis, i) => {
+        const text = texts[i] ?? ''
+        return (
+          <Fragment key={i}>
+            <AxisDot axis={axis} neutral={neutral} faded={text === ''} />
+            {text}
+            {delims[i] ?? ''}
+          </Fragment>
+        )
+      })}
+      {caret}
+    </>
+  )
+}
+
 export function MeasurementBox({
   toolName,
   value,
   frozen = false,
+  axes,
   variant = 'editor',
   bottomOffsetPx = 0,
   orientation = 'portrait',
@@ -161,10 +270,13 @@ export function MeasurementBox({
             whiteSpace: 'nowrap',
           }}
         >
-          {value}
-          {!frozen && (
-            <span aria-hidden="true" className="hew-vcb-caret" style={{ color: 'var(--shop-accent)' }}>|</span>
-          )}
+          <VcbValue
+            value={value}
+            axes={axes}
+            neutral="var(--shop-dock-text)"
+            caretColor="var(--shop-accent)"
+            frozen={frozen}
+          />
         </span>
       </div>
     )
@@ -203,10 +315,13 @@ export function MeasurementBox({
           whiteSpace: 'nowrap',
         }}
       >
-        {value}
-        {!frozen && (
-          <span aria-hidden="true" className="hew-vcb-caret" style={{ color: 'var(--accent-base)' }}>|</span>
-        )}
+        <VcbValue
+          value={value}
+          axes={axes}
+          neutral="var(--text-faint)"
+          caretColor="var(--accent-base)"
+          frozen={frozen}
+        />
       </span>
     </div>
   )

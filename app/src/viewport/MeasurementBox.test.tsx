@@ -124,3 +124,118 @@ describe('MeasurementBox', () => {
     })
   })
 })
+
+/**
+ * Axis dots: which drawing axis each typed dimension runs along
+ * (`measurementAxes.ts`). The ordering of a rectangle's W,D is not guessable
+ * from the readout alone -- on a wall facing +X the first number is the
+ * height -- so each dimension carries a dot coloured by its axis.
+ */
+describe('MeasurementBox -- axis dots', () => {
+  const dots = (c: HTMLElement) => Array.from(c.querySelectorAll('.hew-vcb-axis-dot')) as HTMLElement[]
+
+  // The regression guard for the 17 tools that never pass `axes`, and for
+  // Shop Mode: their render is unchanged.
+  it('draws no dots and leaves the text alone when no axes are given', () => {
+    const { container } = render(<MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} />)
+    expect(dots(container)).toHaveLength(0)
+    expect(container.textContent).toBe('Value3 m × 5 m|')
+  })
+
+  it('colours one dot per dimension and reproduces the text verbatim', () => {
+    const { container } = render(
+      <MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} axes={[0, 1]} />,
+    )
+    const d = dots(container)
+    expect(d).toHaveLength(2)
+    expect(d[0].style.background).toBe('var(--axis-red)')
+    expect(d[1].style.background).toBe('var(--axis-green)')
+    expect(d.every((x) => x.style.opacity === '1')).toBe(true)
+    // The separator survives the split/re-render untouched.
+    expect(container.textContent).toBe('Value3 m × 5 m|')
+  })
+
+  // Mid-entry: the second dot is already there, so the box does not change
+  // width when the separator is typed -- but no separator is invented for it.
+  it('fades the dot of a dimension not yet typed, and invents no separator', () => {
+    const { container } = render(<MeasurementBox toolName="Rectangle" value="3" axes={[0, 1]} />)
+    const d = dots(container)
+    expect(d).toHaveLength(2)
+    expect(d[0].style.opacity).toBe('1')
+    expect(d[1].style.opacity).toBe('0.35')
+    expect(container.textContent).toBe('Value3|')
+  })
+
+  it('uses the neutral colour for a dimension that runs along no axis', () => {
+    const { container } = render(
+      <MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} axes={[0, null]} />,
+    )
+    const d = dots(container)
+    expect(d[1].style.background).toBe('var(--text-faint)')
+    expect(d[1].getAttribute('aria-label')).toBe('off axis')
+  })
+
+  it('takes the shop chrome neutral in the shop variant', () => {
+    const { container } = render(
+      <MeasurementBox toolName="Rectangle" value="3 m" axes={[null]} variant="shop" />,
+    )
+    expect(dots(container)[0].style.background).toBe('var(--shop-dock-text)')
+  })
+
+  // Move's array readout is "3x5" -- a copy count, not two lengths. It passes
+  // a single axis, and a single axis never splits.
+  it('never splits the value when only one axis is given', () => {
+    const { container } = render(<MeasurementBox toolName="Move" value={'3×5'} axes={[2]} />)
+    const d = dots(container)
+    expect(d).toHaveLength(1)
+    expect(d[0].style.background).toBe('var(--axis-blue)')
+    expect(container.textContent).toBe('Distance3×5|')
+  })
+
+  // Defensive: a readout shaped differently from what the axes claim falls
+  // back to the plain render rather than pairing dots with the wrong numbers.
+  it('bails to the verbatim render when the value has more fields than axes', () => {
+    const { container } = render(
+      <MeasurementBox toolName="Rectangle" value={'1 × 2 × 3'} axes={[0, 1]} />,
+    )
+    expect(dots(container)).toHaveLength(0)
+    expect(container.textContent).toBe('Value1 × 2 × 3|')
+  })
+
+  it('keeps the caret last, and still drops it when frozen', () => {
+    const { container } = render(
+      <MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} axes={[0, 1]} />,
+    )
+    const valueSpan = container.querySelector('.hew-vcb-caret')!.parentElement!
+    expect(valueSpan.lastChild).toBe(container.querySelector('.hew-vcb-caret'))
+
+    const { container: frozenC } = render(
+      <MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} axes={[0, 1]} frozen />,
+    )
+    expect(frozenC.querySelector('.hew-vcb-caret')).toBeNull()
+    expect(dots(frozenC)).toHaveLength(2)
+  })
+
+  it('names every dot for a screen reader and for a hover tooltip', () => {
+    const { container } = render(
+      <MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} axes={[2, null]} />,
+    )
+    for (const d of dots(container)) {
+      expect(d.getAttribute('role')).toBe('img')
+      expect(d.getAttribute('aria-label')).toMatch(/^(on (red|green|blue) axis|off axis)$/)
+      expect(d.getAttribute('title')).toBe(d.getAttribute('aria-label'))
+    }
+    expect(dots(container)[0].getAttribute('aria-label')).toBe('on blue axis')
+  })
+
+  // `follow-me-partial-sweep.spec.ts` and `camera-playtest2.spec.ts` both read
+  // the readout as the label's `parentElement.textContent`. A dot that carried
+  // any text -- a visually-hidden label, say -- would silently corrupt both.
+  it('adds no text content', () => {
+    const plain = render(<MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} />)
+    const dotted = render(
+      <MeasurementBox toolName="Rectangle" value={'3 m × 5 m'} axes={[0, 1]} />,
+    )
+    expect(dotted.container.textContent).toBe(plain.container.textContent)
+  })
+})

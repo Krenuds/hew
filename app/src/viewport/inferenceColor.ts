@@ -6,7 +6,7 @@
  * separate because one is a DOM/CSS concern and the other a three.js material
  * concern.
  */
-import { axisColorForDirection } from './axisColors'
+import { axisColorForDirection, AXIS_LABEL_TOL_DOT } from './axisColors'
 import type { InferenceInfo } from './Viewport'
 import { WORLD_DRAWING_AXES } from '../tools/drawingAxes'
 
@@ -25,10 +25,6 @@ export const KIND_CSS_COLOR: Record<string, string> = {
   plane: '#888888',
 }
 
-/** Generous tolerance — a label/color decision, not a snap decision (the
- * kernel already decided the snap; we're just naming the axis for display when
- * the direction happens to be axis-aligned). */
-const AXIS_LABEL_TOL_DOT = Math.cos((10 * Math.PI) / 180)
 const AXIS_NAME = ['red', 'green', 'blue'] as const
 
 /** The axis name ('red'|'green'|'blue') for an inference whose direction is

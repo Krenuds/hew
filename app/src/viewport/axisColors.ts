@@ -41,6 +41,20 @@ export function axisColorsForTheme(theme: 'light' | 'dark'): [number, number, nu
   return theme === 'light' ? LIGHT_AXIS_COLORS : DARK_AXIS_COLORS
 }
 
+/**
+ * The tolerance for NAMING the axis a direction reads as: 10 degrees, as a
+ * cosine threshold for `axisColorForDirection`.
+ *
+ * Generous on purpose — this is a label/colour decision, not a snap
+ * decision. The kernel has already decided what the geometry is; the only
+ * question left is which axis to call it when the answer is shown to the
+ * user. Every surface that paints or names an axis shares this one number so
+ * they cannot disagree about the same direction: the inference chip and snap
+ * marker (`inferenceColor.ts`), Line's rubber band, and the Measurements
+ * box's per-dimension dots (`measurementAxes.ts`).
+ */
+export const AXIS_LABEL_TOL_DOT = Math.cos((10 * Math.PI) / 180)
+
 export interface AxisColorMatch {
   color: number
   axis: 0 | 1 | 2

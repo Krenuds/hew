@@ -33,6 +33,8 @@ function makeWasmScene(opts: {
   let sketchCounter = 41n
   return {
     history_generation: vi.fn(() => 1n),
+    /** The document's drawing axes, world identity. */
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
@@ -318,7 +320,9 @@ describe('RectangleTool — retype dimensions after the second click', () => {
     // A digit opens the window; the readout shows the buffer.
     expect(tool.capturesKey('2')).toBe(true)
     typeDims(tool, '2,3')
-    expect(onMeasurement).toHaveBeenCalledWith(expect.stringContaining('2'))
+    // Ground: the two dimensions run along world X and Y, so the readout
+    // carries red then green for the box's dots.
+    expect(onMeasurement).toHaveBeenCalledWith(expect.stringContaining('2'), [0, 1])
 
     expect(scene.scene_undo).toHaveBeenCalledTimes(1)
     expect(scene.scene_redo).not.toHaveBeenCalled()

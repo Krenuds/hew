@@ -81,7 +81,8 @@ import type { V3 } from '../viewport/geoHelpers'
 import { rayPlaneIntersect, facePlaneBasis, applyAffine3x4 } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE, type FatSegmentsOpts } from '../viewport/fatLine'
-import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
+import { axisColorForDirection, axisColorsForTheme, AXIS_LABEL_TOL_DOT } from '../viewport/axisColors'
+import { measurementAxisFor, type MeasurementAxes } from '../viewport/measurementAxes'
 import { getResolvedTheme } from '../settings/theme'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
@@ -96,15 +97,8 @@ import { PlanePin } from './planePin'
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
-export type OnMeasurement = (text: string) => void
+export type OnMeasurement = (text: string, axes?: MeasurementAxes) => void
 
-/** Tolerance for colouring the rubber band by axis (tool-parity playtest2
- *  §2c) — a label/colour decision, not a snap decision (the kernel already
- *  decided whether/what to snap; this only decides how to PAINT the result).
- *  Matches `inferenceColor.ts`'s `AXIS_LABEL_TOL_DOT` (10°) so the preview
- *  line and the inference tooltip chip never disagree about which axis a
- *  direction reads as. */
-const LINE_AXIS_PREVIEW_TOL_DOT = Math.cos((10 * Math.PI) / 180)
 
 /** Preview line width while an EXPLICIT direction lock (`lockAxis`) holds —
  *  wider than the default `PREVIEW_LINE_STYLE.widthPx`, so a hard lock reads
@@ -1275,7 +1269,7 @@ export class LineTool implements Tool {
 
     if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
-      this.onMeasurementCb(this._typedReadout())
+      this.onMeasurementCb(this._typedReadout(), this._lineAxes())
     }
   }
 
@@ -1514,13 +1508,41 @@ export class LineTool implements Tool {
     this._chainVertices = []
   }
 
+  /**
+   * The axis the pending segment reads as, for the Measurements box's dot.
+   *
+   * Taken from the direction `_commitTyped` would commit along — the last
+   * placed point to the live cursor — and matched at the same tolerance
+   * `_previewStyle` paints the rubber band with, so the dot and the line can
+   * never disagree about the same drag. An explicit lock answers directly,
+   * being a frame axis already.
+   */
+  private _lineAxes(): MeasurementAxes | undefined {
+    if (this.lockAxis !== null) return [this.lockAxis]
+    let from: V3
+    let to: V3
+    if (this.planeStage.kind === 'anchored' && this._lastPlaneCursor !== null) {
+      from = this.planeStage.anchor
+      to = this._lastPlaneCursor
+    } else if (this.faceStage.kind === 'anchored' && this._lastFaceCursor !== null) {
+      const { points } = this.faceStage
+      from = points[points.length - 1]
+      to = this._lastFaceCursor
+    } else {
+      return undefined
+    }
+    const dir: V3 = [to[0] - from[0], to[1] - from[1], to[2] - from[2]]
+    return [measurementAxisFor(dir, getDrawingAxes(this.wasmScene))]
+  }
+
   /** Report the live segment-length measurement from the last point to the cursor. */
   private _reportMeasurement(last: V3, cursor: V3): void {
+    const axes = this._lineAxes()
     if (this.typed !== '') {
-      this.onMeasurementCb(this._typedReadout())
+      this.onMeasurementCb(this._typedReadout(), axes)
       return
     }
-    this.onMeasurementCb(formatLength(segmentLength(last, cursor)))
+    this.onMeasurementCb(formatLength(segmentLength(last, cursor)), axes)
   }
 
   /**
@@ -2132,7 +2154,7 @@ export class LineTool implements Tool {
     if (snap === null || snap.direction === undefined) return PREVIEW_LINE_STYLE
     const match = axisColorForDirection(
       snap.direction,
-      LINE_AXIS_PREVIEW_TOL_DOT,
+      AXIS_LABEL_TOL_DOT,
       axisColorsForTheme(getResolvedTheme()),
       getDrawingAxes(this.wasmScene),
     )

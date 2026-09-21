@@ -8,6 +8,16 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [Unreleased]
+
+### Added
+
+- **Measurements:** Each dimension in the Measurements box carries a dot colored by the axis it runs along, so `W,D` is unambiguous on a wall or a tilted plane instead of depending on how that plane happened to be built. Move, Line, and Push/Pull show one for the axis the gesture is on.
+
+### Fixed
+
+- **Draw:** A rectangle's two live dimensions are shown in the same order typing them back uses. On a plane other than the ground, dragging into some directions showed them swapped.
+
 ## [1.1.0] (2026-09-16) - The "User Feedback" Release
 
 Hew had no users before 1.0 and so this is the first one incorporating

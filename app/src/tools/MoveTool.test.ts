@@ -179,6 +179,54 @@ describe('MoveTool — movable drawing axes (arrow-key lock)', () => {
   })
 })
 
+describe('MoveTool — the axis behind the distance readout', () => {
+  it('an explicit lock reports that axis', () => {
+    const { tool, onMeasurement } = makeTool()
+    beginGestureLockedX(tool)
+    tool.onPointerMove(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([0])
+  })
+
+  it('an unlocked drag along an axis still reports it', () => {
+    const { tool, onMeasurement } = makeTool()
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(0, 4, 0), rayThrough(0, 4))
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([1])
+  })
+
+  it('a drag along no axis reports neutral', () => {
+    const { tool, onMeasurement } = makeTool()
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(3, 3, 0), rayThrough(3, 3))
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([null])
+  })
+
+  // Under a moved frame the lock IS a frame axis, so the dot follows the
+  // frame rather than the world direction the move happens to travel.
+  it('a lock under a moved frame reports the frame axis, not the world one', () => {
+    // Red is world +Y in this frame.
+    const { tool, onMeasurement } = makeTool(undefined, [0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1])
+    beginGestureLockedX(tool)
+    tool.onPointerMove(makeSnap(0, 3, 0), rayThrough(0, 3))
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([0])
+  })
+
+  // The array buffer ("3×5") is a copy count, not a distance — nothing
+  // there has an axis, and a two-entry list would make the box try to split
+  // it into two dimensions.
+  it('the array readout carries no axes at all', () => {
+    const { tool, onMeasurement } = makeTool()
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(3, 0, 0), rayThrough(3, 0))
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0)) // commits; the array window opens
+    onMeasurement.mockClear()
+    typeKeys(tool, '3x')
+    const call = onMeasurement.mock.calls.at(-1)
+    expect(call?.[0]).toContain('3')
+    expect(call?.[1]).toBeUndefined()
+  })
+})
+
 describe('MoveTool — locked typed-entry direction (signed by the cursor\'s side of the base)', () => {
   // The typed commit's direction under a lock is `sign((dest - base) ·
   // lockDir) * lockDir`, with the sign defaulting POSITIVE when dest sits
@@ -473,7 +521,8 @@ describe('MoveTool — ×N / /N array copy', () => {
     typeKeys(t.tool, '3x')
     // The trailing form's leading digit is buffer input, and it reads back
     // with the display glyph: "3×".
-    expect(t.onMeasurement).toHaveBeenLastCalledWith('3×')
+    // No axes: a copy count has no direction (viewport/measurementAxes.ts).
+    expect(t.onMeasurement).toHaveBeenLastCalledWith('3×', undefined)
     t.tool.onKey(makeKeyEvent('Enter'))
 
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
@@ -733,6 +782,8 @@ function makeWasmSceneSel() {
   return {
     history_generation: vi.fn(() => 1n),
     transform_selection: vi.fn(),
+    /** The document's drawing axes, world identity. */
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
   }
 }
 

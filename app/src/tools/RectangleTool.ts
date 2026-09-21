@@ -59,6 +59,7 @@ import { editDimsBuffer, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './move
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
+import { measurementAxisFor, type MeasurementAxes } from '../viewport/measurementAxes'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { PlanePin } from './planePin'
@@ -77,7 +78,7 @@ export type RectangleCommitResult = {
 export type OnRectangleCommit = (result: RectangleCommitResult) => void
 export type OnFaceImprint = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
-export type OnMeasurement = (text: string) => void
+export type OnMeasurement = (text: string, axes?: MeasurementAxes) => void
 
 /** Plane stage: waiting for first click, or waiting for second click, on a
  *  frozen `DrawPlane`/`SketchTarget`. `natural` (design §2a) is the plane/
@@ -732,7 +733,10 @@ export class RectangleTool implements Tool {
           return
         }
         this.retypeTyped = editDimsBuffer(this.retypeTyped, ev.key)
-        this.onMeasurementCb(this.retypeTyped === '' ? '' : typedReadout(this.retypeTyped))
+        this.onMeasurementCb(
+          this.retypeTyped === '' ? '' : typedReadout(this.retypeTyped),
+          this._dimensionAxes(),
+        )
         return
       }
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
@@ -797,7 +801,7 @@ export class RectangleTool implements Tool {
       /^[mckftinMCKFTIN]$/.test(ev.key)
     ) {
       this.typed = editDimsBuffer(this.typed, ev.key)
-      this.onMeasurementCb(typedReadout(this.typed))
+      this.onMeasurementCb(typedReadout(this.typed), this._dimensionAxes())
     }
   }
 
@@ -852,13 +856,73 @@ export class RectangleTool implements Tool {
     ]
   }
 
+  /**
+   * The world directions the two typed dimensions run along, in the order
+   * `_commitTyped` applies them. Dispatches exactly as the commit does, so
+   * the dots in the Measurements box can never name a direction the commit
+   * would not use:
+   *
+   *  - an anchored plane stage — world X/Y on the ground fast path, which is
+   *    hardcoded there and deliberately frame-blind, else the plane normal's
+   *    basis;
+   *  - an anchored face stage — the face normal's basis;
+   *  - the post-commit retype window — the same `RetypeSpec` fork
+   *    `_retypeCorners` reads.
+   *
+   * Re-derived from the normal rather than read off `DrawPlane`'s own u/v, so
+   * a future `DrawPlane` constructor cannot silently make the two disagree.
+   */
+  private _dimensionDirections(): [V3, V3] | null {
+    if (this.planeStage.kind === 'anchored') {
+      const { plane } = this.planeStage
+      if (plane.ground) return [[1, 0, 0], [0, 1, 0]]
+      const basis = facePlaneBasis(plane.normal)
+      return basis === null ? null : [basis.u, basis.v]
+    }
+    if (this.faceStage.kind === 'anchored') {
+      const basis = facePlaneBasis(this.faceStage.normal)
+      return basis === null ? null : [basis.u, basis.v]
+    }
+    const spec = this.retype.spec
+    if (spec !== null) {
+      if (spec.mode === 'plane' && spec.plane.ground) return [[1, 0, 0], [0, 1, 0]]
+      const basis = facePlaneBasis(spec.mode === 'plane' ? spec.plane.normal : spec.normal)
+      return basis === null ? null : [basis.u, basis.v]
+    }
+    return null
+  }
+
+  /**
+   * The axis each typed dimension reads as, for the Measurements box's dots.
+   *
+   * Always two entries once anything is anchored — `[null, null]` on an
+   * oblique plane rather than an empty list, so the box never changes width.
+   * Since `measurementAxisFor` is polarity-blind, this depends only on the
+   * plane, which means it is right from the anchoring click, unchanged by
+   * cursor movement, and still right while a typed buffer has left the
+   * rubber-band corners behind.
+   *
+   * On a MOVED drawing-axes frame a ground rectangle reports `[null, null]`:
+   * its two dimensions really are world X and Y (the ground fast path is
+   * frame-blind by design, to keep ground coordinates bit-identical), so
+   * neither runs along the frame's red or green, and saying otherwise would
+   * be the exact lie these dots exist to prevent.
+   */
+  private _dimensionAxes(): MeasurementAxes | undefined {
+    const dirs = this._dimensionDirections()
+    if (dirs === null) return undefined
+    const frame = getDrawingAxes(this.wasmScene)
+    return [measurementAxisFor(dirs[0], frame), measurementAxisFor(dirs[1], frame)]
+  }
+
   /** Report the live W × D measurement. */
   private _reportMeasurement(width: number, depth: number): void {
+    const axes = this._dimensionAxes()
     if (this.typed !== '') {
-      this.onMeasurementCb(typedReadout(this.typed))
+      this.onMeasurementCb(typedReadout(this.typed), axes)
       return
     }
-    this.onMeasurementCb(`${formatLength(width)} × ${formatLength(depth)}`)
+    this.onMeasurementCb(`${formatLength(width)} × ${formatLength(depth)}`, axes)
   }
 
   /**

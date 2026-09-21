@@ -73,6 +73,7 @@ import { worldFacePlane } from './faceDraw'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { getDrawingAxes } from './drawingAxes'
+import { measurementAxisFor, type MeasurementAxes } from '../viewport/measurementAxes'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
@@ -97,7 +98,7 @@ import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 
 export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
-export type OnMeasurement = (text: string) => void
+export type OnMeasurement = (text: string, axes?: MeasurementAxes) => void
 export type OnCopyModeChange = (on: boolean) => void
 
 /** Axis guide colours matching the world axis convention */
@@ -602,7 +603,7 @@ export class MoveTool implements Tool {
       const next = this._editIdleBuffer(this.typed, ev.key)
       if (next !== this.typed) {
         this.typed = next
-        this.onMeasurementCb(this._idleReadout())
+        this.onMeasurementCb(this._idleReadout(), this._moveAxes())
       }
       return
     }
@@ -638,7 +639,7 @@ export class MoveTool implements Tool {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       // Report the typed buffer as the measurement readout, tagged with the
       // current display unit so the user knows what they're typing in.
-      this.onMeasurementCb(this._decorate(this._typedReadout()))
+      this.onMeasurementCb(this._decorate(this._typedReadout()), this._moveAxes())
     }
   }
 
@@ -904,8 +905,7 @@ export class MoveTool implements Tool {
    *  display units. */
   private _idleReadout(): string {
     if (this.typed === '') return ''
-    const arrayish = /x/.test(this.typed) || (this.arrayHot !== null && /\//.test(this.typed))
-    return arrayish ? this.typed.replace('x', '×') : this._decorate(this._typedReadout())
+    return this._idleIsArrayish() ? this.typed.replace('x', '×') : this._decorate(this._typedReadout())
   }
 
   /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs. */
@@ -1017,8 +1017,9 @@ export class MoveTool implements Tool {
    * compute the signed distance along the locked axis (or total distance).
    */
   private _reportMeasurement(base: [number, number, number], dest: [number, number, number]): void {
+    const axes = this._moveAxes()
     if (this.typed !== '') {
-      this.onMeasurementCb(this._decorate(this._typedReadout()))
+      this.onMeasurementCb(this._decorate(this._typedReadout()), axes)
       return
     }
 
@@ -1035,7 +1036,41 @@ export class MoveTool implements Tool {
       dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
     }
 
-    this.onMeasurementCb(this._decorate(formatLength(dist)))
+    this.onMeasurementCb(this._decorate(formatLength(dist)), axes)
+  }
+
+  /**
+   * The axis the distance in the Measurements box runs along, for its dot.
+   *
+   * An explicit lock IS a frame axis, so it answers directly; otherwise the
+   * direction is matched against the frame, which is how a free drag that
+   * settled onto an axis inference gets its dot. While idle with the retype
+   * window open, the direction is the committed move's own vector — the one
+   * a retyped distance travels along.
+   *
+   * Undefined for the array buffer: "3×5" is a copy count, not a distance,
+   * and a pair there would make the box try to split it into two dimensions.
+   */
+  private _moveAxes(): MeasurementAxes | undefined {
+    if (this.stage.kind === 'base') {
+      if (this.lockAxis !== null) return [this.lockAxis]
+      const { base, dest } = this.stage
+      return [this._axisOf([dest[0] - base[0], dest[1] - base[1], dest[2] - base[2]])]
+    }
+    if (this._idleIsArrayish()) return undefined
+    const spec = this.retype.spec
+    if (spec === null) return undefined
+    return [this.lockAxis ?? this._axisOf(spec.vector)]
+  }
+
+  private _axisOf(dir: [number, number, number]) {
+    return measurementAxisFor(dir, getDrawingAxes(this.wasmScene))
+  }
+
+  /** True when the idle buffer reads as an array spec (`3x`, `/3`) rather
+   *  than a distance — the fork `_idleReadout` makes for its own text. */
+  private _idleIsArrayish(): boolean {
+    return /x/.test(this.typed) || (this.arrayHot !== null && /\//.test(this.typed))
   }
 
   /** Prefix a "Copy" tag onto the readout while the copy toggle is on. */

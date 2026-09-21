@@ -101,7 +101,9 @@ describe('LineTool — ground-anchored hard Z lock (the up-arrow "draw straight 
     onMeasurement.mockClear()
     tool.onPointerMove(makeSnap([2, 3, 4]), RAY) // hover 4m straight up, still Z-locked
 
-    expect(onMeasurement).toHaveBeenCalledWith(formatLength(4))
+    // A Z-locked segment is blue: the readout carries the axis its dot
+    // paints (viewport/measurementAxes.ts).
+    expect(onMeasurement).toHaveBeenCalledWith(formatLength(4), [2])
   })
 
   it('clicking straight up from a ground anchor while Z-locked commits a real vertical segment instead of refusing every click', () => {

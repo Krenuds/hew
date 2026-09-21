@@ -57,6 +57,8 @@ function makeWasmScene(opts: {
 
   const scene = {
     history_generation: vi.fn(() => 1n),
+    /** The document's drawing axes, world identity. */
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       planes.set(sketchCounter, GROUND_PLANE_ARR)
@@ -216,39 +218,54 @@ describe('RectangleTool — sketch mode (drawing on a hovered non-ground sketch)
  * The readout and the commit have to agree, or "3, 2" draws a different
  * rectangle from the one the readout was describing.
  */
-describe('RectangleTool \u2014 the live readout agrees with typing it back', () => {
-  /** normal [0,-1,0] \u2192 u = [0,0,1] (world +Z), v = [-1,0,0] (world \u2212X).
-   *  Anchor (0,0,2) \u2192 cursor (3,0,4) gives du = +2 along u and dv = \u22123 along
-   *  v: opposite signs, so this is a winding-reversing drag. */
+describe('RectangleTool — the live readout agrees with typing it back', () => {
+  /** normal [0,-1,0] → u = [0,0,1] (world +Z), v = [-1,0,0] (world −X). */
   const ANCHOR = { x: 0, y: 0, z: 2 }
-  const CURSOR = { x: 3, y: 0, z: 4 }
 
-  /** The four corners the drag is previewing, as an order-independent set. */
-  const DRAWN_CORNERS = new Set(['0,0,2', '3,0,2', '3,0,4', '0,0,4'])
+  /** Both drag quadrants. The first reverses the winding (du and dv have
+   *  opposite signs), the second does not; the readout has to name the same
+   *  two numbers, in the same order, either way. */
+  const DRAGS = [
+    {
+      name: 'a winding-reversing drag',
+      cursor: { x: 3, y: 0, z: 4 },
+      corners: new Set(['0,0,2', '3,0,2', '3,0,4', '0,0,4']),
+    },
+    {
+      name: 'a drag the other way',
+      cursor: { x: -3, y: 0, z: 4 },
+      corners: new Set(['0,0,2', '0,0,4', '-3,0,4', '-3,0,2']),
+    },
+  ]
 
-  it('reports u first, v second \u2014 not the corner spacing', () => {
-    const { scene } = makeWasmScene({ sketchPick: TILTED_SKETCH })
-    const { tool, onMeasurement } = makeTool(scene)
+  for (const drag of DRAGS) {
+    it(`reports u first, v second on ${drag.name} — not the corner spacing`, () => {
+      const { scene } = makeWasmScene({ sketchPick: TILTED_SKETCH })
+      const { tool, onMeasurement } = makeTool(scene)
 
-    tool.onPointerDown(makeSnap(ANCHOR), RAY)
-    tool.onPointerMove(makeSnap(CURSOR), RAY)
+      tool.onPointerDown(makeSnap(ANCHOR), RAY)
+      tool.onPointerMove(makeSnap(drag.cursor), RAY)
 
-    // 2 along u (the +Z extent) first, 3 along v (the X extent) second.
-    // Corner spacing would have said 3 \u00d7 2.
-    expect(onMeasurement).toHaveBeenLastCalledWith(`${formatLength(2)} \u00d7 ${formatLength(3)}`)
-  })
+      // 2 along u (the +Z extent) first, 3 along v (the X extent) second.
+      // On the reversing drag, corner spacing would have said 3 × 2.
+      // The axes ride along for the box's dots: blue then red, because u is
+      // world +Z and v is world −X on this wall — the first number really is
+      // the height (viewport/measurementAxes.ts).
+      expect(onMeasurement).toHaveBeenLastCalledWith(`${formatLength(2)} × ${formatLength(3)}`, [2, 0])
+    })
 
-  it('typing those two numbers back draws the rectangle the readout described', () => {
-    const { scene, segmentCalls, setNextRegionsCreated } = makeWasmScene({ sketchPick: TILTED_SKETCH })
-    const { tool } = makeTool(scene)
-    setNextRegionsCreated([123n])
+    it(`typing those two numbers back after ${drag.name} draws the rectangle the readout described`, () => {
+      const { scene, segmentCalls, setNextRegionsCreated } = makeWasmScene({ sketchPick: TILTED_SKETCH })
+      const { tool } = makeTool(scene)
+      setNextRegionsCreated([123n])
 
-    tool.onPointerDown(makeSnap(ANCHOR), RAY)
-    tool.onPointerMove(makeSnap(CURSOR), RAY)
-    for (const ch of '2,3') tool.onKey({ key: ch } as KeyboardEvent)
-    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+      tool.onPointerDown(makeSnap(ANCHOR), RAY)
+      tool.onPointerMove(makeSnap(drag.cursor), RAY)
+      for (const ch of '2,3') tool.onKey({ key: ch } as KeyboardEvent)
+      tool.onKey({ key: 'Enter' } as KeyboardEvent)
 
-    expect(segmentCalls).toHaveLength(4)
-    expect(new Set(segmentCalls.map((s) => s.a.join(',')))).toEqual(DRAWN_CORNERS)
-  })
+      expect(segmentCalls).toHaveLength(4)
+      expect(new Set(segmentCalls.map((s) => s.a.join(',')))).toEqual(drag.corners)
+    })
+  }
 })

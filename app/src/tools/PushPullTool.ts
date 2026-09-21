@@ -22,6 +22,8 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
+import { getDrawingAxes } from './drawingAxes'
+import { measurementAxisFor, type MeasurementAxes } from '../viewport/measurementAxes'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
 import { defaultFaceEligible, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
 
@@ -126,7 +128,7 @@ export type PushPullTarget =
 
 export type OnPushPullCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
-export type OnMeasurement = (text: string) => void
+export type OnMeasurement = (text: string, axes?: MeasurementAxes) => void
 export type OnExtrudeAsNewModeChange = (on: boolean) => void
 
 type Stage =
@@ -634,7 +636,7 @@ export class PushPullTool implements Tool {
         return
       }
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
-      this.onMeasurementCb(this.typed === '' ? '' : this._typedReadout())
+      this.onMeasurementCb(this.typed === '' ? '' : this._typedReadout(), this._pushAxes())
       return
     }
 
@@ -655,7 +657,7 @@ export class PushPullTool implements Tool {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       // Report the typed buffer as the measurement readout, tagged with the
       // current display unit so the user knows what they're typing in.
-      this.onMeasurementCb(this._typedReadout())
+      this.onMeasurementCb(this._typedReadout(), this._pushAxes())
     }
   }
 
@@ -1021,11 +1023,24 @@ export class PushPullTool implements Tool {
    * recess (pushed inward) reads negative.
    */
   private _reportMeasurement(distance: number): void {
+    const axes = this._pushAxes()
     if (this.typed !== '') {
-      this.onMeasurementCb(this._typedReadout())
+      this.onMeasurementCb(this._typedReadout(), axes)
       return
     }
-    this.onMeasurementCb(formatLength(distance))
+    this.onMeasurementCb(formatLength(distance), axes)
+  }
+
+  /**
+   * The axis the push depth runs along, for the Measurements box's dot: the
+   * face or region normal, which is the direction the extrusion travels.
+   * Covers the post-commit retype window too — both stages carry the same
+   * `PushPullTarget`, and it carries the normal in either variant.
+   */
+  private _pushAxes(): MeasurementAxes | undefined {
+    const target = this.stage.kind === 'dragging' ? this.stage.target : this.retype.spec?.target
+    if (target === undefined) return undefined
+    return [measurementAxisFor(target.normal, getDrawingAxes(this.wasmScene))]
   }
 
   private _drawGhostPreview(

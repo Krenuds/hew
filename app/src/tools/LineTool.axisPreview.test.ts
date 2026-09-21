@@ -18,15 +18,16 @@ import { LineTool } from './LineTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
-import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
+import { axisColorForDirection, axisColorsForTheme, AXIS_LABEL_TOL_DOT } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import type { DrawingAxes } from './drawingAxes'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
-/** Matches `LINE_AXIS_PREVIEW_TOL_DOT` in LineTool.ts (10 degrees). */
-const TOL = Math.cos((10 * Math.PI) / 180)
+/** The one shared labeling tolerance (10 degrees) every axis-naming surface
+ *  uses — imported rather than restated, so this file cannot drift from it. */
+const TOL = AXIS_LABEL_TOL_DOT
 
 const WORLD_FRAME_FLAT = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
 const MOVED_FRAME_FLAT = [5, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1] // red = world +Y
@@ -76,8 +77,9 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
 
 function makeTool(scene: WasmScene) {
   const preview = new THREE.Group()
-  const tool = new LineTool(scene, preview, vi.fn(), vi.fn(), vi.fn(), vi.fn())
-  return { tool, preview }
+  const onMeasurement = vi.fn()
+  const tool = new LineTool(scene, preview, vi.fn(), vi.fn(), vi.fn(), onMeasurement)
+  return { tool, preview, onMeasurement }
 }
 
 /** The single rubber-band preview segment, or undefined if none is drawn. */
@@ -180,5 +182,37 @@ describe('LineTool — soft/hard axis preview colour and weight (design §2c)', 
     tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis', direction: [1, 0, 0] }), RAY)
     const line = previewLine(preview)
     expect(line!.material.color.getHex()).toBe(expectedAxisColorHex([1, 0, 0]))
+  })
+})
+
+/**
+ * The Measurements box's dot and the rubber band are two renderings of one
+ * fact, and they share the tolerance that decides it. A drag where the line
+ * is green and the dot is grey would be the worst of both.
+ */
+describe('LineTool — the readout\'s axis agrees with the rubber band', () => {
+  it('names the axis the preview paints, for the same drag', () => {
+    const { tool, preview, onMeasurement } = makeTool(makeWasmScene())
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0.3, z: 0, kind: 'on-axis', direction: [1, 0, 0] }), RAY)
+
+    expect(previewLine(preview)!.material.color.getHex()).toBe(expectedAxisColorHex([1, 0, 0]))
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([0])
+  })
+
+  it('reports neutral for the drag the preview leaves blue', () => {
+    const { tool, onMeasurement } = makeTool(makeWasmScene())
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 3, y: 3, z: 0 }), RAY)
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([null])
+  })
+
+  it('follows a moved frame, as the preview does', () => {
+    // Red is world +Y in this frame, so a segment drawn along world +Y is the
+    // red axis — and neither the line nor the dot may call it green.
+    const { tool, onMeasurement } = makeTool(makeWasmScene(MOVED_FRAME_FLAT))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 4, z: 0 }), RAY)
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([0])
   })
 })

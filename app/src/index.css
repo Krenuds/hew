@@ -49,6 +49,20 @@ textarea,
   }
 }
 
+/* VCB axis dot (viewport/measurementAxes.ts): which drawing axis each typed
+ * dimension runs along. Sized as a legend swatch beside the mono readout, not
+ * as a cursor marker -- no ring, no halo, no pulse. The colour is set inline
+ * from the axis token; a faded dot means that dimension has not been typed
+ * yet. */
+.hew-vcb-axis-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: 0.05em;
+}
+
 /* Snap/inference dot pulse (Refinement pass, `07_inference_feedback.md` — the
  * precise on-cursor marker; see viewport/SnapDot.tsx). ~1.6s ease-in-out
  * scale+opacity pulse; the keyframes carry the -50%/-50% centering so the

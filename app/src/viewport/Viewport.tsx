@@ -25,6 +25,7 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
 import { RenderScheduler } from './renderScheduler'
+import type { MeasurementAxes } from './measurementAxes'
 import { POLE_TILT, STANDARD_VIEWS, type StandardView } from './standardViews'
 import { publishCameraPose, resetCameraPoseBus } from './cameraPoseBus'
 import {
@@ -465,8 +466,12 @@ interface Props {
   /** Called with the live measurement text from tools that support VCB entry.
    *  `frozen` (Tape Measure only, tape-measure-rework part 1) is true when
    *  `text` is a finished reading kept on screen for reference rather than a
-   *  live typed buffer — every other tool's callback never passes it. */
-  onMeasurement?: (text: string, frozen?: boolean) => void
+   *  live typed buffer — every other tool's callback never passes it.
+   *  `axes` (Rectangle, Move, Line, Push/Pull) names the drawing axis each
+   *  dimension in `text` runs along, for the Measurements box's per-dimension
+   *  dots — see `measurementAxes.ts`. Every other tool omits it, and omitting
+   *  it renders the value the way it always has. */
+  onMeasurement?: (text: string, frozen?: boolean, axes?: MeasurementAxes) => void
   /** Fired when the Tape Measure tool arms a "resize the model?" confirmation
    *  (design tool-parity §3): the parent renders the confirmation modal and
    *  resolves it via `ViewportApi.confirmPendingRescale` /
@@ -6120,7 +6125,7 @@ export default function Viewport({
         (objectId) => {
           handleSceneRefresh({ objectIds: [objectId] })
         },
-        (text: string) => { onMeasurementRef.current?.(text) },
+        (text: string, axes?: MeasurementAxes) => { onMeasurementRef.current?.(text, undefined, axes) },
         sketchPlaneCache,
       )
       // Scope the tool to the current editing context (component-edit-
@@ -6224,7 +6229,7 @@ export default function Viewport({
         (objectId) => {
           handleSceneRefresh({ objectIds: [objectId] })
         },
-        (text: string) => { onMeasurementRef.current?.(text) },
+        (text: string, axes?: MeasurementAxes) => { onMeasurementRef.current?.(text, undefined, axes) },
         sketchPlaneCache,
       )
       // Scope the tool to the current editing context (component-edit-
@@ -6249,7 +6254,7 @@ export default function Viewport({
           sceneRenderer.refreshGuides()
         },
         handleToast,
-        (text: string) => { onMeasurementRef.current?.(text) },
+        (text: string, axes?: MeasurementAxes) => { onMeasurementRef.current?.(text, undefined, axes) },
         // Durable extrude-as-new toggle → badge the Push/Pull cursor with a
         // `+` (the same cursorFor pipeline as Move's copy toggle).
         (on: boolean) => {
@@ -6402,7 +6407,7 @@ export default function Viewport({
           else onSelectManyRef.current?.(nodes, 'replace')
         },
         handleToast,
-        (text: string) => { onMeasurementRef.current?.(text) },
+        (text: string, axes?: MeasurementAxes) => { onMeasurementRef.current?.(text, undefined, axes) },
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         // Durable copy toggle → badge the Move cursor with a `+` (the same
         // cursorFor pipeline the tool-switch cursor uses).

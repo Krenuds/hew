@@ -35,6 +35,7 @@ import type { Projection } from '../viewport/cameraRig'
 import { SnapDot } from '../viewport/SnapDot'
 import { InferenceTooltip } from '../viewport/InferenceTooltip'
 import { MeasurementBox } from '../viewport/MeasurementBox'
+import { sameMeasurementAxes, type MeasurementAxes } from '../viewport/measurementAxes'
 import { CAMERA_HANDOFF_TOOL_NAMES } from '../panels/cameraHandoffTools'
 import { nodeKey, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
@@ -527,6 +528,7 @@ export function ShopApp() {
   const [inferenceInfo, setInferenceInfo] = useState<InferenceInfo | null>(null)
   const [measurement, setMeasurement] = useState('')
   const [measurementFrozen, setMeasurementFrozen] = useState(false)
+  const [measurementAxes, setMeasurementAxes] = useState<MeasurementAxes | undefined>(undefined)
 
   // Toast (design §9): single slot, in 180ms ease-out, auto-out after 4s
   // over 160ms (`.shop-toast-in`/`.shop-toast-out`, index.css). `leaving`
@@ -1897,9 +1899,10 @@ export function ShopApp() {
               if (node.kind === 'object' || node.kind === 'group' || node.kind === 'instance') isolateNode(node)
             }}
             onInferenceChange={setInferenceInfo}
-            onMeasurement={(text, frozen) => {
+            onMeasurement={(text, frozen, axes) => {
               setMeasurement(text)
               setMeasurementFrozen(frozen ?? false)
+              setMeasurementAxes((prev) => (sameMeasurementAxes(prev, axes) ? prev : axes))
             }}
             onTapeMeasurePoints={(points) => setTapeAnchors([...points])}
             onRescaleArmed={handleRescaleArmed}
@@ -1948,6 +1951,7 @@ export function ShopApp() {
           toolName={activeTool}
           value={measurement}
           frozen={measurementFrozen}
+          axes={measurementAxes}
           variant="shop"
           orientation={orientation}
           // Playtest fix 5: both docking spots clear the live Parts sheet via

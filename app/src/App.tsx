@@ -11,6 +11,7 @@ import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
+import { sameMeasurementAxes, type MeasurementAxes } from './viewport/measurementAxes'
 import { ViewportHUD } from './viewport/ViewportHUD'
 import { ViewCube, VIEW_CUBE_TWEEN_MS } from './viewport/ViewCube'
 import { regionById } from './viewport/viewCubeRegions'
@@ -288,6 +289,10 @@ export default function App() {
    *  typed buffer — every other tool's callback never passes `frozen`, so
    *  this stays false for them. */
   const [measurementFrozen, setMeasurementFrozen] = useState(false)
+  /** The drawing axis each dimension in `measurement` runs along, for the
+   *  Measurements box's per-dimension dots (`viewport/measurementAxes.ts`).
+   *  Undefined for every tool that doesn't report them. */
+  const [measurementAxes, setMeasurementAxes] = useState<MeasurementAxes | undefined>(undefined)
   /** Live inference-cursor info for the tooltip chip. */
   const [inferenceInfo, setInferenceInfo] = useState<InferenceInfo | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -985,9 +990,13 @@ export default function App() {
     setSnapKind(kind)
   }, [])
 
-  const handleMeasurement = useCallback((text: string, frozen = false) => {
+  const handleMeasurement = useCallback((text: string, frozen = false, axes?: MeasurementAxes) => {
     setMeasurement(text)
     setMeasurementFrozen(frozen)
+    // `setMeasurement` bails out of a re-render when the text repeats (a
+    // push/pull drag emits the same string on consecutive frames); a fresh
+    // array never would, so compare by value to keep that.
+    setMeasurementAxes((prev) => (sameMeasurementAxes(prev, axes) ? prev : axes))
   }, [])
 
   const handleInferenceChange = useCallback((info: InferenceInfo | null) => {
@@ -5780,7 +5789,7 @@ export default function App() {
               can't see moves into its own children). display:contents keeps
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
-            <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} />
+            <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} axes={measurementAxes} />
             <ViewportHUD
               onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
               onOrbit={() => activateTool('Orbit')}

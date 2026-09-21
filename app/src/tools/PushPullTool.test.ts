@@ -68,6 +68,8 @@ function makeWasmScene(opts: {
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
     history_generation: vi.fn(() => 1n),
+    /** The document's drawing axes, world identity. */
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     pick_face: vi.fn(() => opts.facePick),
     // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
     // its `_in_instance` sibling instead while inside an instance context, so
@@ -461,6 +463,52 @@ describe('PushPullTool — typed sign precedence (face targets)', () => {
     typeAndCommit(tool, '-0.5')
 
     expect(pushPullDistance(scene)).toBeLessThan(0)
+  })
+})
+
+describe('PushPullTool — the axis behind the push depth', () => {
+  /** The push travels along the face normal, so that is the axis its dot
+   *  names (viewport/measurementAxes.ts). */
+  for (const [normal, axis] of [
+    [[0, 0, 1], 2],
+    [[0, -1, 0], 1],
+    [[1, 0, 0], 0],
+  ] as [[number, number, number], number][]) {
+    it(`a [${normal.join(',')}] face reports axis ${axis}`, () => {
+      const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), faceNormal: normal })
+      const { tool, onMeasurement } = makeTool(scene)
+
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onKey({ key: '2' } as KeyboardEvent)
+
+      expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([axis])
+    })
+  }
+
+  it('an oblique face reports neutral', () => {
+    const k = 1 / Math.sqrt(3)
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), faceNormal: [k, k, k] })
+    const { tool, onMeasurement } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onKey({ key: '2' } as KeyboardEvent)
+
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([null])
+  })
+
+  // The post-commit retype window pushes the same face again, so it names the
+  // same axis — both stages carry the same target.
+  it('the retype window keeps the committed face\'s axis', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), faceNormal: [1, 0, 0] })
+    const { tool, onMeasurement } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    for (const ch of '2') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent) // commits, arms the window
+    onMeasurement.mockClear()
+    tool.onKey({ key: '3' } as KeyboardEvent)
+
+    expect(onMeasurement.mock.calls.at(-1)?.[1]).toEqual([0])
   })
 })
 
