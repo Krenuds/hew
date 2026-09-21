@@ -2028,6 +2028,11 @@ pub struct Scene {
     /// (not persisted); the kernel's own `hidden` flag is the undo tombstone.
     hidden_objects: std::collections::HashSet<ObjectId>,
     hidden_instances: std::collections::HashSet<InstanceId>,
+    /// User-hidden world sketches, the same session-only posture
+    /// ([`Scene::set_hidden_sketches`]): a hidden sketch is dropped from the
+    /// inference scene and from region picking, so it is neither snapped to
+    /// nor extruded, offset, or swept by a click that lands on it.
+    hidden_sketches: std::collections::HashSet<SketchId>,
     /// Definition sketches registered at the active edit instance's WORLD
     /// pose. Only one component placement is editable at a time; keeping this
     /// scoped avoids duplicate/ghost inference at sibling placements.
@@ -2245,6 +2250,10 @@ impl Scene {
     /// the sketch at the call site instead (see those methods).
     fn register_sketch(&mut self, id: SketchId) {
         self.inference.remove_sketch(id);
+        if self.hidden_sketches.contains(&id) {
+            // Hidden: leave it unregistered, exactly as a hidden solid is.
+            return;
+        }
         if self.doc.sketch_owner_component(id).is_some() {
             // A definition sketch has no world position of its own. Direct
             // mutation call sites use this helper without a DocChange, so
@@ -2481,6 +2490,7 @@ impl Scene {
             mesh_cache: SecondaryMap::new(),
             hidden_objects: std::collections::HashSet::new(),
             hidden_instances: std::collections::HashSet::new(),
+            hidden_sketches: std::collections::HashSet::new(),
             active_inference_instance: None,
             active_inference_sketches: Vec::new(),
             api_connections: std::collections::HashMap::new(),
@@ -5124,7 +5134,7 @@ impl Scene {
     /// the UI falls back to a positional label. Pass `Some("")` to set an
     /// explicit empty string — the kernel and UI decide how to display it.
     ///
-    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    /// `kind`: 0 = object, 1 = group, 2 = instance, 3 = sketch.
     pub fn set_node_name(
         &mut self,
         kind: u8,
@@ -5145,7 +5155,7 @@ impl Scene {
     /// ordered list of folder-path segments (root first), e.g. `["Structure",
     /// "Roof"]`. No-op (no undo entry) if the tag is already present.
     ///
-    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    /// `kind`: 0 = object, 1 = group, 2 = instance, 3 = sketch.
     pub fn add_node_tag(&mut self, kind: u8, id: u64, path: Vec<String>) -> Result<(), ApiError> {
         let node = node_id(kind, id)?;
         let change = self.doc.add_node_tag(node, path.clone()).map_err(doc_err)?;
@@ -5206,7 +5216,7 @@ impl Scene {
     /// Remove the first occurrence of `path` from a visible tree node's tag
     /// list (undoable). No-op (no undo entry) if the path is not present.
     ///
-    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    /// `kind`: 0 = object, 1 = group, 2 = instance, 3 = sketch.
     pub fn remove_node_tag(
         &mut self,
         kind: u8,
@@ -5231,7 +5241,7 @@ impl Scene {
     ///
     /// Returns an empty `Vec` if the node is stale, hidden, or has no tags.
     ///
-    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    /// `kind`: 0 = object, 1 = group, 2 = instance, 3 = sketch.
     pub fn node_tags(&self, kind: u8, id: u64) -> Result<Vec<String>, ApiError> {
         let node = node_id(kind, id)?;
         let tags = self
@@ -5314,7 +5324,7 @@ impl Scene {
 
     /// Whether a node is USER-hidden (persisted view state, manifest v6).
     ///
-    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    /// `kind`: 0 = object, 1 = group, 2 = instance, 3 = sketch.
     pub fn node_user_hidden(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
         let node = node_id(kind, id)?;
         Ok(self.doc.node_user_hidden(node))
@@ -5323,7 +5333,7 @@ impl Scene {
     /// Sets a node's USER-hidden flag (persisted view state, not
     /// undoable — matching [`Scene::set_tag_hidden`]).
     ///
-    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    /// `kind`: 0 = object, 1 = group, 2 = instance, 3 = sketch.
     pub fn set_node_user_hidden(
         &mut self,
         kind: u8,
@@ -7406,6 +7416,9 @@ impl Scene {
         let dir = kernel::Vec3::new(dx, dy, dz);
         let mut best: Option<(f64, f64, SketchId, SketchRegionId)> = None;
         for sid in self.doc.sketch_ids() {
+            if self.hidden_sketches.contains(&sid) {
+                continue; // user-hidden: not there to be clicked
+            }
             let Some(sketch) = self.doc.sketch(sid) else {
                 continue;
             };
@@ -7645,6 +7658,27 @@ impl Scene {
             }
         }
         self.refresh_active_definition_inference();
+    }
+
+    /// Set the user-hidden world sketches (session-only; this *replaces* the
+    /// previous set) — [`Scene::set_hidden`]'s counterpart for sketches, kept
+    /// a separate call so neither disturbs the other's registrations. A
+    /// hidden sketch leaves the inference scene, so nothing snaps to it and
+    /// `pick_sketch` / `pick_sketch_edge` / `pick_sketch_vertex` never report
+    /// it, and `pick_sketch_region` skips it; showing it again re-registers
+    /// it. Only sketches whose state changed are touched.
+    pub fn set_hidden_sketches(&mut self, sketch_ids: &[u64]) {
+        let next: std::collections::HashSet<SketchId> =
+            sketch_ids.iter().map(|&h| sketch_id(h)).collect();
+        let changed: Vec<SketchId> = self
+            .hidden_sketches
+            .symmetric_difference(&next)
+            .copied()
+            .collect();
+        self.hidden_sketches = next;
+        for id in changed {
+            self.register_sketch(id);
+        }
     }
 
     // ------------------------------------------------------- materials
@@ -10458,6 +10492,7 @@ impl Scene {
         // stale id can't keep a fresh object out of inference.
         self.hidden_objects.clear();
         self.hidden_instances.clear();
+        self.hidden_sketches.clear();
         self.active_inference_instance = None;
         self.active_inference_sketches.clear();
 
@@ -10988,6 +11023,62 @@ mod tests {
     /// most recently drawn one — and resolves nested regions to the
     /// innermost. (An extruded region cannot match: its scaffolding was
     /// deleted with it.)
+    /// A user-hidden sketch is not there to be clicked or snapped to: region
+    /// picking and the inference-backed sketch pick both pass through it to
+    /// whatever is behind, and showing it again brings it back.
+    #[test]
+    fn a_hidden_sketch_is_neither_picked_nor_snapped_to() {
+        let mut scene = Scene::new();
+        let under = scene.begin_ground_sketch();
+        draw_rect(&mut scene, under, 0.0, 0.0, 4.0, 4.0);
+        let over = scene.begin_ground_sketch();
+        draw_rect(&mut scene, over, 1.0, 1.0, 2.0, 2.0);
+
+        // The smaller coplanar region wins the pick while both are shown.
+        let region = |scene: &Scene| {
+            scene
+                .pick_sketch_region(1.5, 1.5, 5.0, 0.0, 0.0, -1.0)
+                .map(|p| p.sketch())
+        };
+        // `over`'s own x = 1 edge, well inside `under`'s interior.
+        let edge = |scene: &Scene| scene.pick_sketch(1.0, 1.5, 5.0, 0.0, 0.0, -1.0);
+        assert_eq!(region(&scene), Some(over));
+        assert_eq!(edge(&scene), Some(over));
+
+        scene.set_hidden_sketches(&[over]);
+        assert_eq!(region(&scene), Some(under), "the pick falls through");
+        assert_eq!(edge(&scene), None, "its edges left the inference scene");
+
+        // A later edit re-registers sketches; a hidden one must stay out.
+        draw_rect(&mut scene, under, 6.0, 6.0, 7.0, 7.0);
+        assert_eq!(edge(&scene), None);
+
+        scene.set_hidden_sketches(&[]);
+        assert_eq!(region(&scene), Some(over));
+        assert_eq!(edge(&scene), Some(over));
+    }
+
+    /// A sketch is node kind 3 across the FFI: the node-keyed calls reach it,
+    /// and the user-hidden registry reports it back as kind 3.
+    #[test]
+    fn a_sketch_is_node_kind_three() {
+        let mut scene = Scene::new();
+        let s = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s, 0.0, 0.0, 1.0, 1.0);
+
+        scene
+            .set_node_name(3, s, Some("Ground floor".to_string()))
+            .expect("a sketch takes a name");
+        scene
+            .add_node_tag(3, s, vec!["Plans".to_string()])
+            .expect("and a tag");
+        scene.set_node_user_hidden(3, s, true).expect("and hides");
+
+        assert_eq!(scene.user_hidden_kinds(), vec![3]);
+        assert_eq!(scene.user_hidden_ids(), vec![s]);
+        assert!(scene.node_user_hidden(3, s).unwrap());
+    }
+
     #[test]
     fn pick_sketch_region_targets_any_sketch() {
         let mut scene = Scene::new();
