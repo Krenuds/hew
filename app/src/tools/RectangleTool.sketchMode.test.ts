@@ -12,6 +12,7 @@ import { makeSketchPlaneCache, type SketchPlaneCache } from './sketchGesture'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { formatLength } from '../settings/units'
 
 /**
  * A ray that genuinely PIERCES the tilted sketch's plane on the sketch
@@ -201,5 +202,53 @@ describe('RectangleTool — sketch mode (drawing on a hovered non-ground sketch)
     expect(new Set(segmentCalls.map((s) => s.sketch)).size).toBe(1)
     // The ground fast path: every committed z is exactly 0.
     expect(segmentCalls.every((s) => s.a[2] === 0 && s.b[2] === 0)).toBe(true)
+  })
+})
+
+/**
+ * The live readout names the same two numbers typing them back would use.
+ *
+ * `faceRectangleCorners` swaps corners B and D when the drag's two signed
+ * in-plane extents have opposite signs, so that the preview winds CCW from
+ * +normal. Reading the two dimensions off the spacing of those corners
+ * therefore reports them in the opposite order for exactly those drags, while
+ * `_commitTyped` always applies the first typed number along the basis's `u`.
+ * The readout and the commit have to agree, or "3, 2" draws a different
+ * rectangle from the one the readout was describing.
+ */
+describe('RectangleTool \u2014 the live readout agrees with typing it back', () => {
+  /** normal [0,-1,0] \u2192 u = [0,0,1] (world +Z), v = [-1,0,0] (world \u2212X).
+   *  Anchor (0,0,2) \u2192 cursor (3,0,4) gives du = +2 along u and dv = \u22123 along
+   *  v: opposite signs, so this is a winding-reversing drag. */
+  const ANCHOR = { x: 0, y: 0, z: 2 }
+  const CURSOR = { x: 3, y: 0, z: 4 }
+
+  /** The four corners the drag is previewing, as an order-independent set. */
+  const DRAWN_CORNERS = new Set(['0,0,2', '3,0,2', '3,0,4', '0,0,4'])
+
+  it('reports u first, v second \u2014 not the corner spacing', () => {
+    const { scene } = makeWasmScene({ sketchPick: TILTED_SKETCH })
+    const { tool, onMeasurement } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap(ANCHOR), RAY)
+    tool.onPointerMove(makeSnap(CURSOR), RAY)
+
+    // 2 along u (the +Z extent) first, 3 along v (the X extent) second.
+    // Corner spacing would have said 3 \u00d7 2.
+    expect(onMeasurement).toHaveBeenLastCalledWith(`${formatLength(2)} \u00d7 ${formatLength(3)}`)
+  })
+
+  it('typing those two numbers back draws the rectangle the readout described', () => {
+    const { scene, segmentCalls, setNextRegionsCreated } = makeWasmScene({ sketchPick: TILTED_SKETCH })
+    const { tool } = makeTool(scene)
+    setNextRegionsCreated([123n])
+
+    tool.onPointerDown(makeSnap(ANCHOR), RAY)
+    tool.onPointerMove(makeSnap(CURSOR), RAY)
+    for (const ch of '2,3') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+
+    expect(segmentCalls).toHaveLength(4)
+    expect(new Set(segmentCalls.map((s) => s.a.join(',')))).toEqual(DRAWN_CORNERS)
   })
 })
