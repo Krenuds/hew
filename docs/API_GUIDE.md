@@ -433,14 +433,15 @@ kind, name, bounding box, watertightness, tags, group membership:
 
 ```json
 {"document": {"objects": 5, "groups": 1, "sketches": 0, "components": 0,
-              "instances": 0, "materials": 0, "guides": 0},
+              "instances": 0, "materials": 0, "guides": 0, "annotations": 0},
  "tree": [
   {"id": "obj_7", "kind": "object", "name": "Top", "watertight": true,
    "bbox": {"min": [0.0, 0.0, 0.72], "max": [1.2, 0.8, 0.76]}, "tags": []},
   {"id": "grp_5", "kind": "group", "name": "Legs", "watertight": null,
    "bbox": {"min": [0.03, 0.03, 0.0], "max": [1.17, 0.77, 0.72]},
    "members": [ ... ]}],
- "sketches": [], "components": [], "materials": [], "guides": [], "tags": []}
+ "sketches": [], "components": [], "materials": [], "guides": [],
+ "annotations": [], "tags": []}
 ```
 
 For geometry, `hew.query.faces` returns each face's plane, area,
@@ -476,6 +477,93 @@ rasterizer — no GPU, no viewport, no display.
 `include_ids: true` additionally returns a per-pixel id buffer and the
 palette it indexes, so you can answer "which object is at pixel
 (x, y)" without guessing from color.
+
+## Dimension it
+
+A dimension is part of the model, not part of a drawing: it saves into
+the `.hew`, it is there when someone opens the file in the app, and it
+follows the geometry it measures.
+
+```json
+{"method": "hew.annotate.linear",
+ "params": {"a": {"at": [0.0, 0.0, 0.0], "on": "obj_7"},
+            "b": {"at": [1.2, 0.0, 0.0], "on": "obj_7"},
+            "offset": [0.0, -0.15, 0.0]}}
+{"result": {"annotation": "ann_100000001"}}
+```
+
+An anchor is `{"at": <point>, "on": <entity>}`. `at` takes coordinates or
+a derived point, like every other point parameter. `on` is the part that
+matters: it names the Object, Group, or Instance the anchor rides, so
+moving that part takes its dimensions along. Leave `on` out — or pass a
+bare `[x, y, z]` in place of the whole object — and you get a
+free-floating anchor that stays where you put it while the model moves
+out from under it.
+
+`offset` drags the dimension line out of the line being measured, the
+same gesture the Dimension tool makes. You do not have to name the plane
+it draws in; omitted, it is the plane through those two things.
+
+For a note rather than a measurement, `hew.annotate.leader` runs a
+leader line out to some text:
+
+```json
+{"method": "hew.annotate.leader",
+ "params": {"anchor": {"at": [0.6, 0.4, 0.76], "on": "obj_7"},
+            "offset": [0.3, 0.3, 0.1], "text": "3/4 PLY"}}
+```
+
+`hew.annotate.update` re-places one or re-words it (`text: null` on a
+dimension drops an override back to the measurement), and
+`hew.annotate.delete` removes it. They read back in
+`hew.query.scene`'s `annotations`, which reports `measurement` as a plain
+number in meters — the wording depends on a unit format, and that belongs
+to whatever draws it.
+
+`hew.annotate.radial` is declared but not implemented yet: the kernel
+measures a radius against the exact circle the app captured when the user
+picked the curve, and there is no way to name a curve through the API to
+capture one. It refuses `unimplemented` until there is.
+
+## Draw it to scale
+
+`hew.view.snapshot` renders without dimensions — text in a raster needs a
+glyph rasterizer the headless renderer does not have. For a drawing with
+its dimensions on it, use `hew.view.line_drawing`, which removes hidden
+lines and letters the annotations:
+
+```sh
+hew-cli dispatch hew.view.line_drawing \
+  '{"view": "top", "format": "svg", "scale": 0.02,
+    "dimension_units": "arch", "path": "plan.svg"}' \
+  --file table.hew
+```
+
+`dimension_units` is what the measurements read in — `"m"`, `"cm"`,
+`"mm"`, `"arch"` (`5' 3-1/8"`), `"frac_in"`, or `"dec_in"`. It defaults
+to meters, because headless has no app to take a display preference from
+and the document does not store one. `dimensions: false` leaves them out.
+
+`format: "segments"` gives you the same drawing as vectors instead — and
+the annotations come back as their own block, since a label is a string
+with a position and the `segments`/`kinds`/`ids` arrays have nowhere to
+put one:
+
+```json
+{"segments": [[-1.2, -0.6, 1.2, -0.6], ...],
+ "kinds": ["hard", ...], "ids": ["obj_7", ...],
+ "annotations": {"segments": [[-1.2, -0.9, 1.2, -0.9]],
+                 "labels": [{"x": 0.0, "y": -0.9, "text": "8'",
+                             "detached": false}]},
+ "bounds": [-1.5, -0.94, 1.24, 0.62], "count": 4}
+```
+
+`detached` means the annotation lost the geometry it measured — the part
+it was anchored to was deleted or consumed. The SVG draws those in a
+warning colour; here you decide.
+
+`hew.print.pdf` takes the same two parameters and puts the dimensions on
+a real sheet, with a title block and a scale bar.
 
 ## Undo carefully in a live session
 

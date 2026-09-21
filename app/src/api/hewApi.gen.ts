@@ -93,6 +93,82 @@ export class HewApiError extends Error {
 export type UnspecifiedShape = Record<string, unknown>
 
 /**
+ * `hew.annotate.delete` (v1) — Delete one annotation.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_annotation
+ */
+export interface AnnotateDeleteParams {
+  annotation: string
+}
+
+export interface AnnotateDeleteResult {}
+
+/**
+ * `hew.annotate.leader` (v1) — Add leader text pointing at an anchor.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: degenerate_annotation, unknown_object, unknown_group, unknown_instance, unknown_entity, locator_missed, ambiguous_locator, no_such_point
+ */
+export interface AnnotateLeaderParams {
+  anchor: UnspecifiedShape
+  offset: [number, number, number]
+  text: string
+}
+
+export interface AnnotateLeaderResult {
+  annotation: string
+}
+
+/**
+ * `hew.annotate.linear` (v1) — Dimension the distance between two anchors.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: degenerate_annotation, unknown_object, unknown_group, unknown_instance, unknown_entity, locator_missed, ambiguous_locator, no_such_point
+ */
+export interface AnnotateLinearParams {
+  a: UnspecifiedShape
+  b: UnspecifiedShape
+  offset: [number, number, number]
+  /** omitted: the plane through the a-b line and the offset */
+  plane?: { normal: [number, number, number]; origin: [number, number, number] }
+  /** replaces the measurement */
+  text?: string
+}
+
+export interface AnnotateLinearResult {
+  annotation: string
+}
+
+/**
+ * `hew.annotate.radial` (v1) — Dimension a circle's radius or diameter.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unimplemented
+ */
+export type AnnotateRadialParams = UnspecifiedShape
+
+export type AnnotateRadialResult = UnspecifiedShape
+
+/**
+ * `hew.annotate.update` (v1) — Re-place an annotation's anchors, offset, or text.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_annotation, degenerate_annotation, unknown_object, unknown_group, unknown_instance, unknown_entity, locator_missed, ambiguous_locator, no_such_point
+ */
+export interface AnnotateUpdateParams {
+  a?: UnspecifiedShape
+  anchor?: UnspecifiedShape
+  annotation: string
+  b?: UnspecifiedShape
+  leader_dir?: [number, number, number]
+  offset?: [number, number, number]
+  /** omitted: the plane through the a-b line and the offset */
+  plane?: { normal: [number, number, number]; origin: [number, number, number] }
+  /** null clears a dimension's override */
+  text?: string | null
+}
+
+export interface AnnotateUpdateResult {
+  detached: boolean
+}
+
+/**
  * `hew.attr.delete` (v1) — Delete one attribute key or a whole namespace.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, invalid_attr_name, reserved_attr_namespace, unknown_attr, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
@@ -733,13 +809,17 @@ export interface MetaHelloResult {
 }
 
 /**
- * `hew.print.pdf` (v1) — Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
+ * `hew.print.pdf` (v2) — Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
  */
 export interface PrintPdfParams {
   /** as hew.view.snapshot; scaled prints use its direction with parallel projection */
   camera?: UnspecifiedShape
+  /** unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m */
+  dimension_units?: "m" | "cm" | "mm" | "arch" | "frac_in" | "dec_in"
+  /** draw the document's dimensions and leader text; defaults to true; line art only — a shaded page has no vector pass to letter */
+  dimensions?: boolean
   /** line art: dashed hidden lines */
   include_hidden?: boolean
   /** defaults to 12.7 (½ in) */
@@ -1368,13 +1448,17 @@ export interface ViewCameraParams {
 export interface ViewCameraResult {}
 
 /**
- * `hew.view.line_drawing` (v1) — Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
+ * `hew.view.line_drawing` (v2) — Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines, and the document's dimensions and leader text — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
  */
 export interface ViewLineDrawingParams {
   /** identical vocabulary to hew.view.snapshot's camera; mutually exclusive with view and scene */
   camera?: UnspecifiedShape
+  /** unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m */
+  dimension_units?: "m" | "cm" | "mm" | "arch" | "frac_in" | "dec_in"
+  /** draw the document's dimensions and leader text; defaults to true */
+  dimensions?: boolean
   /** defaults to svg */
   format?: "svg" | "segments"
   /** defaults to false; when true, hidden pieces are returned too (kind "hidden", dashed in SVG) */
@@ -1392,7 +1476,9 @@ export interface ViewLineDrawingParams {
 }
 
 export interface ViewLineDrawingResult {
-  /** [min_x, min_y, max_x, max_y] in view-plane metres; null when empty */
+  /** format segments with dimensions: the projected annotation drawing. A label is a string with a position, which the parallel segments/kinds/ids arrays have nowhere to put. For format svg it is already in the document. */
+  annotations?: unknown | null
+  /** [min_x, min_y, max_x, max_y] in view-plane metres, annotations included; null when empty */
   bounds?: [number, number, number, number]
   count: number
   /** public id of the entity each segment belongs to */
@@ -1493,6 +1579,14 @@ export class HewApiClient {
   private async mutate<TResult>(method: string, params: unknown): Promise<TResult> {
     const envelope = await this.call<{ results: [TResult]; label: string }>(method, params)
     return envelope.results[0]
+  }
+
+  readonly annotate = {
+    delete: (params: AnnotateDeleteParams): Promise<AnnotateDeleteResult> => this.mutate('hew.annotate.delete', params),
+    leader: (params: AnnotateLeaderParams): Promise<AnnotateLeaderResult> => this.mutate('hew.annotate.leader', params),
+    linear: (params: AnnotateLinearParams): Promise<AnnotateLinearResult> => this.mutate('hew.annotate.linear', params),
+    radial: (params: AnnotateRadialParams): Promise<AnnotateRadialResult> => this.mutate('hew.annotate.radial', params),
+    update: (params: AnnotateUpdateParams): Promise<AnnotateUpdateResult> => this.mutate('hew.annotate.update', params),
   }
 
   readonly attr = {

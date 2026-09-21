@@ -33,7 +33,7 @@
 > `app/src/settings/units.ts`'s own setter — the same code paths the
 > Camera menu and Settings window already use. So `--live` today is real
 > for the kernel-served command surface (sketch/solid/structure/entity/
-> style/attrs/history/scenes — the bulk of the protocol), for
+> style/annotate/attrs/history/scenes — the bulk of the protocol), for
 > `save`/`export`, for these three view/display effects, and honestly
 > refuses the remaining host-effect commands that need filesystem or
 > rendering access this sandbox does not have. `hew.scenes.apply`
@@ -364,6 +364,16 @@ dedicated helper rather than that function, since there is no
 `EntityRef::Scene` to hand it. It parses back to the stable id the same
 way: opaque to clients, not to be constructed or decoded by hand.
 
+**Annotations are not entities either.** A dimension or leader (§7.3)
+carries neither an `EntityRef` nor a stable id, and the file format
+declines it one on purpose (HEW_FILE_FORMAT.md §4.8: "not independently
+addressable entities; their identity is their anchor"). Its public id is
+therefore minted from its live kernel key, `"ann_<hex>"`, on exactly the
+terms sketch sub-entities get: fully self-naming, stable within an open
+document session, re-resolved by clients after open or attach. A client
+re-reads them from `hew.query.scene`'s `annotations` array, and
+`hew.query.entity` answers one directly.
+
 ### 5.2 Faces and edges: solid geometry by locator, sketch edges by id
 
 Faces and edges of a **solid** deliberately have **no persistent public
@@ -671,7 +681,7 @@ for, not shipped.
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin; the saved depth; every undo/redo entry's label and origin) | Required |
 | `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2) | Standard (`core` grants `snapshot` and `line_drawing` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
 | `hew.print` | `pdf` (a full print job — paper/scale/tiling/marks — as a PDF, headless or live, §7.2) | Standard |
-| `hew.annotate` | dimensions, leader text | Reserved |
+| `hew.annotate` | `linear`, `leader`, `update`, `delete` — dimensions and leader text (§7.3); `radial` declared and unimplemented | Standard |
 | `hew.event` | notifications + `subscribe` | Reserved (§4.5) |
 
 Semantics notes, normative:
@@ -1096,11 +1106,91 @@ without a viewport; MCP exposes them as `hew_print_pdf` and
 `hew_line_drawing` whenever the connection's profile grants the
 underlying command (§13).
 
+Both draw the document's annotations (§7.3) by default — `dimensions:
+false` leaves them out — lettering each measurement in the unit format
+`dimension_units` names, over `hew.view.units`'s own vocabulary (`"m"`,
+`"cm"`, `"mm"`, `"arch"`, `"frac_in"`, `"dec_in"`, default `"m"`). A
+headless host has no app-level display preference and the document
+stores none, so the format belongs to the drawing rather than to the
+document. In SVG the annotations are in the document and a detached one
+is drawn in the warning colour; for `format: "segments"` they come back
+as their own `annotations` block — projected line work plus
+`{x, y, text, detached}` labels — because a label is a string with a
+position, and the parallel `segments`/`kinds`/`ids` arrays have nowhere
+to put one. Either way the reported `bounds` cover them, so a dimension
+standing off the model is not cropped out of the page. On
+`hew.print.pdf` they ride the vector pass, so `style: "shaded"` gets
+none; its labels are black, since PDF text here is greyscale.
+
+`hew.view.snapshot` renders **without** annotations, deliberately and
+for now: drawing text into a raster needs a glyph rasterizer, and
+`crates/softrender` has no text concept at all. Ask for a line drawing
+or a PDF when the dimensions matter.
+
 Refusals: `host_capability_missing` (a host with no render path — should
 not occur for `core`/`app`, both of which always grant a render route),
 `nothing_to_render` (an empty document, or a degenerate camera),
 `too_complex` (the `hlr` vector pass, on both commands — see above),
 `save_failed` (a `path` the host couldn't write), `unknown_scene`.
+
+### 7.3 Annotations
+
+Dimensions and leader text are a guides-style side collection: non-solid,
+non-topological entities that annotate the model without ever affecting
+watertightness. They live at the document root and carry no parent — an
+annotation *points into* a group or an instance, it does not live inside
+one — and an anchor can never reach a node inside a component definition.
+
+An **anchor** is `{"at": <point locator>, "on": <entity id>}`, or a bare
+point locator as shorthand for the same thing without `on`. `at` takes
+coordinates or a derived point (§5.3) like every other point parameter.
+`on` names the Object, Group, or Instance the anchor tracks, and it is
+what makes the annotation follow the geometry: the kernel carries the
+anchor through the exact world-space map of any transform on that node,
+and marks the annotation `detached` when the node is deleted or consumed
+by an operation. An anchor without `on` is free-floating — never
+re-anchored, and never detached. `detached` is never repaired
+automatically; only an `update` that actually changes an anchor or a
+geometry field clears it, which is why a text-only edit leaves the
+warning standing.
+
+`hew.annotate.linear` dimensions the distance between two anchors, with
+`offset` placing the dimension line out of the `a`-`b` line (the app's
+drag-out gesture). `plane` — the plane the dimension line and its
+extension lines are drawn in — is optional: omitted, it is the plane
+through the baseline and the offset, which is refused
+`degenerate_annotation` when the offset runs along the baseline and there
+is no such plane. `text` replaces the computed measurement verbatim.
+
+`hew.annotate.leader` places free-form text at the end of a leader line
+from its anchor. Its `text` is the content, not an override, so there is
+nothing to clear.
+
+`hew.annotate.update` re-places an existing annotation: any of its
+anchors, its `offset`, its `plane`, a radial's `leader_dir`, or its text.
+Omitted fields keep their stored value; a field belonging to a different
+kind is refused statically. On a dimension, `text: null` clears an
+override back to the computed measurement. It answers the resulting
+`detached` state, which is the one thing a caller cannot work out for
+itself.
+
+`hew.annotate.delete` removes one. Every command in the namespace is
+model-mutating and undoable, one undo entry per envelope, exactly like
+`hew.guide.*`.
+
+`hew.annotate.radial` is declared and **unimplemented**, answering the
+`unimplemented` refusal (§14). The kernel stores a radial dimension
+against the exact analytic circle captured from the curve the user
+picked; the API has no curve locator to capture one from yet, so the
+command waits for one rather than inventing a worse way to say it. The
+rendering side already covers radial dimensions, since a document
+authored in the app can carry them.
+
+Annotations report in `hew.query.scene`'s `annotations` array and through
+`hew.query.entity` on an `ann_` id (§5.1): kind, anchors, `detached`, and
+`measurement` — the measured length in meters, a number rather than a
+rendered string, because the displayed wording depends on a unit format
+that is a property of a drawing (§7.2) and not of the document.
 
 ## 8. Attribute dictionaries
 

@@ -50,8 +50,15 @@ import {
   pickOutsideEnd,
   buildRadialGeometry,
   pushCenterTick,
-  CENTER_TICK_HALF,
 } from './annotationLayout'
+import {
+  ANNOTATION_EXTENSION_OVERSHOOT_FRAC,
+  ANNOTATION_ARROW_LEN_FRAC,
+  ANNOTATION_ARROW_LEN_MIN,
+  ANNOTATION_ARROW_LEN_MAX,
+  ANNOTATION_ARROW_WIDTH_FRAC,
+  CENTER_TICK_HALF,
+} from './annotationStyle'
 import { writeFrameUvs, type UvFrameComponents } from '../tools/uvFrameMath'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
@@ -216,17 +223,8 @@ const ANNOTATION_LINE_WIDTH_PX = 2.0
  * toward unreadable — ~8-9px — before the reference-digit fix, Finding 1 of
  * the second playtest round). */
 const ANNOTATION_TEXT_SCREEN_PX = 14
-/** Extension lines run slightly past the dimension line (a fraction of the
- * offset's own length) — the small CAD-drafting overshoot convention. */
-const ANNOTATION_EXTENSION_OVERSHOOT_FRAC = 0.12
-/** Dimension-line arrowhead half-length, clamped to [MIN, MAX] meters and
- * otherwise a fraction of the dimension's own length — small dimensions get
- * proportionally small arrows, large ones don't grow arrows without bound. */
-const ANNOTATION_ARROW_LEN_FRAC = 0.06
-const ANNOTATION_ARROW_LEN_MIN = 0.02
-const ANNOTATION_ARROW_LEN_MAX = 0.12
-/** Arrowhead half-width as a fraction of its length (a narrow, readable V). */
-const ANNOTATION_ARROW_WIDTH_FRAC = 0.35
+// The camera-independent drawing constants live in './annotationStyle',
+// which the headless renderer's Rust port pins itself against.
 /**
  * renderOrder for annotation geometry. Annotations are DEPTH-TESTED, ordinary
  * document ink now (dimensions-playtest2.md §1 — findings 2/3: they used to

@@ -1,0 +1,11 @@
+{
+  "note": "GENERATED from app/src/viewport/annotationStyle.ts by app/src/annotationStyleDump.test.ts — do not edit. Regenerate with: REGENERATE_ANNOTATION_STYLE=1 pnpm --dir app exec vitest run src/annotationStyleDump.test.ts",
+  "constants": {
+    "extension_overshoot_frac": 0.12,
+    "arrow_len_frac": 0.06,
+    "arrow_len_min": 0.02,
+    "arrow_len_max": 0.12,
+    "arrow_width_frac": 0.35,
+    "center_tick_half": 0.03
+  }
+}

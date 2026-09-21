@@ -16,6 +16,344 @@ New to the API? Read docs/API_GUIDE.md first — how to connect, what
 a session looks like, and worked examples of the idioms these
 entries assume (transactions, `$ref`, face locators, refusals).
 
+## hew.annotate
+
+### `hew.annotate.delete`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Delete one annotation.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "annotation": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "annotation"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_annotation` — That dimension or label is no longer there — the model changed since it was picked. Click it again.
+
+### `hew.annotate.leader`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Add leader text pointing at an anchor.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "anchor": {},
+    "offset": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "text": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "anchor",
+    "offset",
+    "text"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "annotation": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "annotation"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `degenerate_annotation` — That dimension or label doesn't have a usable placement — its two points are on top of each other, or the circle it measures has no size. Drag to points with more room between them, or a bigger circle, and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `no_such_point`
+
+### `hew.annotate.linear`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Dimension the distance between two anchors.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "a": {},
+    "b": {},
+    "offset": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "plane": {
+      "additionalProperties": false,
+      "description": "omitted: the plane through the a-b line and the offset",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "text": {
+      "description": "replaces the measurement",
+      "type": "string"
+    }
+  },
+  "required": [
+    "a",
+    "b",
+    "offset"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "annotation": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "annotation"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `degenerate_annotation` — That dimension or label doesn't have a usable placement — its two points are on top of each other, or the circle it measures has no size. Drag to points with more room between them, or a bigger circle, and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `no_such_point`
+
+### `hew.annotate.radial`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Dimension a circle's radius or diameter.
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "description": "Reserved: needs a curve locator to capture the analytic circle from — refuses unimplemented",
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
+
+### `hew.annotate.update`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Re-place an annotation's anchors, offset, or text.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "a": {},
+    "anchor": {},
+    "annotation": {
+      "type": "string"
+    },
+    "b": {},
+    "leader_dir": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "offset": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "plane": {
+      "additionalProperties": false,
+      "description": "omitted: the plane through the a-b line and the offset",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "text": {
+      "description": "null clears a dimension's override",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "annotation"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "detached": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "detached"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_annotation` — That dimension or label is no longer there — the model changed since it was picked. Click it again.
+- `degenerate_annotation` — That dimension or label doesn't have a usable placement — its two points are on top of each other, or the circle it measures has no size. Drag to points with more room between them, or a bigger circle, and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `no_such_point`
+
 ## hew.attr
 
 ### `hew.attr.delete`
@@ -2709,7 +3047,7 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 
 ### `hew.print.pdf`
 
-- **Version:** 1
+- **Version:** 2
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
@@ -2725,6 +3063,22 @@ Print the document to a PDF the way File ▸ Print… does: standard (one page, 
     "camera": {
       "description": "as hew.view.snapshot; scaled prints use its direction with parallel projection",
       "type": "object"
+    },
+    "dimension_units": {
+      "description": "unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m",
+      "enum": [
+        "m",
+        "cm",
+        "mm",
+        "arch",
+        "frac_in",
+        "dec_in"
+      ],
+      "type": "string"
+    },
+    "dimensions": {
+      "description": "draw the document's dimensions and leader text; defaults to true; line art only — a shaded page has no vector pass to letter",
+      "type": "boolean"
     },
     "include_hidden": {
       "description": "line art: dashed hidden lines",
@@ -6002,12 +6356,12 @@ Set the live desktop viewport's camera. A host effect on the view, not a documen
 
 ### `hew.view.line_drawing`
 
-- **Version:** 1
+- **Version:** 2
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
 
-Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
+Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines, and the document's dimensions and leader text — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
 
 **Params schema:**
 
@@ -6018,6 +6372,22 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
     "camera": {
       "description": "identical vocabulary to hew.view.snapshot's camera; mutually exclusive with view and scene",
       "type": "object"
+    },
+    "dimension_units": {
+      "description": "unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m",
+      "enum": [
+        "m",
+        "cm",
+        "mm",
+        "arch",
+        "frac_in",
+        "dec_in"
+      ],
+      "type": "string"
+    },
+    "dimensions": {
+      "description": "draw the document's dimensions and leader text; defaults to true",
+      "type": "boolean"
     },
     "format": {
       "description": "defaults to svg",
@@ -6070,8 +6440,58 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
 ```json
 {
   "properties": {
+    "annotations": {
+      "description": "format segments with dimensions: the projected annotation drawing. A label is a string with a position, which the parallel segments/kinds/ids arrays have nowhere to put. For format svg it is already in the document.",
+      "properties": {
+        "labels": {
+          "items": {
+            "properties": {
+              "detached": {
+                "type": "boolean"
+              },
+              "text": {
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "text",
+              "detached"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "segments": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "segments",
+        "labels"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "bounds": {
-      "description": "[min_x, min_y, max_x, max_y] in view-plane metres; null when empty",
+      "description": "[min_x, min_y, max_x, max_y] in view-plane metres, annotations included; null when empty",
       "items": {
         "type": "number"
       },

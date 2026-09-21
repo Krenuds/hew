@@ -575,8 +575,9 @@ export function buildRadialGeometry(center: V3, anchor: V3, kind: 'radius' | 'di
   return { measured: [center, anchor], farEnd: center }
 }
 
-/** Half-extent (world units) of a radial dimension's centre tick mark. */
-export const CENTER_TICK_HALF = 0.03
+// `CENTER_TICK_HALF` moved to './annotationStyle' alongside the other
+// drawing constants; re-exported here so existing importers still find it.
+export { CENTER_TICK_HALF } from './annotationStyle'
 
 // ------------------------------------------------------- §5: alignment snap
 

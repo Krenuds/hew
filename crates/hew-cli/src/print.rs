@@ -8,8 +8,8 @@ use api::print_layout::{
     self as pl, Furniture, FurnitureContext, LayoutInput, Orientation, Paper, RectM,
 };
 use api::{
-    LineDrawingFormat, LineDrawingParams, LineDrawingResult, PrintPdfParams, PrintPdfResult,
-    Refusal, SnapshotCamera, SnapshotProjection, StandardView,
+    AnnotationOverlay, LineDrawingFormat, LineDrawingParams, LineDrawingResult, OverlayLabel,
+    PrintPdfParams, PrintPdfResult, Refusal, SnapshotCamera, SnapshotProjection, StandardView,
 };
 use kernel::{Document, EntityRef, Point3, Vec3};
 use std::collections::BTreeMap;
@@ -216,6 +216,53 @@ fn kind_name(k: hlr::Kind) -> &'static str {
     }
 }
 
+/// The document's annotations, projected into the same view-plane metres
+/// `hlr` returns its segments in.
+///
+/// `crates/api` owns the derivation (which lines a dimension draws, and
+/// how its measurement letters in the requested unit format); this only
+/// projects the result, through `hlr::project` so it lands in the same
+/// frame as the line art it sits on.
+fn annotation_overlay(
+    doc: &Document,
+    camera: &hlr::Camera,
+    units: api::units::LengthFormat,
+) -> Result<hlr::Overlay, Refusal> {
+    let world = api::annotate_layout::drawing(doc, units);
+    if world.is_empty() {
+        return Ok(hlr::Overlay::default());
+    }
+    let mut points: Vec<Point3> = Vec::with_capacity(world.segments.len() * 2 + world.labels.len());
+    for [a, b] in &world.segments {
+        points.push(*a);
+        points.push(*b);
+    }
+    for l in &world.labels {
+        points.push(l.position);
+    }
+    let projected = hlr::project(camera, &points).map_err(hlr_error)?;
+
+    let mut overlay = hlr::Overlay::default();
+    for (i, _) in world.segments.iter().enumerate() {
+        // A segment with either end off the projection is dropped whole
+        // rather than drawn to a made-up endpoint.
+        if let (Some(a), Some(b)) = (projected[i * 2], projected[i * 2 + 1]) {
+            overlay.segs.push([a[0], a[1], b[0], b[1]]);
+        }
+    }
+    let label_base = world.segments.len() * 2;
+    for (i, l) in world.labels.iter().enumerate() {
+        if let Some(at) = projected[label_base + i] {
+            overlay.labels.push(hlr::OverlayLabel {
+                at,
+                text: l.text.clone(),
+                detached: l.detached,
+            });
+        }
+    }
+    Ok(overlay)
+}
+
 pub fn line_drawing(
     doc: &Document,
     params: &LineDrawingParams,
@@ -255,6 +302,11 @@ pub fn line_drawing(
         budget: hlr::DEFAULT_BUDGET,
     };
     let d = hlr::line_drawing(&hlr_items, &camera, &opts).map_err(hlr_error)?;
+    let overlay = if params.dimensions {
+        annotation_overlay(doc, &camera, params.dimension_units)?
+    } else {
+        hlr::Overlay::default()
+    };
     let by_sid: BTreeMap<u64, EntityRef> = doc.sids().map(|(e, s)| (s, e.clone())).collect();
     let ids: Vec<String> = d
         .segs
@@ -266,8 +318,22 @@ pub fn line_drawing(
                 .unwrap_or_else(|| format!("sid_{:x}", s.sid))
         })
         .collect();
-    let bounds = d.bounds.map(|(mn, mx)| [mn[0], mn[1], mx[0], mx[1]]);
+    // The reported bounds cover whatever was drawn, annotations included —
+    // a dimension standing off the model is part of the drawing's extent.
+    let mut bounds = d.bounds.map(|(mn, mx)| [mn[0], mn[1], mx[0], mx[1]]);
+    for p in overlay.points() {
+        bounds = Some(match bounds {
+            None => [p[0], p[1], p[0], p[1]],
+            Some(b) => [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1]),
+            ],
+        });
+    }
     let count = d.segs.len();
+    let overlay_arg = (!overlay.is_empty()).then_some(&overlay);
     match params.format {
         LineDrawingFormat::Svg => {
             let svg = hlr::svg::write(
@@ -276,6 +342,7 @@ pub fn line_drawing(
                     ratio: params.scale,
                     ..Default::default()
                 },
+                overlay_arg,
             );
             Ok(LineDrawingResult {
                 svg: Some(svg),
@@ -284,6 +351,7 @@ pub fn line_drawing(
                 ids: Vec::new(),
                 bounds,
                 count,
+                annotations: None,
             })
         }
         LineDrawingFormat::Segments => Ok(LineDrawingResult {
@@ -297,6 +365,19 @@ pub fn line_drawing(
             ids,
             bounds,
             count,
+            annotations: params.dimensions.then(|| AnnotationOverlay {
+                segments: overlay.segs.clone(),
+                labels: overlay
+                    .labels
+                    .iter()
+                    .map(|l| OverlayLabel {
+                        x: l.at[0],
+                        y: l.at[1],
+                        text: l.text.clone(),
+                        detached: l.detached,
+                    })
+                    .collect(),
+            }),
         }),
     }
 }
@@ -527,6 +608,10 @@ pub fn print_pdf(
     let eye = center + view.dir * (depth.0 - pad);
 
     // One drawing for every tile (Scaled), or the single Standard page.
+    // Dimensions ride the same camera, so they land exactly on the line
+    // art they measure. A shaded page has no vector pass to hang them on
+    // and gets none (softrender has no text).
+    let mut overlay = hlr::Overlay::default();
     let drawing = if params.line_art {
         let camera = if params.scaled {
             hlr::Camera {
@@ -547,6 +632,9 @@ pub fn print_pdf(
                 },
             }
         };
+        if params.dimensions {
+            overlay = annotation_overlay(doc, &camera, params.dimension_units)?;
+        }
         Some(
             hlr::line_drawing(
                 &hlr_items,
@@ -579,21 +667,32 @@ pub fn print_pdf(
             (Some(d), Some(mr)) => {
                 // Scaled vector: view-plane metres → page mm through the tile's model rect.
                 let k = params.ratio * 1000.0;
-                push_vector(&mut items_pdf, d, params.include_hidden, clip, |x, y| {
-                    (img.x + (x - mr.x) * k, img.y + (mr.y + mr.h - y) * k)
-                });
+                let to_mm =
+                    |x: f64, y: f64| (img.x + (x - mr.x) * k, img.y + (mr.y + mr.h - y) * k);
+                push_vector(&mut items_pdf, d, params.include_hidden, clip, to_mm);
+                push_overlay(&mut items_pdf, &overlay, clip, to_mm);
             }
             (Some(d), None) => {
                 // Standard vector: fit the drawing's bounds into the image rect.
-                if let Some((mn, mx)) = d.bounds {
+                // Fit the drawing AND its dimensions, so a dimension
+                // standing off the model is not cropped off the page.
+                let fit = d.bounds.map(|(mn, mx)| {
+                    overlay.points().fold((mn, mx), |(mn, mx), p| {
+                        (
+                            [mn[0].min(p[0]), mn[1].min(p[1])],
+                            [mx[0].max(p[0]), mx[1].max(p[1])],
+                        )
+                    })
+                });
+                if let Some((mn, mx)) = fit {
                     let w = (mx[0] - mn[0]).max(1e-9);
                     let h = (mx[1] - mn[1]).max(1e-9);
                     let k = (img.w / w).min(img.h / h);
                     let ox = img.x + (img.w - w * k) / 2.0;
                     let oy = img.y + (img.h - h * k) / 2.0;
-                    push_vector(&mut items_pdf, d, params.include_hidden, clip, |x, y| {
-                        (ox + (x - mn[0]) * k, oy + (mx[1] - y) * k)
-                    });
+                    let to_mm = |x: f64, y: f64| (ox + (x - mn[0]) * k, oy + (mx[1] - y) * k);
+                    push_vector(&mut items_pdf, d, params.include_hidden, clip, to_mm);
+                    push_overlay(&mut items_pdf, &overlay, clip, to_mm);
                 }
             }
             (None, model_rect) => {
@@ -670,6 +769,67 @@ pub fn print_pdf(
         cols: layout.cols,
         rows: layout.rows,
     })
+}
+
+/// Annotation stroke weight and label cap height on paper, mm — the same
+/// two numbers the app's own vector page uses.
+const ANNOTATION_MM: f64 = 0.25;
+const LABEL_MM: f64 = 2.6;
+
+/// Draws a projected annotation overlay onto a page.
+///
+/// Labels are black: `pdfwrite`'s text is greyscale, so a detached
+/// annotation reads the same as any other here. The SVG page, which does
+/// have colour, marks it.
+fn push_overlay(
+    out: &mut Vec<pdfwrite::Item>,
+    overlay: &hlr::Overlay,
+    clip: pdfwrite::Rect,
+    to_mm: impl Fn(f64, f64) -> (f64, f64),
+) {
+    if overlay.is_empty() {
+        return;
+    }
+    let segs: Vec<[f64; 4]> = overlay
+        .segs
+        .iter()
+        .map(|s| {
+            let a = to_mm(s[0], s[1]);
+            let b = to_mm(s[2], s[3]);
+            [a.0, a.1, b.0, b.1]
+        })
+        .collect();
+    if !segs.is_empty() {
+        out.push(pdfwrite::Item::Path {
+            segs,
+            width_mm: ANNOTATION_MM,
+            dash: None,
+            gray: 0.0,
+            clip: Some(clip),
+        });
+    }
+    for l in &overlay.labels {
+        let (x, y) = to_mm(l.at[0], l.at[1]);
+        if x < clip.x - 1.0
+            || x > clip.x + clip.w + 1.0
+            || y < clip.y - 1.0
+            || y > clip.y + clip.h + 1.0
+        {
+            continue;
+        }
+        out.push(pdfwrite::Item::Text {
+            x,
+            // Page mm run top-down, so nudging the baseline DOWN by a
+            // third of the cap height centres the run on its anchor.
+            y: y + LABEL_MM * 0.35,
+            size_mm: LABEL_MM,
+            bold: false,
+            text: l.text.clone(),
+            gray: 0.0,
+            align: pdfwrite::Align::Center,
+            rotate_deg: 0.0,
+        });
+    }
 }
 
 fn push_vector(

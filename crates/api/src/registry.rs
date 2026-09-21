@@ -614,6 +614,46 @@ impl Registry {
             "Add an angular construction guide.",
         );
         add("hew.guide.clear", M, Kernel, Std, "Delete all guides.");
+        // hew.annotate — dimensions and leader text, a guides-style side
+        // collection outside the solid tree (docs/agents/HEW_API.md §7).
+        // `radial` is declared and unimplemented: the kernel takes the
+        // exact analytic circle the app captures from a picked curve, and
+        // the API has no curve locator to derive one from yet (§14).
+        add(
+            "hew.annotate.linear",
+            M,
+            Kernel,
+            Std,
+            "Dimension the distance between two anchors.",
+        );
+        add(
+            "hew.annotate.radial",
+            M,
+            Kernel,
+            Std,
+            "Dimension a circle's radius or diameter.",
+        );
+        add(
+            "hew.annotate.leader",
+            M,
+            Kernel,
+            Std,
+            "Add leader text pointing at an anchor.",
+        );
+        add(
+            "hew.annotate.update",
+            M,
+            Kernel,
+            Std,
+            "Re-place an annotation's anchors, offset, or text.",
+        );
+        add(
+            "hew.annotate.delete",
+            M,
+            Kernel,
+            Std,
+            "Delete one annotation.",
+        );
         // hew.scenes — named, saved views (docs/agents/HEW_API.md's Scenes
         // section; docs/design/scenes.md §3, §7). Every command but
         // `list` is `ModelMutating` (may ride a transaction,
@@ -1352,7 +1392,14 @@ impl Registry {
                 .get_mut("hew.view.line_drawing")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.";
+            // Version 2 adds the annotation overlay. The added params are
+            // optional, but `dimensions` defaults to TRUE — a drawing of a
+            // dimensioned model that omitted its dimensions was the gap
+            // being closed, not a behaviour worth preserving — so the
+            // per-command version says so rather than letting the change
+            // pass silently under §9's additive rule.
+            cmd.version = 2;
+            cmd.summary = "Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines, and the document's dimensions and leader text — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1363,7 +1410,9 @@ impl Registry {
                     "include_soft": { "type": "boolean", "description": "defaults to false; when true, non-silhouette curved-wall facet seams are returned (kind \"soft\")" },
                     "format": { "type": "string", "enum": ["svg", "segments"], "description": "defaults to svg" },
                     "scale": { "type": "number", "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale" },
-                    "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" }
+                    "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" },
+                    "dimensions": { "type": "boolean", "description": "draw the document's dimensions and leader text; defaults to true" },
+                    "dimension_units": { "type": "string", "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"], "description": "unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m" }
                 },
                 "additionalProperties": false
             });
@@ -1376,7 +1425,16 @@ impl Registry {
                     "kinds": { "type": "array", "items": { "type": "string", "enum": ["hard", "silhouette", "soft", "section", "hidden"] } },
                     "ids": { "type": "array", "items": { "type": "string" }, "description": "public id of the entity each segment belongs to" },
                     "count": { "type": "integer" },
-                    "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "[min_x, min_y, max_x, max_y] in view-plane metres; null when empty" }
+                    "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "[min_x, min_y, max_x, max_y] in view-plane metres, annotations included; null when empty" },
+                    "annotations": {
+                        "type": ["object", "null"],
+                        "description": "format segments with dimensions: the projected annotation drawing. A label is a string with a position, which the parallel segments/kinds/ids arrays have nowhere to put. For format svg it is already in the document.",
+                        "properties": {
+                            "segments": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 } },
+                            "labels": { "type": "array", "items": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "text": { "type": "string" }, "detached": { "type": "boolean" } }, "required": ["x", "y", "text", "detached"] } }
+                        },
+                        "required": ["segments", "labels"]
+                    }
                 },
                 "required": ["count"]
             });
@@ -1391,6 +1449,9 @@ impl Registry {
         {
             let cmd = commands.get_mut("hew.print.pdf").expect("declared above");
             cmd.implemented = true;
+            // Version 2 adds the annotation overlay, on the same terms as
+            // `hew.view.line_drawing` above.
+            cmd.version = 2;
             cmd.summary = "Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
@@ -1411,6 +1472,9 @@ impl Registry {
                     "marks": { "type": "boolean", "description": "crop/trim marks and neighbour labels; defaults to true" },
                     "overlap_mm": { "type": "number", "description": "tile overlap band, defaults to 10; 0 for none" },
                     "units": { "type": "string", "enum": ["metric", "imperial"], "description": "scale-bar family, defaults to metric" },
+                    "dimensions": { "type": "boolean", "description": "draw the document's dimensions and leader text; defaults to true; line art only — a shaded page has no vector pass to letter" },
+                    "dimension_units": { "type": "string", "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"], "description": "unit format the dimension text is lettered in (hew.view.units's vocabulary); defaults to m" },
+
                     "title": { "type": "string", "description": "title-block document name; defaults to the document's" },
                     "path": { "type": "string", "description": "write the PDF here instead of returning it inline" }
                 },
@@ -2387,6 +2451,141 @@ impl Registry {
                 "additionalProperties": false
             });
             cmd.refusals = Vec::new();
+        }
+        {
+            // hew.annotate.* — dimensions and leader text. `anchor_schema`
+            // is the empty schema for the same reason every point
+            // parameter is: an anchor is either a point locator (§5.3) or
+            // `{"at": <locator>, "on": <id>}`, and JSON Schema would only
+            // restate `crates/api/src/commands/annotate.rs`'s parse less
+            // accurately.
+            let anchor_schema = serde_json::json!({});
+            let vec3_schema = serde_json::json!({
+                "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3
+            });
+            let plane_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "origin": vec3_schema.clone(), "normal": vec3_schema.clone() },
+                "required": ["origin", "normal"],
+                "additionalProperties": false,
+                "description": "omitted: the plane through the a-b line and the offset"
+            });
+            let created_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "annotation": { "type": "string" } },
+                "required": ["annotation"]
+            });
+            // `resolve_point`'s locator failures, plus the kernel's own
+            // anchor-liveness and degeneracy refusals.
+            let anchor_refusals = || {
+                vec![
+                    "degenerate_annotation",
+                    "unknown_object",
+                    "unknown_group",
+                    "unknown_instance",
+                    "unknown_entity",
+                    "locator_missed",
+                    "ambiguous_locator",
+                    "no_such_point",
+                ]
+            };
+            {
+                let cmd = commands
+                    .get_mut("hew.annotate.linear")
+                    .expect("declared above");
+                cmd.implemented = true;
+                cmd.params_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "a": anchor_schema.clone(),
+                        "b": anchor_schema.clone(),
+                        "offset": vec3_schema.clone(),
+                        "plane": plane_schema.clone(),
+                        "text": { "type": "string", "description": "replaces the measurement" }
+                    },
+                    "required": ["a", "b", "offset"],
+                    "additionalProperties": false
+                });
+                cmd.result_schema = created_schema.clone();
+                cmd.refusals = anchor_refusals();
+            }
+            {
+                let cmd = commands
+                    .get_mut("hew.annotate.leader")
+                    .expect("declared above");
+                cmd.implemented = true;
+                cmd.params_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "anchor": anchor_schema.clone(),
+                        "offset": vec3_schema.clone(),
+                        "text": { "type": "string" }
+                    },
+                    "required": ["anchor", "offset", "text"],
+                    "additionalProperties": false
+                });
+                cmd.result_schema = created_schema.clone();
+                cmd.refusals = anchor_refusals();
+            }
+            {
+                let cmd = commands
+                    .get_mut("hew.annotate.update")
+                    .expect("declared above");
+                cmd.implemented = true;
+                cmd.params_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "annotation": { "type": "string" },
+                        "a": anchor_schema.clone(),
+                        "b": anchor_schema.clone(),
+                        "anchor": anchor_schema.clone(),
+                        "offset": vec3_schema.clone(),
+                        "plane": plane_schema.clone(),
+                        "leader_dir": vec3_schema.clone(),
+                        "text": {
+                            "type": ["string", "null"],
+                            "description": "null clears a dimension's override"
+                        }
+                    },
+                    "required": ["annotation"],
+                    "additionalProperties": false
+                });
+                cmd.result_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": { "detached": { "type": "boolean" } },
+                    "required": ["detached"]
+                });
+                let mut refusals = anchor_refusals();
+                refusals.insert(0, "unknown_annotation");
+                cmd.refusals = refusals;
+            }
+            {
+                let cmd = commands
+                    .get_mut("hew.annotate.delete")
+                    .expect("declared above");
+                cmd.implemented = true;
+                cmd.params_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": { "annotation": { "type": "string" } },
+                    "required": ["annotation"],
+                    "additionalProperties": false
+                });
+                cmd.result_schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                });
+                cmd.refusals = vec!["unknown_annotation"];
+            }
+            {
+                let cmd = commands
+                    .get_mut("hew.annotate.radial")
+                    .expect("declared above");
+                cmd.params_schema = serde_json::json!({
+                    "type": "object",
+                    "description": "Reserved: needs a curve locator to capture the analytic circle from — refuses unimplemented"
+                });
+            }
         }
         {
             // hew.scenes.* — named, saved views (docs/agents/HEW_API.md's Scenes

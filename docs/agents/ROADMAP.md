@@ -580,6 +580,14 @@ below.
   instead of reporting a wrong number
 - Annotations save with the document and read at a constant on-screen size,
   staying legible at any zoom
+- Authored through the API as well as the app (`hew.annotate.linear`,
+  `leader`, `update`, `delete`; docs/agents/HEW_API.md §7.3), so an agent
+  that builds a model can dimension it. `hew.annotate.radial` waits on a
+  curve locator to capture its analytic circle from
+- Drawn in headless output: `hew.view.line_drawing` and `hew.print.pdf`
+  letter dimensions and leader text onto the page, in a unit format the
+  caller names (HEW_API.md §7.2). `hew.view.snapshot` does not — raster
+  text needs a glyph rasterizer `crates/softrender` has no concept of
 
 ### File format & persistence
 

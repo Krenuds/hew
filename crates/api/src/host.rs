@@ -6,6 +6,7 @@
 //! refusal, advertised via capabilities, never a protocol error.
 
 use crate::refusal::Refusal;
+use crate::units::LengthFormat;
 
 /// The refusal every unsupported host effect answers.
 fn unsupported(what: &str) -> Refusal {
@@ -159,6 +160,36 @@ pub struct LineDrawingParams {
     pub scale: f64,
     /// When given (SVG only), the file is written here instead of inline.
     pub path: Option<String>,
+    /// Draw the document's dimensions and leader text.
+    pub dimensions: bool,
+    /// The unit format their measurement text is lettered in. Headless
+    /// has no app-level display preference and the document stores none,
+    /// so it is a parameter of the drawing.
+    pub dimension_units: LengthFormat,
+}
+
+/// One annotation label, projected onto the view plane.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayLabel {
+    /// View-plane metres, y up, origin at the camera target — the same
+    /// frame `LineDrawingResult::segments` uses.
+    pub x: f64,
+    pub y: f64,
+    /// Already lettered, in the requested unit format.
+    pub text: String,
+    /// The annotation lost the geometry it measured.
+    pub detached: bool,
+}
+
+/// The annotation drawing for a `Segments` request: its line work and its
+/// labels, projected. A label is a string with a position, which the
+/// parallel `segments`/`kinds`/`ids` arrays have nowhere to put, so it is
+/// its own block rather than more entries in those.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AnnotationOverlay {
+    /// `[ax, ay, bx, by]` in view-plane metres.
+    pub segments: Vec<[f64; 4]>,
+    pub labels: Vec<OverlayLabel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,9 +203,14 @@ pub struct LineDrawingResult {
     pub kinds: Vec<&'static str>,
     /// One per segment: the public id of the entity the line belongs to.
     pub ids: Vec<String>,
-    /// `[min_x, min_y, max_x, max_y]`, or None when empty.
+    /// `[min_x, min_y, max_x, max_y]`, or None when empty. Covers the
+    /// annotations too when they were drawn.
     pub bounds: Option<[f64; 4]>,
     pub count: usize,
+    /// The projected annotations, for `LineDrawingFormat::Segments`.
+    /// `None` when they were not asked for. For `Svg` they are already
+    /// in the document.
+    pub annotations: Option<AnnotationOverlay>,
 }
 
 /// Typed, validated parameters for `hew.print.pdf` (docs/design/printing.md
@@ -203,6 +239,12 @@ pub struct PrintPdfParams {
     pub title_block: bool,
     pub scale_bar: bool,
     pub marks: bool,
+    /// Draw the document's dimensions and leader text.
+    pub dimensions: bool,
+    /// The unit format their measurement text is lettered in (distinct
+    /// from `metric`, which picks the scale bar and caption's unit
+    /// family).
+    pub dimension_units: LengthFormat,
     pub overlap_mm: f64,
     /// Scale bar / caption unit family.
     pub metric: bool,

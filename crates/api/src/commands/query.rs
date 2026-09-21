@@ -7,7 +7,8 @@ use crate::ids;
 use crate::locate;
 use crate::refusal::Refusal;
 use kernel::{
-    EntityRef, FaceId, Guide, NodeId, Point3, SketchCurveKind, SurfaceRef, Vec3, WatertightState,
+    Anchor, Annotation, EntityRef, FaceId, Guide, NodeId, Point3, RadialKind, SketchCurveKind,
+    SurfaceRef, Vec3, WatertightState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -285,6 +286,81 @@ fn guide_summary(ctx: &Ctx, id: kernel::GuideId) -> Result<Value, CmdError> {
     })
 }
 
+/// An anchor as the wire sees it: the point, plus the node it tracks
+/// (`null` for a free-floating anchor, which never re-anchors).
+fn anchor_json(ctx: &Ctx, anchor: &Anchor) -> Value {
+    let on = anchor.node.and_then(|node| {
+        let entity = match node {
+            NodeId::Object(o) => EntityRef::Object(o),
+            NodeId::Group(g) => EntityRef::Group(g),
+            NodeId::Instance(i) => EntityRef::Instance(i),
+        };
+        public_of(ctx, &entity)
+    });
+    json!({ "at": point_json(anchor.point), "on": on })
+}
+
+/// One annotation, for the scene walk and `hew.query.entity`.
+///
+/// `measurement` is the measured length in meters, NOT the rendered
+/// label: the displayed string depends on a unit format, which is a
+/// rendering parameter (`hew.view.line_drawing`'s `dimension_units`)
+/// rather than document state. A client that wants the app's exact
+/// wording asks for a drawing; one that wants the number reads this.
+fn annotation_summary(ctx: &Ctx, id: kernel::AnnotationId, annotation: &Annotation) -> Value {
+    let detached = ctx.doc.annotation_detached(id).unwrap_or(false);
+    let common = json!({ "id": ids::annotation_id(id), "detached": detached });
+    let merge = |extra: Value| -> Value {
+        let mut out = common.clone();
+        let (Some(out_obj), Some(extra_obj)) = (out.as_object_mut(), extra.as_object()) else {
+            return out;
+        };
+        for (k, v) in extra_obj {
+            out_obj.insert(k.clone(), v.clone());
+        }
+        out
+    };
+    match annotation {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            text_override,
+            ..
+        } => merge(json!({
+            "kind": "linear",
+            "anchors": [anchor_json(ctx, a), anchor_json(ctx, b)],
+            "offset": vec3_json(*offset),
+            "measurement": (b.point - a.point).length(),
+            "text_override": text_override,
+        })),
+        Annotation::RadialDimension {
+            anchor,
+            kind,
+            curve,
+            text_override,
+            ..
+        } => merge(json!({
+            "kind": "radial",
+            "radial_kind": match kind { RadialKind::Radius => "radius", RadialKind::Diameter => "diameter" },
+            "anchors": [anchor_json(ctx, anchor)],
+            "center": point_json(curve.center),
+            "measurement": match kind { RadialKind::Radius => curve.radius, RadialKind::Diameter => curve.radius * 2.0 },
+            "text_override": text_override,
+        })),
+        Annotation::LeaderText {
+            anchor,
+            offset,
+            text,
+        } => merge(json!({
+            "kind": "leader",
+            "anchors": [anchor_json(ctx, anchor)],
+            "offset": vec3_json(*offset),
+            "text": text,
+        })),
+    }
+}
+
 fn material_summary(ctx: &Ctx, id: kernel::MaterialId) -> Result<Value, CmdError> {
     let m = ctx
         .doc
@@ -345,6 +421,13 @@ fn scene(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         guides.push(guide_summary(ctx, id)?);
     }
 
+    let annotations: Vec<Value> = ctx
+        .doc
+        .annotations()
+        .iter()
+        .map(|(id, annotation, _)| annotation_summary(ctx, *id, annotation))
+        .collect();
+
     let mut materials = Vec::new();
     for id in ctx.doc.material_ids() {
         materials.push(material_summary(ctx, id)?);
@@ -369,11 +452,13 @@ fn scene(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "components": ctx.doc.component_ids().len(),
             "sketches": ctx.doc.sketch_ids().len(),
             "guides": ctx.doc.guide_ids().len(),
+            "annotations": annotations.len(),
             "materials": ctx.doc.material_ids().len(),
         },
         "tree": tree,
         "sketches": sketches,
         "guides": guides,
+        "annotations": annotations,
         "materials": materials,
         "tags": tags,
         "components": components,
@@ -390,6 +475,24 @@ struct EntityParams {
 
 fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: EntityParams = parse(params)?;
+    // An annotation is not an `EntityRef` kind at all (it carries no
+    // stable id — docs/dev/HEW_FILE_FORMAT.md §4.8), so its id resolves
+    // through its own prefix, ahead of the resolver. Same reasoning as
+    // the sketch-edge fallthrough below: a client that just created one
+    // will query it right back.
+    if let Some(key) = ids::resolve_annotation_id(&p.id) {
+        let annotation = ctx
+            .doc
+            .annotation(key)
+            .ok_or_else(|| unknown_entity(&p.id))?
+            .clone();
+        let mut out = annotation_summary(ctx, key, &annotation);
+        if let Some(obj) = out.as_object_mut() {
+            let kind = obj.insert("kind".into(), json!("annotation"));
+            obj.insert("annotation_kind".into(), kind.unwrap_or(Value::Null));
+        }
+        return Ok(out);
+    }
     let resolver = ctx.resolver();
     let entity = resolver.resolve(&p.id);
     // A sketch edge is not a top-level `EntityRef` kind — it is a

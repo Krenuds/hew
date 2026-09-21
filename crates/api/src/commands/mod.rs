@@ -99,6 +99,7 @@ pub(super) fn run_sketch_gesture<T>(
     }
 }
 
+pub mod annotate;
 pub mod attrs;
 /// Shared camera-spec parsing for `hew.view.snapshot` (doc.rs) and
 /// `hew.view.camera` (view.rs) — not a command namespace of its own, so
@@ -121,6 +122,7 @@ pub mod view;
 /// own match — a `None` answers the `unimplemented` refusal (§14).
 pub fn handler(name: &str) -> Option<Handler> {
     query::handler(name)
+        .or_else(|| annotate::handler(name))
         .or_else(|| sketch::handler(name))
         .or_else(|| solid::handler(name))
         .or_else(|| entity::handler(name))

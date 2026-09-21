@@ -10,6 +10,7 @@ use super::doc::encode_base64;
 use super::{CmdError, Ctx, Handler};
 use crate::host::{LineDrawingFormat, LineDrawingParams, PrintPdfParams};
 use crate::print_layout::Paper;
+use crate::units::LengthFormat;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -24,6 +25,21 @@ pub fn handler(name: &str) -> Option<Handler> {
 
 fn parse<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, CmdError> {
     serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))
+}
+
+/// `dimension_units`: the format annotation labels are lettered in, over
+/// `hew.view.units`'s own vocabulary. Meters is the default because it is
+/// the kernel's own unit and the only one a caller that named nothing can
+/// be assumed to mean.
+fn parse_dimension_units(raw: Option<&str>) -> Result<LengthFormat, CmdError> {
+    match raw {
+        None => Ok(LengthFormat::Meters),
+        Some(name) => LengthFormat::from_wire(name).ok_or_else(|| {
+            CmdError::Params(format!(
+                "dimension_units must be one of m, cm, mm, arch, frac_in, dec_in; not {name:?}"
+            ))
+        }),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +61,10 @@ struct RawLineDrawingParams {
     scale: Option<f64>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    dimensions: Option<bool>,
+    #[serde(default)]
+    dimension_units: Option<String>,
 }
 
 fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -89,6 +109,10 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         format,
         scale,
         path: raw.path,
+        // Annotations draw by default: a client asking for a drawing of a
+        // dimensioned model means the dimensions.
+        dimensions: raw.dimensions.unwrap_or(true),
+        dimension_units: parse_dimension_units(raw.dimension_units.as_deref())?,
     };
     let result = ctx
         .host
@@ -110,13 +134,28 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 }
             }
         }
-        LineDrawingFormat::Segments => Ok(serde_json::json!({
-            "segments": result.segments,
-            "kinds": result.kinds,
-            "ids": result.ids,
-            "count": result.count,
-            "bounds": bounds,
-        })),
+        LineDrawingFormat::Segments => {
+            let annotations = result.annotations.map(|a| {
+                serde_json::json!({
+                    "segments": a.segments,
+                    "labels": a
+                        .labels
+                        .iter()
+                        .map(|l| serde_json::json!({
+                            "x": l.x, "y": l.y, "text": l.text, "detached": l.detached,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            });
+            Ok(serde_json::json!({
+                "segments": result.segments,
+                "kinds": result.kinds,
+                "ids": result.ids,
+                "count": result.count,
+                "bounds": bounds,
+                "annotations": annotations,
+            }))
+        }
     }
 }
 
@@ -155,6 +194,10 @@ struct RawPrintPdfParams {
     overlap_mm: Option<f64>,
     #[serde(default)]
     units: Option<String>,
+    #[serde(default)]
+    dimensions: Option<bool>,
+    #[serde(default)]
+    dimension_units: Option<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -283,6 +326,8 @@ fn print_pdf(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         title_block: raw.title_block.unwrap_or(true),
         scale_bar: raw.scale_bar.unwrap_or(true),
         marks: raw.marks.unwrap_or(true),
+        dimensions: raw.dimensions.unwrap_or(true),
+        dimension_units: parse_dimension_units(raw.dimension_units.as_deref())?,
         overlap_mm: raw
             .overlap_mm
             .unwrap_or(crate::print_layout::DEFAULT_OVERLAP_MM),

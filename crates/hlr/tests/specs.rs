@@ -388,6 +388,7 @@ fn svg_is_true_size_at_the_given_scale() {
             margin_mm: 0.0,
             ..Default::default()
         },
+        None,
     );
     // A 100 mm square at 1:1 → 100 mm × 100 mm document.
     assert!(svg.contains("width=\"100mm\" height=\"100mm\""), "{svg}");
@@ -399,6 +400,70 @@ fn svg_is_true_size_at_the_given_scale() {
             margin_mm: 5.0,
             ..Default::default()
         },
+        None,
     );
     assert!(svg2.contains("width=\"60mm\" height=\"60mm\""), "{svg2}");
+}
+
+/// An overlay is emitted as its own path and text runs, and counts in the
+/// bounds — a dimension standing off the model must not be cropped out of
+/// the viewBox.
+#[test]
+fn an_overlay_draws_and_widens_the_view_box() {
+    // A 100 mm square of line art at 1:1, built directly: this is a test
+    // of the SVG writer, not of visibility.
+    let d = hlr::LineDrawing {
+        segs: vec![hlr::Seg {
+            a: [-0.05, -0.05],
+            b: [0.05, -0.05],
+            kind: Kind::Hard,
+            sid: 1,
+        }],
+        bounds: Some(([-0.05, -0.05], [0.05, 0.05])),
+    };
+    let style = hlr::svg::SvgStyle {
+        ratio: 1.0,
+        margin_mm: 0.0,
+        ..Default::default()
+    };
+    let plain = hlr::svg::write(&d, &style, None);
+    assert!(
+        plain.contains("width=\"100mm\" height=\"100mm\""),
+        "{plain}"
+    );
+
+    // A dimension 50 mm below the square, with a label.
+    let overlay = hlr::Overlay {
+        segs: vec![[-0.05, -0.1, 0.05, -0.1]],
+        labels: vec![hlr::OverlayLabel {
+            at: [0.0, -0.1],
+            text: "100 mm".into(),
+            detached: false,
+        }],
+    };
+    let with_dims = hlr::svg::write(&d, &style, Some(&overlay));
+    assert!(with_dims.contains("class=\"annotation\""), "{with_dims}");
+    assert!(with_dims.contains(">100 mm</text>"), "{with_dims}");
+    assert!(
+        with_dims.contains("height=\"150mm\""),
+        "the overlay widened the bounds: {with_dims}"
+    );
+}
+
+/// Label text is XML-escaped — a leader carries whatever the user typed —
+/// and a detached annotation is marked.
+#[test]
+fn overlay_label_text_is_escaped_and_detachment_shows() {
+    let d = hlr::LineDrawing::default();
+    let overlay = hlr::Overlay {
+        segs: Vec::new(),
+        labels: vec![hlr::OverlayLabel {
+            at: [0.0, 0.0],
+            text: "a < b & c".into(),
+            detached: true,
+        }],
+    };
+    let svg = hlr::svg::write(&d, &hlr::svg::SvgStyle::default(), Some(&overlay));
+    assert!(svg.contains("a &lt; b &amp; c"), "{svg}");
+    assert!(svg.contains("#b3261e"), "a detached label is marked: {svg}");
 }

@@ -142,6 +142,49 @@ pub struct Seg {
     pub sid: u64,
 }
 
+/// A label to letter onto a drawing, in the same view-plane metres the
+/// segments use.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayLabel {
+    pub at: [f64; 2],
+    pub text: String,
+    /// Drawn in a warning colour: the annotation lost the geometry it
+    /// measured.
+    pub detached: bool,
+}
+
+/// Annotation line work and labels to draw over a `LineDrawing`, already
+/// projected by the caller.
+///
+/// This engine has no text concept and gains none here: it does not
+/// measure anything, choose a font, or lay text out. An overlay is a
+/// finished drawing handed in for emission, so that a page's dimensions
+/// and its hidden-line art land in one SVG document with one set of
+/// bounds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Overlay {
+    /// `[ax, ay, bx, by]` per segment.
+    pub segs: Vec<[f64; 4]>,
+    pub labels: Vec<OverlayLabel>,
+}
+
+impl Overlay {
+    pub fn is_empty(&self) -> bool {
+        self.segs.is_empty() && self.labels.is_empty()
+    }
+
+    /// Every point the overlay occupies, for extending a drawing's
+    /// bounds. A label counts as its anchor point — the text itself is
+    /// laid out by whatever renders it, so its true extent is not
+    /// knowable here; the SVG emitter's margin absorbs the difference.
+    pub fn points(&self) -> impl Iterator<Item = [f64; 2]> + '_ {
+        self.segs
+            .iter()
+            .flat_map(|s| [[s[0], s[1]], [s[2], s[3]]])
+            .chain(self.labels.iter().map(|l| l.at))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LineDrawing {
     pub segs: Vec<Seg>,
@@ -268,6 +311,29 @@ impl Frame {
     fn metric(&self, z: f64) -> f64 {
         if self.perspective { -self.dist / z } else { z }
     }
+}
+
+/// Projects world points into the same view-plane metres (y up, origin
+/// at the camera target) `line_drawing` returns its segments in.
+///
+/// An overlay has to go through this rather than through a second copy of
+/// the basis rule: the frame's degenerate-`up` fallback and its
+/// perspective divide are exactly where two copies would quietly disagree
+/// and put a dimension somewhere the geometry is not. A point at or
+/// behind a perspective eye has no projection and comes back `None`.
+pub fn project(camera: &Camera, points: &[Point3]) -> Result<Vec<Option<[f64; 2]>>, HlrError> {
+    let frame = Frame::new(camera)?;
+    Ok(points
+        .iter()
+        .map(|p| {
+            let v = frame.view(*p);
+            if frame.perspective && v.z <= 0.0 {
+                return None;
+            }
+            let xy = frame.proj(&v);
+            (xy[0].is_finite() && xy[1].is_finite()).then_some(xy)
+        })
+        .collect())
 }
 
 #[inline]

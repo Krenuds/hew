@@ -12,6 +12,8 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 ### Added
 
+- **API:** Dimensions and leader text can be created through the API, so a script or an agent that builds a model can dimension it. They save into the `.hew` and are there when the file is opened in Hew.
+- **API:** Headless drawings carry dimensions. `hew.view.line_drawing` and the print PDF letter the model's dimensions and leader text onto the page, in whichever unit format is asked for.
 - **Measurements:** Each dimension in the Measurements box carries a dot colored by the axis it runs along, so `W,D` is unambiguous on a wall or a tilted plane instead of depending on how that plane happened to be built. Move, Line, and Push/Pull show one for the axis the gesture is on.
 
 ### Fixed
