@@ -25,6 +25,8 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
 import { RenderScheduler } from './renderScheduler'
+import { POLE_TILT, STANDARD_VIEWS, type StandardView } from './standardViews'
+import { publishCameraPose, resetCameraPoseBus } from './cameraPoseBus'
 import {
   renderPrintPages as runPrintPass,
   computeViewPlaneExtent,
@@ -519,41 +521,13 @@ interface Props {
   onTapeMeasurePoints?: (points: readonly [number, number, number][]) => void
 }
 
+/** Re-exported from `standardViews.ts`, which owns the table so the ViewCube
+ * can share it without importing the viewport. Still exported here because
+ * `App.tsx` and `ViewportHUD.tsx` have always imported the type from this
+ * module. */
+export type { StandardView }
+
 /** Imperative handle the viewport exposes to the parent. */
-/** One of the seven SketchUp-style standard camera framings. */
-export type StandardView = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso'
-
-/**
- * A hair of tilt off the ±Z pole for Top/Bottom (≈0.06°, visually imperceptible).
- * Looking *exactly* straight down with world-up +Z is gimbal-degenerate (the
- * look direction is parallel to up), which both breaks the view's roll and — the
- * real problem — would force a horizontal up, so orbiting from a top view pivots
- * around the wrong axis. Nudging the eye a touch off the pole lets every view
- * keep world-up +Z, so orbit always pivots around Z (natural in a Z-up world).
- *
- * The same constant also floors FREE orbit via the OrbitControls polar-angle
- * clamp (see the controls setup): near-pole poses are ill-conditioned (basis
- * roll amplifies position jitter into whole-frame shimmer), and the safe
- * margin for the baked views and for orbiting must be one value so they
- * can't drift apart.
- */
-const POLE_TILT = 0.001
-
-/**
- * Eye direction (target→camera) for each standard view, in the Z-up world (X
- * red, Y green, Z blue). Every view keeps world-up +Z (see {@link POLE_TILT});
- * Iso is the SketchUp front-right-top corner.
- */
-const STANDARD_VIEWS: Record<StandardView, { eye: [number, number, number] }> = {
-  top:    { eye: [0, -POLE_TILT, 1] },
-  bottom: { eye: [0, -POLE_TILT, -1] },
-  front:  { eye: [0, -1, 0] },
-  back:   { eye: [0, 1, 0] },
-  right:  { eye: [1, 0, 0] },
-  left:   { eye: [-1, 0, 0] },
-  iso:    { eye: [1, -1, 1] },
-}
-
 export interface ViewportApi {
   /** Combine two nodes — plain solids or whole groups (0=union,
    * 1=subtract a−b, 2=intersect). Returns the result root (a single object,
@@ -1077,6 +1051,16 @@ export interface ViewportApi {
    * projection, which has no lens) rather than waiting on the next
    * `onProjectionChange` callback. */
   getProjection: () => Projection
+  /**
+   * Orbit by an angular delta, in OrbitControls' own sense: `deltaTheta` is
+   * an azimuth step (its `rotateLeft`), `deltaPhi` a polar one (`rotateUp`).
+   * For viewport chrome that drives the camera without owning a canvas
+   * gesture — the ViewCube's drag (docs/design/camera.md §8). Clamping,
+   * damping and the pole margin all come from the live controls, so this
+   * feels exactly like a middle-drag; `viewCubeDrag.ts` converts pixels to
+   * the radians that go in. Cancels an in-flight camera tween.
+   */
+  orbitBy: (deltaTheta: number, deltaPhi: number) => void
   /**
    * Set the perspective vertical fov directly (degrees, clamped to
    * `[MIN_FOV_DEG, MAX_FOV_DEG]` — `cameraRig.ts`). The normal path is typing
@@ -4119,6 +4103,12 @@ export default function Viewport({
      * which is a harmless no-op once we already hold it).
      */
     function onFovDragPointerDownCapture(ev: PointerEvent): void {
+      // Registered on the CONTAINER, so it also sees presses on the DOM
+      // overlays inside it (the ViewCube, the HUD chips, the VCB). Those are
+      // not canvas gestures: without this, clicking the cube while the Zoom
+      // tool is active would arm an fov drag, null `mouseButtons.LEFT`, and
+      // feed `canvasPoint` an event that never touched the canvas.
+      if (ev.target !== renderer.domElement) return
       if (ev.button !== 0) return
       if (fovDragState !== null || zoomWindowActive) return
       if (activeCameraTool !== 'Zoom' || rig.projection !== 'perspective') return
@@ -6112,7 +6102,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, orbitBy, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -7378,6 +7368,11 @@ export default function Viewport({
       retargetToCursorDepth(ev.clientX, ev.clientY)
     }
     function onRetargetPointerDownCapture(ev: PointerEvent): void {
+      // Container-registered, so guard against the DOM overlays the same way
+      // `onFovDragPointerDownCapture` does — a middle-click on the ViewCube
+      // would otherwise re-pivot on whatever geometry happens to lie behind
+      // the widget.
+      if (ev.target !== renderer.domElement) return
       // Middle button = orbit (configureControls). Right-drag pans, which
       // OrbitControls keeps screen-relative regardless of target depth.
       if (ev.button !== 1) return
@@ -7455,6 +7450,39 @@ export default function Viewport({
     function toggleProjection(): void {
       rig.toggleProjection(controls.target)
       rebindControlsForProjectionChange()
+      scheduleRender()
+    }
+
+    /**
+     * Orbit the camera by an angular delta, for chrome that drives the camera
+     * without owning a canvas gesture — today the ViewCube's drag
+     * (docs/design/camera.md §8).
+     *
+     * Deliberately routed through OrbitControls' PUBLIC `rotateLeft`/
+     * `rotateUp` rather than a second copy of the spherical math. Those are
+     * the same primitives its own middle-drag handler calls, so this inherits
+     * the `camera.up`→+Y quaternion trick, the `minPolarAngle`/`maxPolarAngle`
+     * clamp `configureControls` sets from `POLE_TILT`, `makeSafe`, and the
+     * damping tail — none of which can then drift from the canvas gesture
+     * the cube is supposed to feel identical to. It also needs none of
+     * OrbitControls' private fields, unlike `orbitDragSwitch.ts`, which
+     * documents at length why naming them is a three.js-upgrade liability.
+     *
+     * Reads `controls` through the closed-over `let`, so it keeps working
+     * after `rebindControlsForProjectionChange` disposes and rebuilds the
+     * instance on a projection toggle.
+     *
+     * `rotateLeft`/`rotateUp` each call `update()` themselves, so one
+     * `orbitBy` runs two — under damping the azimuth leads the polar by a
+     * single 8% step, which is sub-millidegree at frame rate and invisible.
+     * The tween cancel mirrors the `'start'` listener `attachControlsListeners`
+     * wires for canvas gestures: these rotations dispatch `'change'` but not
+     * `'start'`, so an in-flight tween would otherwise fight the drag.
+     */
+    function orbitBy(deltaTheta: number, deltaPhi: number): void {
+      cancelCameraTween()
+      controls.rotateLeft(deltaTheta)
+      controls.rotateUp(deltaPhi)
       scheduleRender()
     }
     // Push the initial projection once, mount-time — the parent's checkbox
@@ -8080,6 +8108,15 @@ export default function Viewport({
         // `preserveDrawingBuffer`, so the drawing buffer's contents aren't
         // guaranteed to survive past this task).
         if (loupeState.phase === 'engaged') copyLoupeSource(loupeState.x, loupeState.y)
+        // Camera orientation for viewport chrome that has to keep facing the
+        // right way (`cameraPoseBus`, today the ViewCube). Deliberately AFTER
+        // the loupe copy: that copy must be the first thing to touch the
+        // drawing buffer after `render()` (its own doc explains why), and
+        // publishing here makes it structurally impossible for a subscriber
+        // to ever get scheduled into that window. The bus drops an unchanged
+        // pose, so a frame rendered for some OTHER reason — a material fade,
+        // the loupe itself — costs subscribers nothing.
+        publishCameraPose(camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w)
         needsRender = false
       }
       // Re-arm only while something is still actively animating —
@@ -9574,6 +9611,11 @@ export default function Viewport({
     return () => {
       renderScheduler.cancel()
       document.removeEventListener('visibilitychange', onVisibilityChange)
+      // Drop the retained camera orientation: this effect re-runs on a
+      // `wasmScene` change (a new document), and chrome that outlives the
+      // remount must not be handed the PREVIOUS document's camera for the
+      // frame before the new one publishes.
+      resetCameraPoseBus()
       // A Scene camera tween and its settle timer outlive nothing: cancel
       // both so no post-unmount frame or callback fires into a torn-down
       // tree (docs/design/scenes.md §5).

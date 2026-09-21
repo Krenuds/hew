@@ -12,7 +12,9 @@ This doc answers two questions: what works now, and where Hew is going.
 
 **The SketchUp moves.** Draw on any face or plane — lines, rectangles,
 circles, arcs, polygons — and push/pull the result into a solid.
-Orbit, pan, and zoom, same mouse buttons. Inference snapping everywhere,
+Orbit, pan, and zoom, same mouse buttons. A view cube in the corner shows
+which way you are facing — click a face, edge, or corner to swing there
+without losing your zoom, or drag it to orbit. Inference snapping everywhere,
 mostly the same shortcuts. Follow Me sweeps profiles into moldings,
 spheres, and goblets. Offset, Slice, through-cuts, and Move/Rotate/Scale
 with copy and `3x` arrays.

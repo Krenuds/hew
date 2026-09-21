@@ -241,3 +241,45 @@ textarea,
     opacity: 1;
   }
 }
+
+/* ViewCube (docs/design/camera.md §8) — the hover/active states the widget
+ * cannot express inline, since inline styles have no pseudo-classes.
+ *
+ * Deliberately NOT expressed with `opacity` or `filter`: either one on an
+ * element inside a `transform-style: preserve-3d` subtree flattens the whole
+ * cube back to 2D. Background and border-color only, all the way down. */
+.hew-view-cube-zone {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 90ms ease;
+}
+
+/* Hover is driven from JS, not `:hover`. Chromium routes a pointer event
+ * inside a `preserve-3d` subtree to a different element than it reports from
+ * `elementsFromPoint`, so a zone never reliably receives `:hover` at all —
+ * `ViewCube.tsx` picks the region itself and sets this flag. */
+.hew-view-cube-zone[data-hover='true'] {
+  background: var(--accent-tint-18);
+}
+
+/* The region the camera is already parked on. */
+.hew-view-cube-zone[data-here='true'] {
+  background: var(--accent-tint-15);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+.hew-view-cube-zone:focus-visible {
+  outline: 2px solid var(--accent-base);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hew-view-cube-zone {
+    transition: none;
+  }
+}

@@ -218,6 +218,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'reset-axes', label: 'Reset Drawing Axes', description: 'Reset the movable drawing axes back to world identity.', group: 'Actions', synonyms: ['drawing axes', 'origin', 'reset axes'] },
   { id: 'toggle-grid', label: 'Toggle Grid', description: 'Show or hide the ground grid.', group: 'Actions' },
   { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
+  { id: 'toggle-view-cube', label: 'Toggle View Cube', description: 'Show or hide the viewport orientation cube.', group: 'Actions', synonyms: ['view cube', 'viewcube', 'nav cube', 'navigation cube', 'orientation', 'gizmo'] },
   { id: 'toggle-section-active', label: 'Section Cut', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'section plane', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
   { id: 'toggle-parallel-projection', label: 'Parallel Projection', description: 'Toggle between perspective and parallel (orthographic) projection.', group: 'Actions', synonyms: ['orthographic', 'perspective', 'ortho'] },

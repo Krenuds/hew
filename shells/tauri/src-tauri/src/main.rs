@@ -3008,6 +3008,9 @@ fn main() {
                 MenuItemBuilder::with_id("view-reset-axes", "Reset Drawing Axes").build(handle)?;
             let view_grid = check_item(handle, &mut checks, "view-grid", "Grid", None, None)?;
             let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
+            // The viewport orientation cube (docs/design/camera.md §8) — viewport
+            // chrome, so it sits with Axes/Grid/Guides rather than under Camera.
+            let view_cube = check_item(handle, &mut checks, "view-cube", "View Cube", None, None)?;
             // Section Plane's active (clipping) toggle — moved here from Tools
             // (section-plane-polish D3); same "toggle-section-active" dispatch
             // it always had. Checked only when a section is BOTH placed and
@@ -3158,6 +3161,7 @@ fn main() {
                 .item(&view_reset_axes)
                 .item(&view_grid)
                 .item(&view_guides)
+                .item(&view_cube)
                 .item(&view_section_plane)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&win_model_info)
@@ -3918,6 +3922,7 @@ fn main() {
                 "view-reset-axes" => "reset-axes",
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
+                "view-cube" => "toggle-view-cube",
                 "view-section-plane" => "toggle-section-active",
                 "scenes-add" => "scenes-add",
                 "scenes-update" => "scenes-update",

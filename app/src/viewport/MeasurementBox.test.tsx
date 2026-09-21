@@ -47,14 +47,18 @@ describe('MeasurementBox', () => {
     expect(screen.getByText('1m')).toBeInTheDocument()
   })
 
-  // Shop-mode playtest finding 4: the editor's top-right docking sits
-  // directly under Shop Mode's own ⋯ menu button in both orientations.
+  // Shop-mode playtest finding 4: the editor's docking sat directly under
+  // Shop Mode's own ⋯ menu button in both orientations.
   describe('variant="shop" (finding 4)', () => {
-    it('defaults to the editor placement/style when omitted — byte-identical to before this prop existed', () => {
+    it('defaults to the editor placement/style when omitted', () => {
+      // Lower-right, not the top-right it used to hold: the ViewCube took
+      // that corner (docs/design/camera.md §8) and would have been covered by
+      // this box on every measured gesture.
       const { container } = render(<MeasurementBox toolName="Move" value="1m" />)
       const root = container.firstChild as HTMLElement
-      expect(root.style.top).toBe('16px')
+      expect(root.style.bottom).toBe('16px')
       expect(root.style.right).toBe('16px')
+      expect(root.style.top).toBe('')
       expect(root.style.left).toBe('')
     })
 

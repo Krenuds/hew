@@ -170,11 +170,16 @@ export function MeasurementBox({
     )
   }
 
+  // Lower-right. The ViewCube (docs/design/camera.md §8) owns the top-right
+  // corner now, and this box would sit on top of it during any measured
+  // gesture. Lower-right is also where the `shop` variant docks in portrait,
+  // so both modes put the value box in one place. Clear of the contextual
+  // dock, which is bottom-CENTER.
   return (
     <div
       style={{
         position: 'absolute',
-        top: '16px',
+        bottom: '16px',
         right: '16px',
         display: 'flex',
         alignItems: 'center',

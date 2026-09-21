@@ -81,6 +81,15 @@ export default defineConfig({
             // pinned rendering path; the detection logic itself is
             // unit-tested (gpuCapability.test.ts).
             { name: 'hew.debug.gpuProfile', value: 'hardware' },
+            // The ViewCube (docs/design/camera.md §8) ships ON, and it sits
+            // in the top-right of the viewport — inside the canvas crop the
+            // visual goldens capture, and over the corner several specs
+            // click. Pin it OFF for the suite so the render lane keeps
+            // testing the RENDER rather than the chrome, exactly as the
+            // welcome-screen pin above does; `view-cube.spec.ts` turns it
+            // back on explicitly, the same way the welcome-screen specs
+            // clear that key.
+            { name: 'hew.settings.viewCube', value: 'false' },
           ],
         },
       ],

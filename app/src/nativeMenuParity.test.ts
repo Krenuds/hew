@@ -355,3 +355,43 @@ describe('Copy/Cut/Paste/Paste In Place menu parity', () => {
     expect(byId.get('edit-paste-in-place')?.gate).toBe('clipboardHasContent')
   })
 })
+
+/**
+ * View ▸ View Cube (docs/design/camera.md §8) — a persisted boolean surfaced
+ * as a checkmark, the same five-surface shape `scenes-transitions` has: App
+ * state, the web MenuBar, the `menuActionRef` dispatch, the command palette,
+ * and the native macOS item. Nothing links those five, so this block is what
+ * makes the drift real for this id; it is scoped to the cube rather than
+ * folded into the tool-parity suite above, which covers only the persistent
+ * checkable TOOL set.
+ */
+describe('View Cube menu parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+
+  it('view-cube is built via check_item, attached to a submenu, and dispatches to toggle-view-cube', () => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"view-cube"`, 's').exec(source)
+    expect(binding, 'no check_item binding found for view-cube').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      source.includes(`.item(&${variable})`),
+      'view-cube is built but never attached to a SubmenuBuilder chain',
+    ).toBe(true)
+    expect(
+      /"view-cube"\s*=>\s*"toggle-view-cube"/.test(source),
+      'view-cube has no dispatch arm to toggle-view-cube',
+    ).toBe(true)
+  })
+
+  it('is offered from the web MenuBar (View ▸ View Cube)', () => {
+    expect(menuBarSource).toContain('label="View Cube"')
+    expect(menuBarSource).toContain('onToggleViewCube')
+    expect(menuBarSource).toContain('showViewCube')
+  })
+
+  it('is offered from the command palette', () => {
+    const entry = paletteEntries().find((e) => e.id === 'toggle-view-cube')
+    expect(entry, 'toggle-view-cube is missing from the command palette').toBeDefined()
+    expect(entry?.label).toBe('Toggle View Cube')
+  })
+})
