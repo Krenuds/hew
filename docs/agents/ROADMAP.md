@@ -147,6 +147,25 @@ below.
   container, no group — toggled from Object Info, persisted as
   `sketches[].locked` (manifest v17). Distinct from the axis/plane lock a
   draw tool applies to a gesture, which is transient cursor state
+- **Named sketches** — a sketch is a node: it takes a name, tags and
+  hidden state like an object does, through the same calls
+  (`NodeId::Sketch`, node kind 3 across the FFI; `hew.entity.rename` and
+  `hew.tag.assign` in the API). The Outliner shows one row per sketch with
+  its shapes nested inside as "Shape N"; the row selects the whole sketch,
+  carries an eye, and opens itself when the selection is inside it. Object
+  Info names and tags a whole sketch; a shape, line or curve reads "Shape 2
+  of Ground floor". A hidden sketch is out of the cursor's way as well as out
+  of view — nothing snaps to it and Push/Pull clicks through it — and its
+  name, tags and hidden state save with the document (manifest v18) and are
+  captured by Scenes. A sketch is not yet a tree member: grouping,
+  duplicating and make-component refuse it typed (`SketchNodeUnsupported`)
+- **New Sketch and Draw Into Sketch** (Object menu, command palette) —
+  the draw tools keep everything drawn on one plane in one sketch so
+  mixed-tool profiles close; New Sketch makes the next stroke start a fresh
+  one, and Draw Into Sketch (or a double-click on a sketch's Outliner row)
+  makes an older sketch the one new strokes on its plane join. The Outliner
+  marks that sketch "drawing". Neither is an undo step — a sketch is born
+  with its first stroke. A locked sketch refuses Draw Into
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a

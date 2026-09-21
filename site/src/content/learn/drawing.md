@@ -146,6 +146,16 @@ Type a distance right after the click commits too: the offset you just made redo
 
 If a move would break the sketch's topology (collapse a segment, fold a region), Hew refuses with a message and leaves the vertex where it was.
 
+## Keeping a drawing
+
+A sketch doesn't have to be used up. Treat it as a drawing — a floor plan, a site layout — that you name, keep, and build from.
+
+**One sketch per plane, until you say otherwise.** Everything you draw on one plane joins the same sketch, which is what lets a line close an arc into a region. **Object ▸ New Sketch** ends it: the next thing you draw starts a fresh sketch, so a furniture layout stays separate from the floor plan under it. To go back and add to an older sketch, select it and choose **Object ▸ Draw Into Sketch**, or double-click its row in the Outliner. The Outliner marks the sketch your next stroke will join with **drawing**.
+
+**Name it, tag it, hide it.** Each sketch is one row in the Outliner with its shapes nested inside. Click the row to select the whole sketch, then give it a name and tags in Object Info, exactly as you would an object. The eye on its row hides it — from view and from the cursor, so nothing snaps to it and Push/Pull clicks straight through to what's behind. Names, tags, and hidden sketches are saved with the document, and a Scene remembers which sketches were hidden.
+
+**Lock it to build from it.** Select a sketch and check **Locked sketch** in Object Info. A locked sketch is a finished drawing: new strokes land beside it instead of cutting into it, and Push/Pull builds from it *by copy* — the wall goes up and the plan is still there, so you can raise every room from the same floor plan, and the same room twice. It draws as a dashed outline and stays fully snappable. Unlock it to edit it; unlocked, extruding a region uses up its outline as usual.
+
 ## Inference while drawing
 
 Every click snaps. The colored dot and label at the cursor tell you what you're about to snap to — Endpoint (green), Center and Quadrant of a drawn circle or arc (teal), Midpoint (cyan), Intersection (amber — where a construction guide crosses an edge, a sketch line, or another guide), Tangent (violet — where an in-progress line just grazes a drawn circle), On Edge (red), On Face (blue), On Guide (purple), On Axis (the axis color), or Ground (gray). Lines you draw across each other need no cue of their own: crossings become real endpoints the moment they're drawn. A dashed helper line appears through the snap point when the snap has a direction, such as an axis alignment. Construction guides let you add snap targets of your own; [Precision, measurement, and guides](/learn/measurement-and-guides/) covers them.

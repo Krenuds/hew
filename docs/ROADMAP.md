@@ -25,6 +25,12 @@ Union, Subtract, and Intersect run only when you ask. A drawn circle
 stays a true circle underneath its facets, so exports can re-facet it
 at any smoothness.
 
+**Drawings you keep.** A sketch is a named drawing, not just stock: one
+row in the outliner with its shapes inside, with a name, tags, and a hide
+toggle. New Sketch keeps a furniture layout separate from the floor plan
+under it. Lock a sketch and Push/Pull builds from it by copy, so a plan
+survives every wall raised from it.
+
 **Precision.** Type exact sizes mid-gesture — `24cm`, `9.5"`,
 feet-and-inches. Tape measure, protractor, guides, linear and radial
 dimensions, leader text, and solid 3D text. Measure an edge, type what

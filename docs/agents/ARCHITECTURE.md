@@ -211,6 +211,22 @@ a larger coaxial solid over a smaller one. Nothing about re-extrusion is
 stored or derived: the `.hew` format carries no claim data at v11, and the
 stored claims of older versions are ignored on load (HEW_FILE_FORMAT.md).
 
+A Sketch is a **node**: it carries a display name, tag paths and
+user-hidden view state exactly as an Object, Group or Instance does, through
+the same node-keyed calls (`NodeId::Sketch`). It is what a user organizes a
+drawing by — one named row in the outliner, with its shapes nested
+underneath. It is not a tree *member*: no group or definition lists one, it
+has no parent, and every operation that works on the tree below a node
+(grouping, reparenting, duplicating, make-component, booleans, annotation
+anchors) refuses it with a typed `SketchNodeUnsupported`. A hidden sketch
+leaves the inference scene as a hidden solid does, so nothing snaps to it and
+a click passes through it.
+
+Which sketch a stroke joins is the editor's concern, not the kernel's: the
+kernel lets any number of sketches share a plane, and the draw tools
+remember one target per plane so mixed-tool profiles close into regions.
+New Sketch forgets those targets; Draw Into Sketch sets one.
+
 Within a Sketch, the user-facing units are derived, identity-stable
 sub-entities, mirroring how regions already work: **islands** (connected
 components — each shape drawn apart from the others selects, deletes, and
