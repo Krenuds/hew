@@ -54,7 +54,7 @@ function makeScene(overrides: Partial<{
     user_hidden_ids: () => overrides.user_hidden_ids ?? [],
     group_members: (groupId: bigint) => overrides.group_members?.[String(groupId)] ?? [],
     node_tags: (kindNum: number, id: bigint) => {
-      const kind = ['object', 'group', 'instance'][kindNum]
+      const kind = ['object', 'group', 'instance', 'sketch'][kindNum]
       return overrides.node_tags?.[`${kind}:${id}`] ?? []
     },
   } as unknown as WasmScene
@@ -144,13 +144,13 @@ describe('seedHiddenTagPathsFromRegistry', () => {
 })
 
 describe('seedHiddenKeysFromRegistry', () => {
-  it('maps kind indices (0=object, 1=group, 2=instance) to nodeKey strings', () => {
+  it('maps kind indices (0=object, 1=group, 2=instance, 3=sketch) to nodeKey strings', () => {
     const scene = makeScene({
-      user_hidden_kinds: [0, 1, 2],
-      user_hidden_ids: [10n, 20n, 30n],
+      user_hidden_kinds: [0, 1, 2, 3],
+      user_hidden_ids: [10n, 20n, 30n, 40n],
     })
     const seeded = seedHiddenKeysFromRegistry(scene)
-    expect(seeded).toEqual(new Set(['object:10', 'group:20', 'instance:30']))
+    expect(seeded).toEqual(new Set(['object:10', 'group:20', 'instance:30', 'sketch:40']))
   })
 
   it('skips an unrecognized kind index rather than throwing', () => {
@@ -162,7 +162,31 @@ describe('seedHiddenKeysFromRegistry', () => {
 describe('unionHiddenLeafIds', () => {
   it('returns empty sets for two empty inputs', () => {
     const scene = makeScene()
-    expect(unionHiddenLeafIds(scene, new Set(), new Set())).toEqual({ objectIds: [], instanceIds: [] })
+    expect(unionHiddenLeafIds(scene, new Set(), new Set())).toEqual({
+      objectIds: [],
+      instanceIds: [],
+      sketchIds: [],
+    })
+  })
+
+  it('resolves a manually-hidden sketch to itself — a sketch is a leaf of its own', () => {
+    const scene = makeScene({ sketch_ids: [7n] })
+    const result = unionHiddenLeafIds(scene, new Set([nodeKey({ kind: 'sketch', id: 7n })]), new Set())
+    expect(result).toEqual({ objectIds: [], instanceIds: [], sketchIds: [7n] })
+  })
+
+  it('hides a sketch carrying a hidden tag, once even when hidden both ways', () => {
+    const scene = makeScene({
+      object_ids: [1n],
+      sketch_ids: [7n, 8n],
+      node_tags: { 'sketch:7': ['Plans/Ground'], 'object:1': ['Structure'] },
+    })
+    const result = unionHiddenLeafIds(
+      scene,
+      new Set([nodeKey({ kind: 'sketch', id: 7n })]),
+      new Set([tagPathKey(['Plans'])]),
+    )
+    expect(result).toEqual({ objectIds: [], instanceIds: [], sketchIds: [7n] })
   })
 
   it('resolves a manually-hidden plain object/instance directly', () => {
@@ -225,6 +249,6 @@ describe('unionHiddenLeafIds', () => {
   it('ignores a tag-path set when no node carries any tag', () => {
     const scene = makeScene({ object_ids: [1n] })
     const result = unionHiddenLeafIds(scene, new Set(), new Set([tagPathKey(['Nonexistent'])]))
-    expect(result).toEqual({ objectIds: [], instanceIds: [] })
+    expect(result).toEqual({ objectIds: [], instanceIds: [], sketchIds: [] })
   })
 })

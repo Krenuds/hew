@@ -110,15 +110,15 @@ export function seedHiddenTagPathsFromRegistry(scene: Scene): Set<string> {
 /**
  * Build the set of hidden-node keys (`nodeKey` strings) from the document's
  * persisted USER-hidden registry (`scene.user_hidden_kinds()`/
- * `user_hidden_ids()`, manifest v6) — this is how imported `.skp` hidden
- * groups/components/instances (and a re-opened `.hew` with nodes previously
- * eye-toggled) arrive, since the hidden-node set itself is session-only
+ * `user_hidden_ids()`, manifest v6; sketches at kind 3 from v18) — this is
+ * how imported `.skp` hidden groups/components/instances (and a re-opened
+ * `.hew` with nodes or sketches previously eye-toggled) arrive, since the hidden-node set itself is session-only
  * view state that gets reset on every load.
  */
 export function seedHiddenKeysFromRegistry(scene: Scene): Set<string> {
   const kinds = scene.user_hidden_kinds()
   const ids = scene.user_hidden_ids()
-  const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance']
+  const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance', 'sketch']
   const seeded = new Set<string>()
   for (let i = 0; i < kinds.length; i++) {
     const kind = kindNames[kinds[i]]
@@ -129,8 +129,8 @@ export function seedHiddenKeysFromRegistry(scene: Scene): Set<string> {
 }
 
 /**
- * Resolve the full renderer-hidden leaf sets (deduplicated object/instance
- * ids) implied by a hidden-node-key set plus a hidden-tag-path set — the
+ * Resolve the full renderer-hidden leaf sets (deduplicated object/instance/
+ * sketch ids) implied by a hidden-node-key set plus a hidden-tag-path set — the
  * union walk `App.tsx`'s `pushUnionHidden` runs on every hide-toggle, and
  * (this refactor's reason for existing here) the SAME walk a shell's
  * boot-time seed needs to reproduce the editor's exact initial hidden set
@@ -139,14 +139,16 @@ export function seedHiddenKeysFromRegistry(scene: Scene): Set<string> {
  *
  * Pure function of `scene` plus the two hidden-key sets: no renderer/kernel
  * side effects. `hiddenKeys` entries are `nodeKey` strings for the
- * manually-hidden nodes (always `object`/`group`/`instance` — the only
- * kinds a hide toggle ever targets, so the plain `kind:id` split below never
- * meets a sketch-scoped `kind:sketch:id` key); `hiddenTagPaths` entries are
+ * manually-hidden nodes (always `object`/`group`/`instance`/`sketch` — the
+ * only kinds a hide toggle ever targets, so the plain `kind:id` split below
+ * never meets a sketch-scoped `kind:sketch:id` key); a whole sketch is a leaf
+ * of its own, since no group holds one. `hiddenTagPaths` entries are
  * `tagPathKey`-encoded path arrays. A hidden GROUP's/tag's coverage expands
  * through `collectLeafIds`/`isPathUnder` exactly as the live editor's own
  * eye toggles do. The caller decides what to do with the result — App.tsx
  * additionally pushes it into the kernel's inference-hide state via
- * `scene.set_hidden` (so snap/pick skip hidden geometry), a real kernel call
+ * `scene.set_hidden`/`set_hidden_sketches` (so snap/pick skip hidden
+ * geometry), a real kernel call
  * Shop Mode's view-state-only posture never makes; Shop Mode instead feeds
  * the result straight to `ViewportApi.setHidden`.
  */
@@ -154,21 +156,29 @@ export function unionHiddenLeafIds(
   scene: Scene,
   hiddenKeys: ReadonlySet<string>,
   hiddenTagPaths: ReadonlySet<string>,
-): { objectIds: bigint[]; instanceIds: bigint[] } {
+): { objectIds: bigint[]; instanceIds: bigint[]; sketchIds: bigint[] } {
   const getGroupMembers = (groupId: bigint): NodeRef[] =>
     scene.group_members(groupId).map((m) => nodeRefFromJs(m as { kind: string; id: bigint }))
 
   const hiddenObjectIds: bigint[] = []
   const hiddenInstanceIds: bigint[] = []
+  const hiddenSketchIds: bigint[] = []
+  const collect = (node: NodeRef) => {
+    if (node.kind === 'sketch') {
+      hiddenSketchIds.push(node.id)
+      return
+    }
+    const { objectIds, instanceIds } = collectLeafIds(node, getGroupMembers)
+    hiddenObjectIds.push(...objectIds)
+    hiddenInstanceIds.push(...instanceIds)
+  }
 
   // --- (a) manual per-node hides ---
   for (const k of hiddenKeys) {
     const colonIdx = k.indexOf(':')
     const kind = k.slice(0, colonIdx) as NodeRef['kind']
     const id = BigInt(k.slice(colonIdx + 1))
-    const { objectIds, instanceIds } = collectLeafIds({ kind, id }, getGroupMembers)
-    hiddenObjectIds.push(...objectIds)
-    hiddenInstanceIds.push(...instanceIds)
+    collect({ kind, id })
   }
 
   // --- (b) tag-path hides ---
@@ -178,6 +188,7 @@ export function unionHiddenLeafIds(
       ...Array.from(scene.object_ids()).map((id) => ({ kind: 'object' as const, id })),
       ...Array.from(scene.group_ids()).map((id) => ({ kind: 'group' as const, id })),
       ...Array.from(scene.instance_ids()).map((id) => ({ kind: 'instance' as const, id })),
+      ...Array.from(scene.sketch_ids()).map((id) => ({ kind: 'sketch' as const, id })),
     ]
     const tagged: { node: NodeRef; path: string[] }[] = []
     for (const raw of allNodes) {
@@ -205,10 +216,7 @@ export function unionHiddenLeafIds(
     // A node is covered if its tag path is at or under any hidden anchor path.
     for (const { node, path } of tagged) {
       const covered = hiddenAnchorPaths.some((anchor) => isPathUnder(path, anchor))
-      if (!covered) continue
-      const { objectIds, instanceIds } = collectLeafIds(node, getGroupMembers)
-      hiddenObjectIds.push(...objectIds)
-      hiddenInstanceIds.push(...instanceIds)
+      if (covered) collect(node)
     }
   }
 
@@ -216,5 +224,6 @@ export function unionHiddenLeafIds(
   return {
     objectIds: [...new Set(hiddenObjectIds)],
     instanceIds: [...new Set(hiddenInstanceIds)],
+    sketchIds: [...new Set(hiddenSketchIds)],
   }
 }

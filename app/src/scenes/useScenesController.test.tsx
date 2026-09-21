@@ -23,6 +23,7 @@ function makeResolved(overrides: Record<string, any> = {}) {
     has_hidden: vi.fn().mockReturnValue(true),
     hidden_object_ids: vi.fn().mockReturnValue(new BigUint64Array([7n, 8n])),
     hidden_instance_ids: vi.fn().mockReturnValue(new BigUint64Array([])),
+    hidden_sketch_ids: vi.fn().mockReturnValue(new BigUint64Array([])),
     has_hidden_tags: vi.fn().mockReturnValue(true),
     hidden_tag_paths: vi.fn().mockReturnValue(['Hardware/Screws']),
     has_hidden_nodes: vi.fn().mockReturnValue(true),
@@ -55,6 +56,7 @@ function makeScene(entries: any[] = [], overrides: Record<string, any> = {}): Sc
     apply_scene: vi.fn(() => makeResolved()),
     scene_drift: vi.fn().mockReturnValue('{"camera":false,"hiddenNodes":false,"hiddenTags":false,"section":false,"display":false,"staleRefs":0}'),
     set_hidden: vi.fn(),
+    set_hidden_sketches: vi.fn(),
     ...overrides,
   } as unknown as Scene
 }
@@ -63,6 +65,7 @@ function makeApi(): ViewportApi {
   return {
     getCameraState: vi.fn().mockReturnValue({ projection: 'perspective', fovDeg: 45, eye: [1, 1, 1], target: [0, 0, 0], up: [0, 0, 1] }),
     setHidden: vi.fn(),
+    setHiddenSketches: vi.fn(),
     setSectionPlane: vi.fn(),
     tweenCameraState: vi.fn((_s: unknown, _ms: number, done?: (c: boolean) => void) => done?.(true)),
     captureFrame: vi.fn().mockReturnValue({ width: 0, height: 0, pixels: new Uint8Array() }),

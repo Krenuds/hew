@@ -631,6 +631,10 @@ export class SceneRenderer {
   private activeLitInstanceSet: Set<bigint> | null = null
   /** Object ids that are hidden (group.visible = false). Session-only. */
   private hiddenObjectIds: Set<bigint> = new Set()
+  /** User-hidden world sketches (`setHiddenSketches`). Every world sketch
+   * shares two merged line buffers, so a hidden one is simply left out when
+   * `refreshAllSketches` rebuilds them — lines and region fills alike. */
+  private hiddenSketchIds: Set<bigint> = new Set()
   /** Instance ids that are hidden (group.visible = false). Session-only. */
   private hiddenInstanceIds: Set<bigint> = new Set()
   /** In-flight opacity tweens started by `setHiddenFaded` (Shop Mode's
@@ -2139,6 +2143,7 @@ export class SceneRenderer {
     const allLinePositions: number[] = []
     const lockedLinePositions: number[] = []
     for (const sketchHandle of this.wasmScene.sketch_ids()) {
+      if (this.hiddenSketchIds.has(sketchHandle)) continue
       const locked = this.wasmScene.sketch_locked(sketchHandle)
       const into = locked ? lockedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
@@ -3287,6 +3292,19 @@ export class SceneRenderer {
     this.hiddenInstanceIds = new Set(hiddenInstanceIds)
     this._applyHidden()
     this._resizeSectionWidget()
+  }
+
+  /** Replace the user-hidden world sketch set and redraw the sketch layer.
+   * A no-op when the set is unchanged, so the hide-toggle path can call it
+   * unconditionally without rebuilding every sketch each time. */
+  setHiddenSketches(hiddenSketchIds: bigint[]): void {
+    const next = new Set(hiddenSketchIds)
+    const same =
+      next.size === this.hiddenSketchIds.size &&
+      [...next].every((id) => this.hiddenSketchIds.has(id))
+    if (same) return
+    this.hiddenSketchIds = next
+    this.refreshAllSketches()
   }
 
   /**

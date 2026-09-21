@@ -2007,6 +2007,7 @@ export default function App() {
     // document reuses, so stale ids would silently hide (and un-pick) unrelated
     // objects after a load. (No-op if the viewport isn't mounted yet.)
     viewportApi.current?.setHidden([], [])
+    viewportApi.current?.setHiddenSketches([])
     // The document's persisted section plane (docs/design/scenes.md §4) —
     // read BEFORE notifyLoaded, whose "new document, clean view state" reset
     // deletes the viewport's plane and, through handleSectionChanged, would
@@ -5141,12 +5142,19 @@ export default function App() {
     (nextHiddenKeys: Set<string>, nextHiddenTagPaths: Set<string>) => {
       const scene = state?.scene
       if (scene === undefined) return
-      const { objectIds, instanceIds } = unionHiddenLeafIds(scene, nextHiddenKeys, nextHiddenTagPaths)
+      const { objectIds, instanceIds, sketchIds } = unionHiddenLeafIds(
+        scene,
+        nextHiddenKeys,
+        nextHiddenTagPaths,
+      )
       // (1) Renderer: hide the meshes. (2) Kernel inference: drop the hidden
       // geometry so snap/pick_face skip it — otherwise you'd still snap to and
-      // be unable to click past a hidden solid's edges/faces.
+      // be unable to click past a hidden solid's edges/faces. Sketches take
+      // the same two steps through their own pair of calls.
       viewportApi.current?.setHidden(objectIds, instanceIds)
       scene.set_hidden(new BigUint64Array(objectIds), new BigUint64Array(instanceIds))
+      viewportApi.current?.setHiddenSketches(sketchIds)
+      scene.set_hidden_sketches(new BigUint64Array(sketchIds))
     },
     // state?.scene changes on every render; we capture it fresh via the closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps

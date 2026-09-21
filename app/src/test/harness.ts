@@ -2042,6 +2042,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         const name =
           kind === 'object' ? s.object_name(i) :
           kind === 'group' ? s.group_name(i) :
+          kind === 'sketch' ? s.sketch_name(i) :
           s.instance_name(i)
         return name ?? null
       }),

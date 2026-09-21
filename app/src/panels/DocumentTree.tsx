@@ -18,8 +18,9 @@
 import { useMemo, useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
-  entityLabel,
   resolveLabel,
+  shapeLabel,
+  isTreeMemberKind,
   breadcrumb,
   buildTreeIndexMap,
   isTreeRowDimmed,
@@ -243,17 +244,20 @@ export function DocumentTree({
     topNodes.forEach((n, i) => m.set(nodeKey(n), i))
     return m
   }, [topNodes])
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  // One outliner row per ISLAND (connected shape), numbered across all
-  // sketches — the user-facing unit; two shapes drawn apart get two rows.
-  const sketches = useMemo(
+  // One outliner row per SKETCH — the named node a user organizes by — with
+  // its shapes (connected islands) nested underneath. A sketch is a kernel
+  // node but not a tree member, so these rows follow the group-nested tree
+  // rather than sitting in it.
+  const sketchRows = useMemo(
     () =>
-      Array.from(scene.sketch_ids()).flatMap((sid) =>
-        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sketch: sid, island })),
-      ),
+      Array.from(scene.sketch_ids()).map((sid) => ({
+        sketch: sid,
+        islands: Array.from(scene.sketch_island_ids(sid)),
+      })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, docRev],
   )
+  const sketchNodes: NodeRef[] = sketchRows.map(({ sketch }) => ({ kind: 'sketch', id: sketch }))
 
   const selected = new Set(selectedIds.map((n) => nodeKey(n)))
   // A selected line/curve/island has no dedicated row beyond the island's —
@@ -273,6 +277,11 @@ export function DocumentTree({
     }
   }
   const isSelected = (n: NodeRef) => selected.has(nodeKey(n))
+  // A sketch row opens itself when the selection is inside it (a shape, a
+  // line, a curve), the same way a group opens for a selected member.
+  const sketchesHoldingSelection = new Set(
+    selectedIds.filter((n) => n.sketch !== undefined).map((n) => n.sketch as bigint),
+  )
 
   // Primary selection for scroll-into-view: stable ref so the effect only
   // fires when the primary selection actually changes (not on docRev bumps).
@@ -484,15 +493,37 @@ export function DocumentTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topNodes, filter, scene, docRev])
   const filterActive = filterResult !== null
-  const filterQuery = filter.trim().toLowerCase()
-  // Sketches aren't part of the group-nested tree `filterTreeKeys` walks
-  // (they're a flat, separately-numbered list) — filtered here directly
-  // against the same "Sketch N" label each row renders.
-  const visibleSketches = filterActive
-    ? sketches.filter((_, index) => entityLabel('sketch', index).toLowerCase().includes(filterQuery))
-    : sketches
+  // Sketches filter through the same walk, as their own little forest: a
+  // sketch matches by its name (or positional label), a shape by "Shape N",
+  // and a matching shape keeps its sketch on screen as a dimmed ancestor.
+  const sketchLabelByKey = new Map<string, string>()
+  sketchRows.forEach(({ sketch }, index) => {
+    sketchLabelByKey.set(
+      nodeKey({ kind: 'sketch', id: sketch }),
+      resolveLabel(scene.sketch_name(sketch), undefined, 'sketch', index),
+    )
+  })
+  const sketchFilterResult = useMemo(() => {
+    const getChildren = (node: NodeRef): NodeRef[] =>
+      node.kind === 'sketch'
+        ? (sketchRows.find((r) => r.sketch === node.id)?.islands ?? []).map((island) => ({
+            kind: 'sketch-island' as const,
+            id: island,
+            sketch: node.id,
+          }))
+        : []
+    const getLabel = (node: NodeRef): string => {
+      if (node.kind === 'sketch') return sketchLabelByKey.get(nodeKey(node)) ?? ''
+      const islands = sketchRows.find((r) => r.sketch === node.sketch)?.islands ?? []
+      return shapeLabel(islands.indexOf(node.id))
+    }
+    return filterTreeKeys(sketchNodes, getChildren, getLabel, filter)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sketchRows, filter, scene, docRev])
   const filterEmpty =
-    filterActive && (filterResult?.matches.size ?? 0) === 0 && visibleSketches.length === 0
+    filterActive &&
+    (filterResult?.matches.size ?? 0) === 0 &&
+    (sketchFilterResult?.matches.size ?? 0) === 0
 
   // Expand/collapse state, lifted out of each NodeRow's own local state
   // (design: a Map<key, boolean> here) so applying and then clearing a
@@ -656,14 +687,14 @@ export function DocumentTree({
     // (ExplodeSessionScope), so nothing can be a valid target — but the
     // drag still runs so the not-allowed cursor and the drop toast say so,
     // instead of the row simply not moving.
-    if (nodeKindToNumber(node.kind) < 0) return // sketch-scoped: no kernel NodeId
+    if (!isTreeMemberKind(node.kind)) return // a sketch is not a tree member
     // A text selection or the row's own image would start WebKit's native
     // drag on mouse movement and cancel the pointer stream mid-drag.
     e.preventDefault()
     if (dragRef.current !== null) return
     const dragged =
       isSelected(node) && selectedIds.length > 1
-        ? selectedIds.filter((n) => nodeKindToNumber(n.kind) >= 0)
+        ? selectedIds.filter((n) => isTreeMemberKind(n.kind))
         : [node]
     if (dragged.length === 0) return
     const onMove = (ev: PointerEvent) => handlePointerMove(ev)
@@ -828,9 +859,17 @@ export function DocumentTree({
         <ModelRow
           hidden={false}
           onToggleAllHidden={() =>
-            toggleContainerVisibility(null, topNodes, getGroupMembers, hiddenKeys, onSetHiddenMany)
+            toggleContainerVisibility(
+              null,
+              [...topNodes, ...sketchNodes],
+              getGroupMembers,
+              hiddenKeys,
+              onSetHiddenMany,
+            )
           }
-          anyChildHidden={collectDescendants(topNodes, getGroupMembers).some((d) => hiddenKeys.has(nodeKey(d)))}
+          anyChildHidden={collectDescendants([...topNodes, ...sketchNodes], getGroupMembers).some((d) =>
+            hiddenKeys.has(nodeKey(d)),
+          )}
           isDropTarget={dropHighlightKey === 'root'}
         />
         {sessionStack.map((frame, i) => (
@@ -930,22 +969,64 @@ export function DocumentTree({
             />
           )
         })}
-        {visibleSketches.map(({ sketch, island }) => {
-          const node: NodeRef = { kind: 'sketch-island', id: island, sketch }
-          const index = sketches.findIndex((s) => s.sketch === sketch && s.island === island)
+        {sketchRows.map(({ sketch, islands }) => {
+          const node: NodeRef = { kind: 'sketch', id: sketch }
+          const key = nodeKey(node)
+          const matched = sketchFilterResult?.matches.has(key) ?? false
+          const isFilterAncestor = sketchFilterResult?.ancestors.has(key) ?? false
+          if (sketchFilterResult !== null && !matched && !isFilterAncestor) return null
+          const hidden = hiddenKeys.has(key)
+          const expanded =
+            (expandedMap.get(key) ?? false) || isFilterAncestor || sketchesHoldingSelection.has(sketch)
           return (
-            <Row
-              key={`${sketch}:${island}`}
-              label={entityLabel('sketch', index)}
-              icon={<NodeIcon kind="sketch" />}
-              selected={isSelected(node)}
-              isPrimary={primaryKey === nodeKey(node)}
-              active={false}
-              dimmed={fullPath.length > 0}
-              indent={0}
-              rowRef={primaryKey === nodeKey(node) ? selectedRowRef : undefined}
-              onClick={(additive) => onSelect(node, additive)}
-            />
+            <div key={key}>
+              <Row
+                label={sketchLabelByKey.get(key) ?? ''}
+                icon={<NodeIcon kind="sketch" />}
+                selected={isSelected(node)}
+                isPrimary={primaryKey === key}
+                active={false}
+                // Dimmed when shown only as the path to a matching shape.
+                dimmed={fullPath.length > 0 || (isFilterAncestor && !matched)}
+                hidden={hidden}
+                indent={0}
+                isGroup
+                expanded={expanded}
+                onToggleExpand={() => setNodeExpanded(key, !expanded)}
+                rowRef={primaryKey === key ? selectedRowRef : undefined}
+                onClick={(additive) => onSelect(node, additive)}
+                onToggleHidden={() => onToggleHidden(node)}
+              />
+              {expanded &&
+                islands.map((island, shapeIndex) => {
+                  const shape: NodeRef = { kind: 'sketch-island', id: island, sketch }
+                  const shapeKey = nodeKey(shape)
+                  // A matching SKETCH keeps only its matching shapes open to
+                  // view, like a matching group and its non-matching members.
+                  if (
+                    sketchFilterResult !== null &&
+                    !sketchFilterResult.matches.has(shapeKey)
+                  ) {
+                    return null
+                  }
+                  return (
+                    <Row
+                      key={shapeKey}
+                      label={shapeLabel(shapeIndex)}
+                      icon={<NodeIcon kind="sketch" />}
+                      selected={isSelected(shape)}
+                      isPrimary={primaryKey === shapeKey}
+                      active={false}
+                      dimmed={fullPath.length > 0}
+                      hidden={hidden}
+                      hiddenByParent={hidden}
+                      indent={1}
+                      rowRef={primaryKey === shapeKey ? selectedRowRef : undefined}
+                      onClick={(additive) => onSelect(shape, additive)}
+                    />
+                  )
+                })}
+            </div>
           )
         })}
         {filterEmpty && (

@@ -205,6 +205,7 @@ vi.mock('../io/recents', () => ({
 function makeViewportApiStub() {
   return {
     setHidden: vi.fn(),
+    setHiddenSketches: vi.fn(),
     notifyLoaded: vi.fn(),
     zoomExtents: vi.fn(),
     zoomToWorldBounds: vi.fn(),

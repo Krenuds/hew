@@ -5010,6 +5010,12 @@ impl Scene {
         self.doc.group_name(group_id(group)).map(str::to_string)
     }
 
+    /// A live sketch's display name, or `undefined` if unnamed/stale. Set it
+    /// through [`Scene::set_node_name`] with node kind `3`.
+    pub fn sketch_name(&self, sketch: u64) -> Option<String> {
+        self.doc.sketch_name(sketch_id(sketch)).map(str::to_string)
+    }
+
     /// An instance's own display name, or `undefined` if unnamed/stale. An
     /// unnamed instance should display its def's name — see
     /// [`Scene::component_name`] with [`Scene::instance_def`].
@@ -11074,6 +11080,7 @@ mod tests {
             .expect("and a tag");
         scene.set_node_user_hidden(3, s, true).expect("and hides");
 
+        assert_eq!(scene.sketch_name(s).as_deref(), Some("Ground floor"));
         assert_eq!(scene.user_hidden_kinds(), vec![3]);
         assert_eq!(scene.user_hidden_ids(), vec![s]);
         assert!(scene.node_user_hidden(3, s).unwrap());

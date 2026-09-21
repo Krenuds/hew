@@ -233,6 +233,7 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       has_hidden(): boolean
       hidden_object_ids(): BigUint64Array
       hidden_instance_ids(): BigUint64Array
+      hidden_sketch_ids(): BigUint64Array
       has_hidden_tags(): boolean
       hidden_tag_paths(): string[]
       has_hidden_nodes(): boolean
@@ -256,7 +257,7 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
         if (resolved.has_hidden_nodes()) {
           const kinds = resolved.hidden_node_kinds()
           const ids = resolved.hidden_node_ids()
-          const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance']
+          const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance', 'sketch']
           const keys = new Set<string>()
           for (let i = 0; i < kinds.length; i++) {
             const kind = kindNames[kinds[i]]
@@ -272,6 +273,9 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
           const instanceIds = Array.from(resolved.hidden_instance_ids())
           api?.setHidden(objectIds, instanceIds)
           s?.set_hidden(new BigUint64Array(objectIds), new BigUint64Array(instanceIds))
+          const sketchIds = Array.from(resolved.hidden_sketch_ids())
+          api?.setHiddenSketches(sketchIds)
+          s?.set_hidden_sketches(new BigUint64Array(sketchIds))
         }
         const dj = resolved.display_json()
         if (dj !== undefined) {

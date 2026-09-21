@@ -384,7 +384,10 @@ export function ShopApp() {
     (nextHiddenKeys: Set<string>, nextHiddenTagPaths: Set<string>, isolated: NodeRef | null, fadeMs?: number) => {
       const scn = sceneRef.current
       if (scn === null) return
-      const { objectIds, instanceIds } = unionHiddenLeafIds(scn, nextHiddenKeys, nextHiddenTagPaths)
+      const { objectIds, instanceIds, sketchIds } = unionHiddenLeafIds(scn, nextHiddenKeys, nextHiddenTagPaths)
+      // A sketch hidden in the editor stays hidden here. Isolate leaves
+      // sketches alone — it is about parts, and a sketch is not one.
+      viewportApi.current?.setHiddenSketches(sketchIds)
       const hiddenObjectIds = new Set(objectIds)
       const hiddenInstanceIds = new Set(instanceIds)
       if (isolated !== null) {

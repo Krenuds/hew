@@ -25,13 +25,13 @@ export function stripTagSuffix(name: string): string {
 }
 
 /**
- * Kind of a document node. `'sketch'` is a free-standing,
- * not-yet-extruded sketch and `'sketch-edge'` one individual line of one —
- * neither has a kernel `NodeId`/FFI `node_id` ('s NodeId enumerates only
- * Object/Group/Instance), so both deliberately stay out of
- * `nodeKindToNumber`'s mapping; their delete/pick route through dedicated
+ * Kind of a document node. `'sketch'` is a whole sketch — a kernel node that
+ * carries a name, tags and visibility (`nodeKindToNumber` gives it 3) but is
+ * not a tree member (`isTreeMemberKind`). `'sketch-island'` is one of its
+ * shapes, `'sketch-curve'` a drawn arc/circle, `'sketch-edge'` one line; none
+ * of those has a kernel `NodeId`. Sketch geometry ops route through dedicated
  * wasm methods (`delete_sketch`/`sketch_remove_edge`/`pick_sketch`/
- * `pick_sketch_edge`) instead of `delete_node`.
+ * `pick_sketch_edge`), never `delete_node`.
  */
 export type NodeKind =
   | 'object'
@@ -199,6 +199,15 @@ export function filterTreeKeys(
   return { matches, ancestors }
 }
 
+/** The positional label of a sketch's `index`-th shape (one connected
+ *  island), 1-based and numbered WITHIN its sketch: "Shape 1". A shape is a
+ *  derived child of its sketch — it has no name of its own, and its number
+ *  can change when shapes merge or split — so the sketch's name is what a
+ *  user organizes by and the shape label only tells siblings apart. */
+export function shapeLabel(index: number): string {
+  return `Shape ${index + 1}`
+}
+
 /**
  * Positional index of every node as the Outliner displays it: position within
  * its parent container (top-level order at depth 0, member order inside each
@@ -346,34 +355,50 @@ export function isTreeRowDimmed(
 }
 
 /**
- * Convert a NodeKind to the numeric kind tag used in WASM API calls.
- *   0 = object, 1 = group, 2 = instance
+ * Whether `kind` is a TREE MEMBER — an object, group, or instance: a node
+ * that has a parent, can sit in a group, and is what the structural kernel
+ * calls (`group_nodes`, `reparent_nodes`, `delete_selection`,
+ * `make_component`, `duplicate_node`, `boolean_nodes`, the node list of
+ * `transform_selection`) operate on.
  *
- * `'sketch'` has no kernel `NodeId` variant (see the `NodeKind` doc comment):
- * sketch operations route through their own dedicated wasm methods
- * (`delete_sketch`/`pick_sketch`/`pick_sketch_region`/`transform_sketch`/…),
- * never a `node_id`-keyed call. Whole-sketch selection is now wired throughout
- * the UI (DocumentTree/ObjectInfoPanel/MaterialPalette/TagsPanel); every one of
- * those callers checks `kind === 'sketch'` and takes its own sketch-specific
- * path *before* reaching this function. This used to throw for `'sketch'` —
- * back when no caller was wired for a sketch selection, that was the loud
- * signal of a real gap. Now that they all guard, throwing would just be a
- * crash waiting for the one caller that forgets to; return the -1 sentinel
- * instead so a stray path degrades to "matches nothing" rather than throwing
- * mid-render. `-1` is not a valid `node_id` kind — never forward it to a
- * `node_id`-keyed wasm call.
+ * A whole sketch is a kernel node too (`nodeKindToNumber` gives it 3), but
+ * not a tree member: the kernel refuses it in every one of those calls with
+ * `SketchNodeUnsupported`. Gate structural commands on THIS, never on
+ * `nodeKindToNumber(kind) >= 0`.
+ */
+export function isTreeMemberKind(kind: NodeKind): boolean {
+  return kind === 'object' || kind === 'group' || kind === 'instance'
+}
+
+/**
+ * Convert a NodeKind to the numeric kind tag used in WASM API calls.
+ *   0 = object, 1 = group, 2 = instance, 3 = sketch
+ *
+ * A whole `'sketch'` is a kernel node: the node-keyed METADATA calls
+ * (`set_node_name`, `add_node_tag`/`remove_node_tag`, `node_tags`,
+ * `node_user_hidden`/`set_node_user_hidden`) take it at kind 3. It is not a
+ * tree member — see `isTreeMemberKind` for the structural calls, which must
+ * never be handed one. Its geometry ops still route through the dedicated
+ * sketch methods (`delete_sketch`/`transform_sketch`/`pick_sketch`/…).
+ *
+ * The sketch-scoped sub-entities (`'sketch-island'`/`'sketch-curve'`/
+ * `'sketch-edge'`) and the imprint kinds have no kernel `NodeId` at all and
+ * return the -1 sentinel, so a stray path degrades to "matches nothing"
+ * rather than throwing mid-render. `-1` is not a valid `node_id` kind — never
+ * forward it to a `node_id`-keyed wasm call.
  */
 export function nodeKindToNumber(kind: NodeKind): number {
   if (kind === 'object') return 0
   if (kind === 'group') return 1
   if (kind === 'instance') return 2
+  if (kind === 'sketch') return 3
   return -1
 }
 
 /**
  * Collapse a structural selection into the kernel's parallel kind/id arrays
  * (`group_nodes`, `make_component`, …) — or refuse with `null` if ANY node
- * has no kernel NodeId (the sketch-scoped kinds).
+ * is not a tree member (a whole sketch, or a sketch-scoped/imprint kind).
  *
  * This is the id-space boundary: sketch handles live in a different slotmap
  * than node ids, and slotmaps reuse bit patterns, so forwarding a sketch id
@@ -387,9 +412,8 @@ export function structuralSelection(
   const kinds: number[] = []
   const ids: bigint[] = []
   for (const n of nodes) {
-    const kind = nodeKindToNumber(n.kind)
-    if (kind < 0) return null
-    kinds.push(kind)
+    if (!isTreeMemberKind(n.kind)) return null
+    kinds.push(nodeKindToNumber(n.kind))
     ids.push(n.id)
   }
   return { kinds: new Uint8Array(kinds), ids: new BigUint64Array(ids) }
@@ -471,9 +495,9 @@ export function canGroup(
 ): boolean {
   if (selected.length < 2) return false
 
-  // Only nodes with a kernel NodeId can be grouped — a sketch-scoped ref in
-  // the selection disqualifies it outright (see `structuralSelection`).
-  if (selected.some((n) => nodeKindToNumber(n.kind) < 0)) return false
+  // Only tree members can be grouped — a sketch, or anything sketch-scoped,
+  // in the selection disqualifies it outright (see `structuralSelection`).
+  if (selected.some((n) => !isTreeMemberKind(n.kind))) return false
 
   // Deduplicate by kind+id
   const seen = new Set<string>()
@@ -572,9 +596,8 @@ export function canBooleanInComponent(
  * the Model row (move to the top level).
  *
  * Refused (`null`) when:
- * - `dragged` is empty, or any dragged node lacks a kernel NodeId (a
- *   sketch-scoped ref never reaches `reparent_nodes`; see
- *   `structuralSelection`).
+ * - `dragged` is empty, or any dragged node is not a tree member (a sketch
+ *   never reaches `reparent_nodes`; see `structuralSelection`).
  * - `view.sessionOpen` — a group/component edit session is open; the
  *   kernel refuses `ExplodeSessionScope` regardless of target.
  * - `target` is neither a group row nor `'root'` (an instance row, a
@@ -599,7 +622,7 @@ export function dropTargetFor(
 ): { group: bigint | undefined } | null {
   if (dragged.length === 0) return null
   if (view.sessionOpen) return null
-  if (dragged.some((n) => nodeKindToNumber(n.kind) < 0)) return null
+  if (dragged.some((n) => !isTreeMemberKind(n.kind))) return null
 
   if (target === 'root') return { group: undefined }
   if (target.kind !== 'group') return null

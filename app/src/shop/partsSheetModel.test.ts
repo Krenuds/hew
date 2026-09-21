@@ -30,6 +30,7 @@ function makeScene(overrides: Partial<{
     object_ids: () => overrides.object_ids ?? [],
     group_ids: () => overrides.group_ids ?? [],
     instance_ids: () => overrides.instance_ids ?? [],
+    sketch_ids: () => [],
     top_level_nodes: () => overrides.top_level_nodes ?? [],
     group_members: (id: bigint) => overrides.group_members?.[String(id)] ?? [],
     object_name: (id: bigint) => overrides.object_name?.[String(id)],

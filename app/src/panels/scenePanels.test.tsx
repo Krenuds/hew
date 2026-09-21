@@ -31,6 +31,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     instance_ids: () => new BigUint64Array(),
     sketch_ids: () => new BigUint64Array(),
     sketch_locked: () => false,
+    sketch_name: (_id: bigint) => undefined as string | undefined,
     sketch_island_ids: (sid: bigint) => new BigUint64Array([sid + 100n]),
     sketch_edge_island: () => undefined,
     sketch_edge_curve: () => undefined as bigint | undefined,
@@ -744,7 +745,7 @@ describe('ObjectInfoPanel', () => {
     expect(onDocumentChanged).toHaveBeenCalled()
   })
 
-  it('shows "Sketch" + its positional label for a sketch selection, with no help boilerplate', () => {
+  it('labels a selected shape by its sketch, read-only', () => {
     const scene = makeScene({
       sketch_ids: () => new BigUint64Array([10n, 20n, 30n]),
     })
@@ -757,15 +758,55 @@ describe('ObjectInfoPanel', () => {
         onSelectMany={vi.fn()}
       />,
     )
-    expect(screen.getByText('Sketch')).toBeInTheDocument()
-    // Island 120n of sketch 20n is row index 1 in the outliner's flattened
-    // island list → "Sketch 2" (1-based, matching the tree's label).
-    expect(screen.getByText('Sketch 2')).toBeInTheDocument()
-    // The old explanatory boilerplate is gone — just the real fields.
-    expect(screen.queryByText(/naming and tags are not yet supported/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/a drawn line/i)).not.toBeInTheDocument()
-    // No name input (sketches aren't renameable), no crash from nodeKindToNumber.
+    expect(screen.getByText('Shape')).toBeInTheDocument()
+    // Sketch 20n is the second sketch; island 120n is its first (only) shape.
+    expect(screen.getByText('Shape 1 of Sketch 2')).toBeInTheDocument()
+    // A shape has no name of its own: no input, and no Tags section.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Add tag')).not.toBeInTheDocument()
+  })
+
+  it('labels a shape by its sketch NAME once the sketch has one', () => {
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([10n, 20n]),
+      sketch_name: (id: bigint) => (id === 20n ? 'Ground floor' : undefined),
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-island', id: 120n, sketch: 20n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Shape 1 of Ground floor')).toBeInTheDocument()
+  })
+
+  it('names a whole sketch through the node call at kind 3, and offers it tags', () => {
+    const setNodeName = vi.fn()
+    const onDocumentChanged = vi.fn()
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([10n, 20n]),
+      set_node_name: setNodeName,
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch', id: 20n }]}
+        onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Sketch')).toBeInTheDocument()
+    // Unnamed: the positional label is the placeholder, exactly as for an object.
+    const input = screen.getByPlaceholderText('Sketch 2')
+    fireEvent.change(input, { target: { value: 'Ground floor' } })
+    fireEvent.blur(input)
+    expect(setNodeName).toHaveBeenCalledWith(3, 20n, 'Ground floor')
+    expect(onDocumentChanged).toHaveBeenCalled()
+    expect(screen.getByLabelText('Add tag')).toBeInTheDocument()
   })
 
   // -------------------------------------------------------------------------
@@ -1870,11 +1911,12 @@ describe('DocumentTree', () => {
     expect(onSelect).toHaveBeenCalledWith({ kind: 'object', id: 1n }, false)
   })
 
-  it('renders sketches as rows in the same unified list and selects them on click', () => {
+  it('renders one row per sketch, after the objects, with its shapes nested inside', () => {
     const scene = makeScene({
       top_level_nodes: () => [{ kind: 'object', id: 1n }],
       object_ids: () => new BigUint64Array([1n]),
       sketch_ids: () => new BigUint64Array([5n]),
+      sketch_island_ids: () => new BigUint64Array([105n, 106n]),
     })
     const onSelect = vi.fn()
     const { container } = render(
@@ -1885,20 +1927,68 @@ describe('DocumentTree', () => {
         onSelect={onSelect}
       />,
     )
-    // Object and sketch rows share one list container (no section wrappers).
-    const objectRow = screen.getByText('Object 1').closest('div')?.parentElement
-    const sketchRow = screen.getByText('Sketch 1').closest('div')?.parentElement
-    expect(objectRow).toBe(sketchRow)
     expect(container.querySelector('[data-node-icon="sketch"]')).not.toBeNull()
+    // Collapsed to begin with: the sketch is one row, its shapes are not shown.
+    expect(screen.queryByText('Shape 1')).not.toBeInTheDocument()
+
+    // The sketch row selects the WHOLE sketch — the thing that has a name.
     fireEvent.click(screen.getByText('Sketch 1'))
-    // Rows are ISLANDS — the connected-shape unit — carrying their sketch.
-    expect(onSelect).toHaveBeenCalledWith(
-      { kind: 'sketch-island', id: 105n, sketch: 5n },
-      false,
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'sketch', id: 5n }, false)
+
+    // Its chevron opens it; each shape row selects that shape.
+    const sketchRow = screen.getByText('Sketch 1').closest('div') as HTMLElement
+    fireEvent.click(within(sketchRow).getByText('▸'))
+    expect(screen.getByText('Shape 1')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Shape 2'))
+    expect(onSelect).toHaveBeenLastCalledWith({ kind: 'sketch-island', id: 106n, sketch: 5n }, false)
+  })
+
+  it('shows a sketch by its name, and numbers only the unnamed ones', () => {
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n, 6n]),
+      sketch_name: (id: bigint) => (id === 5n ? 'Ground floor' : undefined),
+    })
+    render(<DocumentTree {...docTreeBase} scene={scene} />)
+    expect(screen.getByText('Ground floor')).toBeInTheDocument()
+    expect(screen.getByText('Sketch 2')).toBeInTheDocument()
+  })
+
+  it('gives a sketch row an eye that hides the whole sketch', () => {
+    const scene = makeScene({ sketch_ids: () => new BigUint64Array([5n]) })
+    const onToggleHidden = vi.fn()
+    render(<DocumentTree {...docTreeBase} scene={scene} onToggleHidden={onToggleHidden} />)
+    const sketchRow = screen.getByText('Sketch 1').closest('div') as HTMLElement
+    fireEvent.click(within(sketchRow).getByTitle('Hide'))
+    expect(onToggleHidden).toHaveBeenCalledWith({ kind: 'sketch', id: 5n })
+  })
+
+  it('covers sketches with the Model row hide-all', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }],
+      object_ids: () => new BigUint64Array([1n]),
+      sketch_ids: () => new BigUint64Array([5n]),
+    })
+    const onSetHiddenMany = vi.fn()
+    render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        watertightMap={new Map([[1n, true]])}
+        onSetHiddenMany={onSetHiddenMany}
+      />,
+    )
+    // No groups here, so the Model row's control is the only one.
+    fireEvent.click(screen.getByRole('button', { name: 'Hide all children' }))
+    expect(onSetHiddenMany).toHaveBeenCalledWith(
+      [
+        { kind: 'object', id: 1n },
+        { kind: 'sketch', id: 5n },
+      ],
+      true,
     )
   })
 
-  it('highlights the sketch row selected from the canvas (canvas → tree)', () => {
+  it('opens the sketch and highlights the shape selected from the canvas (canvas → tree)', () => {
     const scene = makeScene({
       sketch_ids: () => new BigUint64Array([5n]),
     })
@@ -1909,10 +1999,33 @@ describe('DocumentTree', () => {
         selectedIds={[{ kind: 'sketch-island', id: 105n, sketch: 5n }]}
       />,
     )
-    const row = screen.getByText('Sketch 1').closest('div')
+    // Nobody expanded the sketch: a selection inside it opens it, as a
+    // selected group member opens its group.
+    const row = screen.getByText('Shape 1').closest('div')
     // The primary-selection tint is applied via inline style — assert it isn't
     // the default transparent background a non-selected row would get.
     expect(row).toHaveStyle({ background: 'var(--accent-tint-18)' })
+  })
+
+  it('filters sketches by name, keeping the sketch of a matching shape as the path to it', () => {
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n, 6n]),
+      sketch_name: (id: bigint) => (id === 5n ? 'Ground floor' : undefined),
+      sketch_island_ids: () => new BigUint64Array([105n, 106n]),
+    })
+    render(<DocumentTree {...docTreeBase} scene={scene} />)
+    const filterInput = screen.getByLabelText('Filter outliner')
+
+    fireEvent.change(filterInput, { target: { value: 'ground' } })
+    expect(screen.getByText('Ground floor')).toBeInTheDocument()
+    expect(screen.queryByText('Sketch 2')).not.toBeInTheDocument()
+
+    // "Shape 2" matches a shape in BOTH sketches: each sketch stays as the
+    // dimmed path to it, force-opened, showing only the matching shape.
+    fireEvent.change(filterInput, { target: { value: 'shape 2' } })
+    expect(screen.getAllByText('Shape 2')).toHaveLength(2)
+    expect(screen.queryByText('Shape 1')).not.toBeInTheDocument()
+    expect(screen.getByText('Ground floor')).toBeInTheDocument()
   })
 
   it('renders distinct type icons: solid object, leaky object, group, instance', () => {

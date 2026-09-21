@@ -120,11 +120,13 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
 
   // Re-query the scene on every docRev bump.
   const tagTree = useMemo(() => {
-    // Collect all nodes (objects, groups, instances) and parse their names.
+    // Collect every node that can carry a tag (objects, groups, instances,
+    // sketches) and read its tag paths.
     const allNodes = [
       ...Array.from(scene.object_ids()).map((id) => ({ kind: 'object' as const, id })),
       ...Array.from(scene.group_ids()).map((id) => ({ kind: 'group' as const, id })),
       ...Array.from(scene.instance_ids()).map((id) => ({ kind: 'instance' as const, id })),
+      ...Array.from(scene.sketch_ids()).map((id) => ({ kind: 'sketch' as const, id })),
     ]
 
     const tagged: { node: ReturnType<typeof nodeRefFromJs>; path: string[] }[] = []

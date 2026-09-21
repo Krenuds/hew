@@ -40,7 +40,7 @@
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, shapeLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
 import { findImprint, imprintName, isImprintRef } from '../tools/imprints'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
 import { formatLength } from '../settings/units'
@@ -87,7 +87,8 @@ interface Props {
 function kindLabel(kind: NodeRef['kind']): string {
   if (kind === 'object') return 'Object'
   if (kind === 'group') return 'Group'
-  if (kind === 'sketch' || kind === 'sketch-island') return 'Sketch'
+  if (kind === 'sketch') return 'Sketch'
+  if (kind === 'sketch-island') return 'Shape'
   if (kind === 'sketch-curve') return 'Curve'
   if (kind === 'sketch-edge') return 'Sketch Line'
   if (kind === 'imprint' || kind === 'imprint-chord') return 'Shape on face'
@@ -197,35 +198,30 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
       }
     }
 
-    // A sketch is a thin selectable (a drawn line) with no kernel NodeId, name,
-    // tags, or solid state — show a minimal read-only entry and never call the
-    // object/group/instance APIs (`nodeKindToNumber` yields the -1 sentinel,
-    // which no node_id-keyed wasm call accepts). Its
-    // "name" is the same positional label the tree/canvas show ("Sketch 2"),
-    // derived from `sketch_ids()` order since sketches can't be renamed yet.
+    // A whole sketch is a kernel node (kind 3): it takes a name and tags
+    // through the same node-keyed calls an object does. Its shapes, lines and
+    // curves have no identity of their own — they get a read-only label that
+    // names their sketch, and never reach a node_id-keyed wasm call
+    // (`nodeKindToNumber` yields the -1 sentinel for them).
     if (kind !== 'object' && kind !== 'group' && kind !== 'instance') {
       const sketchId = node.sketch ?? id
-      // Number by the ISLAND's position in the outliner's flattened
-      // cross-sketch island list, so panel and tree agree ('Sketch 3' here
-      // is 'Sketch 3' there). Resolve the owning island for sub-entities.
+      // The sketch's label exactly as its Outliner row shows it: its name, or
+      // "Sketch N" by its position among the document's sketches.
+      const sketchIndex = Array.from(scene.sketch_ids()).indexOf(sketchId)
+      const sketchName = scene.sketch_name(sketchId)
+      const positionalLabel = entityLabel('sketch', sketchIndex >= 0 ? sketchIndex : 0)
+      const sketchLabel = resolveLabel(sketchName, undefined, 'sketch', sketchIndex >= 0 ? sketchIndex : 0)
+      // A sub-entity names its shape by the shape's position WITHIN the sketch.
       let islandId: bigint | undefined
       if (kind === 'sketch-island') {
         islandId = id
-      } else if (kind === 'sketch') {
-        // Legacy whole-sketch ref: number by its first island's row.
-        const islands = Array.from(scene.sketch_island_ids(sketchId))
-        islandId = islands.length > 0 ? islands[0] : undefined
-      } else if (kind === 'sketch-edge') {
-        islandId = scene.sketch_edge_island(sketchId, id)
-      } else if (kind === 'sketch-curve') {
-        // The ref's id is the chain's representative EDGE.
+      } else if (kind === 'sketch-edge' || kind === 'sketch-curve') {
+        // A curve ref's id is the chain's representative EDGE.
         islandId = scene.sketch_edge_island(sketchId, id)
       }
-      const flat = Array.from(scene.sketch_ids()).flatMap((sid) =>
-        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),
-      )
-      const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islandId)
-      const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : 0)
+      const shapeIndex =
+        islandId === undefined ? -1 : Array.from(scene.sketch_island_ids(sketchId)).indexOf(islandId)
+      const isWholeSketch = kind === 'sketch'
 
       // Segments — SketchUp's Entity Info "Segments", for a drawn CIRCLE.
       // Only a chain carrying an analytic circle has one: `sketch_curve_geom`
@@ -256,16 +252,24 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         node,
         kind,
         id,
-        kindNum: null as number | null,
-        nameFromScene: undefined as string | undefined,
-        // Sub-entities have no identity of their own — label by the owner.
+        kindNum: (isWholeSketch ? nodeKindToNumber(kind) : null) as number | null,
+        nameFromScene: isWholeSketch ? sketchName : undefined,
+        // A whole sketch falls back to its positional label as the name
+        // field's placeholder. Sub-entities have no identity of their own —
+        // label by the owner.
         defaultLabel:
           kind === 'sketch-edge'
             ? `Line of ${sketchLabel}`
             : kind === 'sketch-curve'
               ? `Curve of ${sketchLabel}`
-              : sketchLabel,
-        tags: [] as string[][],
+              : kind === 'sketch-island'
+                ? `${shapeLabel(shapeIndex >= 0 ? shapeIndex : 0)} of ${sketchLabel}`
+                : positionalLabel,
+        tags: (isWholeSketch
+          ? Array.from(scene.node_tags(nodeKindToNumber(kind), id)).map((t) =>
+              t.split('/').map((seg) => seg.trim()).filter((seg) => seg.length > 0),
+            )
+          : []) as string[][],
         solid: null as boolean | null,
         defId: null as bigint | null,
         defName: undefined as string | undefined,
@@ -747,11 +751,12 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
 
   return (
     <div style={PANEL_STYLE}>
-      {/* Name — sketches can't be named yet; show the read-only default label
-       * instead. A component instance splits into Definition Name (the shared
+      {/* Name — a sketch's shapes, lines and curves (and an imprint) have no
+       * name of their own; show the read-only label. A whole sketch is named
+       * like an object. A component instance splits into Definition Name (the shared
        * label — renames every instance) and Instance Name (this placement's
        * own override; the Outliner then shows "Instance (Definition)"). */}
-      {nodeInfo.kind !== 'object' && nodeInfo.kind !== 'group' && nodeInfo.kind !== 'instance' ? (
+      {nodeInfo.kindNum === null ? (
         <div>
           <div style={LABEL_STYLE}>Name</div>
           <div style={VALUE_STYLE}>{nodeInfo.defaultLabel}</div>
@@ -927,9 +932,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
        * (e.g. a Sketch, or a stale instance). */}
       {bounds !== null && <BoundingBoxRow bounds={bounds} />}
 
-      {/* Tags — sketches can't be tagged yet. Empty state is just the "+"
-       * button next to the label: no chips, no "No tags" text. */}
-      {(nodeInfo.kind === 'object' || nodeInfo.kind === 'group' || nodeInfo.kind === 'instance') && (
+      {/* Tags — anything that is a kernel node, a whole sketch included.
+       * Empty state is just the "+" button next to the label: no chips, no
+       * "No tags" text. */}
+      {nodeInfo.kindNum !== null && (
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
           <div style={{ ...LABEL_STYLE, marginBottom: 0 }}>Tags</div>

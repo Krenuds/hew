@@ -101,6 +101,7 @@ const mockScene = {
   instance_pose: () => undefined as Float64Array | undefined,
   node_leaf_objects: () => new BigUint64Array(),
   set_hidden: vi.fn(),
+  set_hidden_sketches: vi.fn(),
   group_members: () => [] as { kind: string; id: bigint }[],
   component_name: () => undefined as string | undefined,
   instance_def: () => undefined as bigint | undefined,

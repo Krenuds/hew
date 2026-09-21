@@ -12,6 +12,8 @@ import {
   nodeEq,
   nodeRefFromJs,
   nodeKindToNumber,
+  isTreeMemberKind,
+  shapeLabel,
   canMakeComponent,
   canPlaceInstance,
   canExplodeInstance,
@@ -167,9 +169,49 @@ describe('nodeKindToNumber', () => {
     expect(nodeKindToNumber('instance')).toBe(2)
   })
 
-  it('handles the sketch kind without throwing (sentinel -1 — no kernel NodeId)', () => {
-    expect(() => nodeKindToNumber('sketch')).not.toThrow()
-    expect(nodeKindToNumber('sketch')).toBe(-1)
+  it('maps a whole sketch to kernel node kind 3', () => {
+    expect(nodeKindToNumber('sketch')).toBe(3)
+  })
+
+  it('gives the sketch-scoped and imprint kinds the -1 sentinel (no kernel NodeId)', () => {
+    for (const kind of ['sketch-island', 'sketch-curve', 'sketch-edge', 'imprint', 'imprint-chord'] as const) {
+      expect(nodeKindToNumber(kind)).toBe(-1)
+    }
+  })
+})
+
+describe('isTreeMemberKind', () => {
+  it('is true for exactly the kinds the structural kernel calls take', () => {
+    expect(isTreeMemberKind('object')).toBe(true)
+    expect(isTreeMemberKind('group')).toBe(true)
+    expect(isTreeMemberKind('instance')).toBe(true)
+  })
+
+  it('is false for a whole sketch even though it has a kernel node kind', () => {
+    // The trap this predicate exists for: `nodeKindToNumber('sketch') >= 0`,
+    // but the kernel refuses a sketch in every structural call.
+    expect(isTreeMemberKind('sketch')).toBe(false)
+    expect(isTreeMemberKind('sketch-island')).toBe(false)
+    expect(isTreeMemberKind('imprint')).toBe(false)
+  })
+
+  it('keeps a whole sketch out of every structural gate', () => {
+    const o: NodeRef = { kind: 'object', id: 1n }
+    const sk: NodeRef = { kind: 'sketch', id: 5n }
+    const noParent = () => undefined
+    expect(structuralSelection([o, sk])).toBeNull()
+    expect(canGroup([o, sk], noParent)).toBe(false)
+    expect(canMakeComponent([o, sk], noParent)).toBe(false)
+    expect(
+      dropTargetFor([sk], 'root', { getGroupMembers: () => [], sessionOpen: false }),
+    ).toBeNull()
+  })
+})
+
+describe('shapeLabel', () => {
+  it('numbers the shapes of a sketch from 1', () => {
+    expect(shapeLabel(0)).toBe('Shape 1')
+    expect(shapeLabel(2)).toBe('Shape 3')
   })
 })
 

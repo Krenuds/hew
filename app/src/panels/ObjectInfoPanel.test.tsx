@@ -21,6 +21,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     top_level_nodes: () => [],
     group_members: () => [],
     object_name: () => undefined,
+    sketch_name: () => undefined,
     face_features: () => '[]',
     ...overrides,
   } as unknown as WasmScene
