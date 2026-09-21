@@ -88,8 +88,10 @@ export default defineConfig({
             // testing the RENDER rather than the chrome, exactly as the
             // welcome-screen pin above does; `view-cube.spec.ts` turns it
             // back on explicitly, the same way the welcome-screen specs
-            // clear that key.
-            { name: 'hew.settings.viewCube', value: 'false' },
+            // clear that key. It is a field of the `viewport` settings
+            // object, so the pin is that object with the field set; the
+            // module's parser fills every other field from its defaults.
+            { name: 'hew.settings.viewport', value: '{"showViewCube":false}' },
           ],
         },
       ],

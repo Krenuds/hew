@@ -8,7 +8,13 @@
  * near-identical singleton files each re-implementing the storage + Tauri +
  * 'storage'-event triple).
  *
- * Today it carries one field:
+ * Today it carries two fields:
+ *
+ *   `showViewCube` — whether the orientation cube draws in the corner of
+ *   the viewport (`viewport/ViewCube.tsx`). Shown by default. Surfaced as a
+ *   View ▸ View Cube checkmark rather than a Settings row, the same posture
+ *   `sceneTransitions` takes: it is chrome you flick on and off next to
+ *   Axes/Grid/Guides, not a value you go and tune.
  *
  *   `snapDotScale` — how big the on-cursor inference marker draws
  *   (`viewport/SnapDot.tsx`), as a UNITLESS multiple of the shipped size.
@@ -40,6 +46,8 @@ import { isTauri } from '../io/fileHost'
 
 /** The viewport display preferences. */
 export interface ViewportSettings {
+  /** Whether the orientation cube is drawn (docs/design/camera.md §8). */
+  showViewCube: boolean
   /** Snap-marker size as a multiple of the shipped size (1 = as designed). */
   snapDotScale: number
 }
@@ -57,6 +65,8 @@ export const SNAP_DOT_SCALE_MAX = 1.5
 export const SNAP_DOT_SCALE_STEP = 0.1
 
 export const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
+  // On by default: an orientation aid nobody can find is no orientation aid.
+  showViewCube: true,
   snapDotScale: 1,
 }
 
@@ -92,9 +102,13 @@ function parseViewportSettings(v: unknown): ViewportSettings | null {
   }
   if (typeof obj !== 'object' || obj === null) return null
   const out = { ...DEFAULT_VIEWPORT_SETTINGS }
-  const scale = (obj as Record<string, unknown>).snapDotScale
+  const fields = obj as Record<string, unknown>
+  const scale = fields.snapDotScale
   if (typeof scale === 'number' && Number.isFinite(scale)) {
     out.snapDotScale = normalizeScale(scale)
+  }
+  if (typeof fields.showViewCube === 'boolean') {
+    out.showViewCube = fields.showViewCube
   }
   return out
 }
@@ -133,6 +147,10 @@ export function getSnapDotScale(): number {
  */
 export function setViewportSettings(next: ViewportSettings): void {
   currentViewportSettings = {
+    showViewCube:
+      typeof next.showViewCube === 'boolean'
+        ? next.showViewCube
+        : DEFAULT_VIEWPORT_SETTINGS.showViewCube,
     snapDotScale: Number.isFinite(next.snapDotScale)
       ? normalizeScale(next.snapDotScale)
       : DEFAULT_VIEWPORT_SETTINGS.snapDotScale,
@@ -149,6 +167,16 @@ export function setViewportSettings(next: ViewportSettings): void {
 /** Convenience: set just the snap-marker scale (clamped + quantized). */
 export function setSnapDotScale(next: number): void {
   setViewportSettings({ ...currentViewportSettings, snapDotScale: next })
+}
+
+/** Convenience: is the orientation cube shown? */
+export function getShowViewCube(): boolean {
+  return currentViewportSettings.showViewCube
+}
+
+/** Convenience: show or hide the orientation cube. */
+export function setShowViewCube(next: boolean): void {
+  setViewportSettings({ ...currentViewportSettings, showViewCube: next })
 }
 
 /** Subscribe to viewport-settings changes (local + cross-window). Returns an unsubscribe fn. */
@@ -176,7 +204,7 @@ function broadcastTauri(settings: ViewportSettings): void {
 }
 
 function sameSettings(a: ViewportSettings, b: ViewportSettings): boolean {
-  return a.snapDotScale === b.snapDotScale
+  return a.snapDotScale === b.snapDotScale && a.showViewCube === b.showViewCube
 }
 
 function applyExternal(next: unknown): void {

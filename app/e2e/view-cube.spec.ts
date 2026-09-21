@@ -18,9 +18,10 @@ declare global {
  * way, but only the menu re-fits the model. That difference is invisible to a
  * unit test and is exactly what a user would notice first if it regressed.
  *
- * The suite-wide storage state pins `hew.settings.viewCube` OFF (see
- * `playwright.config.ts`), so every spec here turns it on explicitly — the
- * same arrangement the welcome-screen specs use for their own pin.
+ * The suite-wide storage state pins the cube OFF through the `viewport`
+ * settings object (see `playwright.config.ts`), so every spec here turns it
+ * on explicitly — the same arrangement the welcome-screen specs use for
+ * their own pin.
  */
 
 async function setup(page: Page): Promise<void> {
@@ -32,7 +33,18 @@ async function setup(page: Page): Promise<void> {
   await page.addInitScript(() => {
     if (sessionStorage.getItem('hew.e2e.viewCubeSeeded') === null) {
       sessionStorage.setItem('hew.e2e.viewCubeSeeded', '1')
-      localStorage.setItem('hew.settings.viewCube', 'true')
+      // Read-modify-write, not a bare overwrite: the cube is one field of
+      // the viewport settings object and the suite pin lives in the same key.
+      let current: Record<string, unknown> = {}
+      try {
+        current = JSON.parse(localStorage.getItem('hew.settings.viewport') ?? '{}')
+      } catch {
+        current = {}
+      }
+      localStorage.setItem(
+        'hew.settings.viewport',
+        JSON.stringify({ ...current, showViewCube: true }),
+      )
     }
   })
   await page.goto('/')

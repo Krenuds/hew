@@ -280,7 +280,7 @@ below.
   Standard Views menu entries, which fit the model. A glyph strip beneath it
   jumps to a framed iso view and switches between perspective and parallel
   projection. Shown by default; View ▸ View Cube hides it and the choice
-  persists
+  persists with the rest of the viewport display preferences
 - Orbit and zoom pivot on the geometry under the cursor: a middle-drag
   orbits around the surface being pointed at and each scroll step covers
   a fixed fraction of the distance to it, with a near-absolute zoom floor

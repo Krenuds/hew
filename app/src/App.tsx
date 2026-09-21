@@ -108,7 +108,7 @@ import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
-import { getViewCube, setViewCube, subscribe as subscribeViewCube } from './settings/viewCube'
+import { getShowViewCube, setShowViewCube, subscribe as subscribeViewportSettings } from './settings/viewport'
 import { useScenesController } from './scenes/useScenesController'
 import { parseCameraJson, parseSectionJson } from './scenes/scenesModel'
 import type { SceneSource } from './print/printJob'
@@ -765,9 +765,11 @@ export default function App() {
   /** View ▸ View Cube checkmark (docs/design/camera.md §8) — same posture as
    * Scene Transitions above: the singleton owns the truth and the
    * persistence, this is the render cache the menu, the palette and the
-   * overlay's own mount all read. */
-  const [viewCubeOn, setViewCubeOn] = useState(() => getViewCube())
-  useEffect(() => subscribeViewCube(setViewCubeOn), [])
+   * overlay's own mount all read. It is a field of the `viewport` settings
+   * cluster rather than a key of its own, so the subscription is to the
+   * whole object. */
+  const [viewCubeOn, setViewCubeOn] = useState(() => getShowViewCube())
+  useEffect(() => subscribeViewportSettings((s) => setViewCubeOn(s.showViewCube)), [])
 
   // ---------------------------------------------------------------- tray layout persistence
   // Write the four section flags back to the singleton whenever any of them
@@ -4251,7 +4253,7 @@ export default function App() {
       case 'scenes-next': scenesRef.current.next(); break
       case 'scenes-previous': scenesRef.current.previous(); break
       case 'scenes-transitions': setSceneTransitions(!sceneTransitionsOn); break
-      case 'toggle-view-cube': setViewCube(!viewCubeOn); break
+      case 'toggle-view-cube': setShowViewCube(!viewCubeOn); break
     }
   }
 
@@ -5608,7 +5610,7 @@ export default function App() {
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
-        onToggleViewCube={() => setViewCube(!viewCubeOn)}
+        onToggleViewCube={() => setShowViewCube(!viewCubeOn)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         sectionPlaneChecked={sectionPlaneMenuState.checked}
         sectionPlaneExists={sectionPlaneMenuState.exists}
