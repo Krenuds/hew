@@ -709,6 +709,20 @@ below.
   installer) runs the same contract as the public relay; the desktop's
   Settings ▸ Advanced ▸ Server pane points at it, with an optional upload
   key
+- Remote control for a hosted web build (docs/agents/HEW_API.md §11.5):
+  `hew-bridge`, a loopback daemon fronted by the app's own origin under
+  `/bridge/`, gives a browser tab the "in front of the user's eyes" `--live`
+  experience §12 describes for the desktop. It impersonates a desktop
+  instance on its local side — the same §11.2 discovery file and owner-only
+  unix socket — so `hew-cli --live` and `hew-cli mcp --live` drive the tab
+  unchanged. Three locks replace the desktop's filesystem permissions: a
+  verified Cloudflare Access assertion at the edge, the per-launch token,
+  and a listener that never leaves loopback. Consent is explicit and
+  per-tab: **Settings ▸ Advanced ▸ Allow remote control**, off by default,
+  and the discovery file exists only while a tab has it on — so "nobody
+  consented" looks to a client exactly like "no app is running". One tab
+  owns the session at a time; the most recent to enable the toggle takes it
+  and the displaced tab is told why
 - File ▸ Print… — one Print Layout window for paper and PDF, with a live
   page preview: **Standard** mode prints one page, the current view as
   framed or zoomed to fill the page; **Scaled** mode forces parallel

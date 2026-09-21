@@ -1,0 +1,53 @@
+# systemd unit for hew-bridge, the remote control bridge
+# (docs/agents/HEW_API.md §11.5).
+#
+# This is a USER unit — installed to ~/.config/systemd/user/hew-bridge.service
+# and started with `systemctl --user`, not a system service. That is not a
+# style choice. The bridge publishes a §11.2 discovery file and an owner-only
+# unix socket, and the whole design rests on `hew-cli --live` finding them
+# with no configuration: as a user unit it inherits $XDG_RUNTIME_DIR, which is
+# exactly where hew-cli looks. A system unit would put them somewhere only
+# root can read, and every client would need HEW_RUNTIME_DIR set to match.
+#
+#   systemctl --user enable --now hew-bridge
+#   loginctl enable-linger <user>     # so it survives logout
+#
+# The binary lives at ~/.local/bin/hew-bridge (or /usr/local/bin) and every
+# setting is an environment variable in ~/.config/hew/bridge.env — see
+# docs/SELF_HOSTING.md; there is no config file.
+#
+# Only the loopback listener is exposed; nginx proxies /bridge/ to it
+# (deploy/hew.d/bridge.conf).
+
+[Unit]
+Description=Hew remote control bridge
+Documentation=https://github.com/hew3d/hew/blob/main/docs/SELF_HOSTING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/hew-bridge
+# `-` = optional, but in practice it is where the Access configuration lives,
+# and hew-bridge refuses to start without either that or the explicit
+# --insecure-no-edge-auth opt-out.
+EnvironmentFile=-%h/.config/hew/bridge.env
+Restart=on-failure
+RestartSec=2
+
+# Hardening — this needs a TCP socket, a unix socket, and $XDG_RUNTIME_DIR.
+# Deliberately shorter than hew-relay.service's list: a user unit runs
+# unprivileged, so the directives that ask the kernel to drop or remount
+# something (CapabilityBoundingSet=, ProtectKernelTunables=, ...) fail the
+# service outright with 218/CAPABILITIES rather than hardening it. The
+# process has no capabilities to drop in the first place.
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

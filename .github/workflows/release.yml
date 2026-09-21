@@ -486,8 +486,11 @@ jobs:
       # The self-hosting artifact: "unzip behind any static file server".
       # Deliberately excludes the Cloudflare-specific _headers file. Carries
       # shells/web/deploy/ as a top-level deploy/ (nginx.conf, hew.d/relay.conf,
-      # hew-relay.service) so an installation takes its configs from the
-      # release it is running, not from whatever `main` says today.
+      # hew-relay.service, hew.d/bridge.conf, hew-bridge.service) so an
+      # installation takes its configs from the release it is running, not
+      # from whatever `main` says today. The hew-relay BINARY is published
+      # separately below; hew-bridge has no published binary yet and is built
+      # from source (docs/SELF_HOSTING.md).
       - name: Pack and upload self-hosting tarball
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

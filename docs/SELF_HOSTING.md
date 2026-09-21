@@ -98,7 +98,9 @@ To pin a specific version instead, use the direct URL pattern:
 **`hew-web-vX.Y.Z.tar.gz`** — the self-hosting tarball. Its root (`.`) *is*
 the web root — extract it straight into whatever directory you're serving
 from. It also carries a top-level `deploy/` directory (`nginx.conf`,
-`hew.d/relay.conf`, `hew-relay.service`).
+`hew.d/relay.conf`, `hew-relay.service`, and — for
+[remote control](#remote-control) — `hew.d/bridge.conf` and
+`hew-bridge.service`).
 
 **`hew-relay-vX.Y.Z-linux-<arch>.tar.gz`** — the relay, only if you want
 "Open on Phone". Linux-only but both common architectures are available:
@@ -242,6 +244,99 @@ against your own server.
    bare failure. If you raise `HEW_RELAY_MAX_TOTAL_BYTES`, also raise the
    unit's `MemoryMax` (default `512M`) — it's the hard backstop above the
    relay's own limit, and the two should move together.
+
+### Remote control
+
+Optional, and off unless you want it — skip this section entirely if nobody
+will drive a browser tab from this server.
+
+What it is: `hew-cli --live` and `hew-cli mcp --live` normally attach to a
+running *desktop* app over a local socket. `hew-bridge` gives the same
+experience to a tab on your hosted build. A client on this server dispatches
+into the document someone has open in their browser, in their undo history,
+in front of them (docs/agents/HEW_API.md §11.5). It is exactly as invasive as
+that sounds, which is why there are two gates: the person in the tab has to
+turn on **Settings ▸ Advanced ▸ Allow remote control**, and everything under
+`/bridge/` has to sit behind an authenticating front.
+
+Read that second part before you install this. `hew-bridge` verifies a
+Cloudflare Access assertion itself rather than trusting it was fronted, and
+refuses to start with neither that configured nor the explicit
+`--insecure-no-edge-auth` opt-out. It will not fall open on a missing
+setting, but it also cannot invent an identity provider for you.
+
+`hew-bridge` runs as a **user** service, not a system one, because the
+discovery file and unix socket it publishes have to land where the person
+running `hew-cli` will look for them ($XDG_RUNTIME_DIR).
+
+1. **Build the binary and install it with the unit**, as the account that
+   will run `hew-cli`. Unlike `hew-relay`, `hew-bridge` has no published
+   binary yet — build it from a checkout of the same release tag:
+
+   ```sh
+   cargo build --release -p hew-bridge
+   mkdir -p ~/.local/bin ~/.config/systemd/user
+   install -m 755 target/release/hew-bridge ~/.local/bin/hew-bridge
+   install -m 644 /var/www/hew/deploy/hew-bridge.service ~/.config/systemd/user/hew-bridge.service
+   ```
+
+   (The unit file itself *does* ship in the web tarball's `deploy/`, so it
+   stays version-locked to the app you are serving.)
+
+2. **Configure it** — environment variables in `~/.config/hew/bridge.env`
+   (mode 600; there is no config file):
+
+   ```sh
+   mkdir -p ~/.config/hew
+   tee ~/.config/hew/bridge.env >/dev/null <<'EOF'
+   HEW_BRIDGE_LISTEN=127.0.0.1:8788
+   HEW_BRIDGE_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+   HEW_BRIDGE_ACCESS_AUD=<the Access application's audience tag>
+   # HEW_BRIDGE_REPLY_TIMEOUT_SECS=60       # how long a client waits on the tab
+   EOF
+   chmod 600 ~/.config/hew/bridge.env
+   ```
+
+   Not using Cloudflare Access? If something else in front of this bridge
+   authenticates every single request — a VPN, mTLS, your own SSO proxy —
+   replace both `HEW_BRIDGE_ACCESS_*` lines with
+   `HEW_BRIDGE_INSECURE_NO_EDGE_AUTH=1`. It is named that way on purpose: it
+   removes one of §11.5's three locks, and the bridge warns about it on every
+   start. Anything that can reach the listener can then drive a consenting
+   tab.
+
+3. **Wire nginx to it:**
+
+   ```sh
+   sudo cp /var/www/hew/deploy/hew.d/bridge.conf /etc/nginx/hew.d/bridge.conf
+   sudo nginx -t && sudo systemctl reload nginx
+   ```
+
+4. **Start it and verify:**
+
+   ```sh
+   systemctl --user enable --now hew-bridge
+   loginctl enable-linger "$USER"          # so it survives logout
+   curl -s http://127.0.0.1:8788/
+   ```
+
+   That returns `{"service":"hew-bridge","version":...}`. Through nginx,
+   `curl -s https://<host>/bridge/` returns the same — and
+   `https://<host>/bridge/session` should return **403** to an unauthenticated
+   request. If it hands you a token instead, your Access application is not
+   actually in front of this path; stop and fix that before telling anyone
+   the feature exists.
+
+5. **Use it.** Open the app, turn on Settings ▸ Advanced ▸ Allow remote
+   control, then on the server:
+
+   ```sh
+   hew-cli dispatch hew.query.scene --live
+   ```
+
+   You get that tab's document. One tab owns the session at a time; the most
+   recent one to enable the toggle takes it, and the one it displaced says so
+   in Settings.
 
 ### Updating
 
