@@ -9,6 +9,12 @@
  * freely orbit away from any exact standard view), so these are plain
  * action buttons, not a toggle/radio group — matches the spec's own mock,
  * which doesn't show any of them in a "pressed" state either.
+ *
+ * HIDDEN by default since the View Cube landed: the cube reaches every
+ * orientation these do and says where the camera already is. View ▸ View
+ * Chips brings them back, persisted in the `viewport` settings object. The
+ * gate is at the mount in `App.tsx`, not in here — this component renders
+ * the cluster and nothing else.
  */
 import type { StandardView } from './Viewport'
 
@@ -35,6 +41,7 @@ const chipStyle: React.CSSProperties = {
 export function ViewportHUD({ onSelectView, onOrbit }: ViewportHUDProps) {
   return (
     <div
+      data-testid="view-chips"
       style={{
         position: 'absolute',
         top: '16px',

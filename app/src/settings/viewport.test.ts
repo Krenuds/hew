@@ -6,6 +6,8 @@ import {
   setSnapDotScale,
   getShowViewCube,
   setShowViewCube,
+  getShowViewChips,
+  setShowViewChips,
   subscribe,
   formatScalePercent,
   DEFAULT_VIEWPORT_SETTINGS,
@@ -50,7 +52,7 @@ afterEach(() => {
 
 describe('viewport settings', () => {
   it('defaults the snap-dot scale to 1 (the marker as designed)', () => {
-    expect(DEFAULT_VIEWPORT_SETTINGS).toEqual({ snapDotScale: 1, showViewCube: true })
+    expect(DEFAULT_VIEWPORT_SETTINGS).toEqual({ snapDotScale: 1, showViewCube: true, showViewChips: false })
     expect(getViewportSettings()).toEqual(DEFAULT_VIEWPORT_SETTINGS)
     expect(getSnapDotScale()).toBe(1)
   })
@@ -59,7 +61,7 @@ describe('viewport settings', () => {
     setSnapDotScale(0.7)
     expect(getSnapDotScale()).toBe(0.7)
     setSnapDotScale(1.3)
-    expect(getViewportSettings()).toEqual({ snapDotScale: 1.3, showViewCube: true })
+    expect(getViewportSettings()).toEqual({ snapDotScale: 1.3, showViewCube: true, showViewChips: false })
   })
 
   it('clamps a scale below the slider minimum', () => {
@@ -85,7 +87,7 @@ describe('viewport settings', () => {
   })
 
   it('set copies its argument (later caller-side mutation does not leak in)', () => {
-    const settings: ViewportSettings = { snapDotScale: 0.8, showViewCube: true }
+    const settings: ViewportSettings = { snapDotScale: 0.8, showViewCube: true, showViewChips: false }
     setViewportSettings(settings)
     settings.snapDotScale = 1.5
     expect(getSnapDotScale()).toBe(0.8)
@@ -95,7 +97,7 @@ describe('viewport settings', () => {
     const seen: ViewportSettings[] = []
     const unsub = subscribe((s) => seen.push(s))
     setSnapDotScale(0.9)
-    expect(seen).toEqual([{ snapDotScale: 0.9, showViewCube: true }])
+    expect(seen).toEqual([{ snapDotScale: 0.9, showViewCube: true, showViewChips: false }])
     unsub()
   })
 
@@ -105,7 +107,7 @@ describe('viewport settings', () => {
     setSnapDotScale(0.9)
     unsub()
     setSnapDotScale(1.2)
-    expect(seen).toEqual([{ snapDotScale: 0.9, showViewCube: true }])
+    expect(seen).toEqual([{ snapDotScale: 0.9, showViewCube: true, showViewChips: false }])
   })
 
   it('persists to localStorage as JSON under the settings naming scheme', () => {
@@ -113,6 +115,7 @@ describe('viewport settings', () => {
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
       snapDotScale: 0.8,
       showViewCube: true,
+      showViewChips: false,
     })
   })
 })
@@ -153,6 +156,7 @@ describe('showViewCube', () => {
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
       snapDotScale: 1,
       showViewCube: false,
+      showViewChips: false,
     })
   })
 
@@ -163,7 +167,49 @@ describe('showViewCube', () => {
     const seen: ViewportSettings[] = []
     const unsub = subscribe((v) => seen.push(v))
     setShowViewCube(false)
-    expect(seen).toEqual([{ snapDotScale: 1, showViewCube: false }])
+    expect(seen).toEqual([{ snapDotScale: 1, showViewCube: false, showViewChips: false }])
+    unsub()
+  })
+})
+
+describe('showViewChips', () => {
+  it('defaults to hidden — the cube supersedes the chips', () => {
+    expect(getShowViewChips()).toBe(false)
+    expect(DEFAULT_VIEWPORT_SETTINGS.showViewChips).toBe(false)
+  })
+
+  it('round-trips through the convenience setter', () => {
+    setShowViewChips(true)
+    expect(getShowViewChips()).toBe(true)
+    setShowViewChips(false)
+    expect(getShowViewChips()).toBe(false)
+  })
+
+  it('survives writes that only name the other fields', () => {
+    setShowViewChips(true)
+    setSnapDotScale(0.8)
+    setShowViewCube(false)
+    expect(getShowViewChips()).toBe(true)
+    expect(getSnapDotScale()).toBe(0.8)
+    expect(getShowViewCube()).toBe(false)
+  })
+
+  it('persists alongside the other fields', () => {
+    setShowViewChips(true)
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
+      snapDotScale: 1,
+      showViewCube: true,
+      showViewChips: true,
+    })
+  })
+
+  it('notifies subscribers when only the chips change', () => {
+    // The `sameSettings` guard: a dedup helper that still compares only the
+    // older fields would swallow a cross-window change to this one.
+    const seen: ViewportSettings[] = []
+    const unsub = subscribe((v) => seen.push(v))
+    setShowViewChips(true)
+    expect(seen).toEqual([{ snapDotScale: 1, showViewCube: true, showViewChips: true }])
     unsub()
   })
 })
@@ -224,6 +270,24 @@ describe('viewport settings restore on load', () => {
     vi.resetModules()
     const fresh = await import('./viewport')
     expect(fresh.getViewportSettings()).toEqual(DEFAULT_VIEWPORT_SETTINGS)
+  })
+
+  it('restores a persisted chip visibility', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ showViewChips: true }))
+    vi.resetModules()
+    const fresh = await import('./viewport')
+    expect(fresh.getShowViewChips()).toBe(true)
+    // The fields it was not told about still come back as their defaults.
+    expect(fresh.getShowViewCube()).toBe(DEFAULT_VIEWPORT_SETTINGS.showViewCube)
+    expect(fresh.getSnapDotScale()).toBe(DEFAULT_VIEWPORT_SETTINGS.snapDotScale)
+  })
+
+  it('falls back per-field on a mistyped chip visibility', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ showViewChips: 'yes', snapDotScale: 0.8 }))
+    vi.resetModules()
+    const fresh = await import('./viewport')
+    expect(fresh.getShowViewChips()).toBe(false)
+    expect(fresh.getSnapDotScale()).toBe(0.8)
   })
 
   it('falls back to the defaults on a non-object value', async () => {

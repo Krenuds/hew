@@ -109,7 +109,7 @@ import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
-import { getShowViewCube, setShowViewCube, subscribe as subscribeViewportSettings } from './settings/viewport'
+import { getShowViewCube, setShowViewCube, getShowViewChips, setShowViewChips, subscribe as subscribeViewportSettings } from './settings/viewport'
 import { useScenesController } from './scenes/useScenesController'
 import { parseCameraJson, parseSectionJson } from './scenes/scenesModel'
 import type { SceneSource } from './print/printJob'
@@ -775,6 +775,12 @@ export default function App() {
    * whole object. */
   const [viewCubeOn, setViewCubeOn] = useState(() => getShowViewCube())
   useEffect(() => subscribeViewportSettings((s) => setViewCubeOn(s.showViewCube)), [])
+
+  /** View ▸ View Chips checkmark — the top-left Orbit/Top/Iso/Front cluster
+   * the cube superseded. Same shape as the cube above, off by default, and
+   * a sibling field of the same `viewport` object. */
+  const [viewChipsOn, setViewChipsOn] = useState(() => getShowViewChips())
+  useEffect(() => subscribeViewportSettings((s) => setViewChipsOn(s.showViewChips)), [])
 
   // ---------------------------------------------------------------- tray layout persistence
   // Write the four section flags back to the singleton whenever any of them
@@ -4263,6 +4269,7 @@ export default function App() {
       case 'scenes-previous': scenesRef.current.previous(); break
       case 'scenes-transitions': setSceneTransitions(!sceneTransitionsOn); break
       case 'toggle-view-cube': setShowViewCube(!viewCubeOn); break
+      case 'toggle-view-chips': setShowViewChips(!viewChipsOn); break
     }
   }
 
@@ -4985,6 +4992,7 @@ export default function App() {
       'cam-parallel-projection': parallelProjection,
       'scenes-transitions': sceneTransitionsOn,
       'view-cube': viewCubeOn,
+      'view-chips': viewChipsOn,
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
       checked[id] = tool === activeTool
@@ -5055,6 +5063,7 @@ export default function App() {
     redoLabel,
     sceneTransitionsOn,
     viewCubeOn,
+    viewChipsOn,
     scenes.activeSid,
     scenes.entries.length,
   ])
@@ -5615,11 +5624,13 @@ export default function App() {
         showGrid={showGrid}
         showGuides={showGuides}
         showViewCube={viewCubeOn}
+        showViewChips={viewChipsOn}
         onToggleAxes={() => setShowAxes((v) => !v)}
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onToggleViewCube={() => setShowViewCube(!viewCubeOn)}
+        onToggleViewChips={() => setShowViewChips(!viewChipsOn)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         sectionPlaneChecked={sectionPlaneMenuState.checked}
         sectionPlaneExists={sectionPlaneMenuState.exists}
@@ -5790,10 +5801,12 @@ export default function App() {
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
             <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} axes={measurementAxes} />
-            <ViewportHUD
-              onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
-              onOrbit={() => activateTool('Orbit')}
-            />
+            {viewChipsOn && (
+              <ViewportHUD
+                onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
+                onOrbit={() => activateTool('Orbit')}
+              />
+            )}
             {viewCubeOn && (
               <ViewCube
                 parallelProjection={parallelProjection}

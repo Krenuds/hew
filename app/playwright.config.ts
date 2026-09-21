@@ -91,7 +91,13 @@ export default defineConfig({
             // clear that key. It is a field of the `viewport` settings
             // object, so the pin is that object with the field set; the
             // module's parser fills every other field from its defaults.
-            { name: 'hew.settings.viewport', value: '{"showViewCube":false}' },
+            // …and the same pin carries `showViewChips` the other way. The
+            // top-left Orbit/Top/Iso/Front chips ship OFF (the cube
+            // supersedes them), but the goldens were captured with them
+            // present and two specs click the Iso chip to frame a view, so
+            // the suite keeps the pre-toggle layout. `view-chips.spec.ts`
+            // seeds them back off to test the default.
+            { name: 'hew.settings.viewport', value: '{"showViewCube":false,"showViewChips":true}' },
           ],
         },
       ],

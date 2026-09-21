@@ -3011,6 +3011,11 @@ fn main() {
             // The viewport orientation cube (docs/design/camera.md §8) — viewport
             // chrome, so it sits with Axes/Grid/Guides rather than under Camera.
             let view_cube = check_item(handle, &mut checks, "view-cube", "View Cube", None, None)?;
+            // The chips the cube superseded (`viewport/ViewportHUD.tsx`) —
+            // hidden by default, offered here for people who want a
+            // one-click Top without the gizmo.
+            let view_chips =
+                check_item(handle, &mut checks, "view-chips", "View Chips", None, None)?;
             // Section Plane's active (clipping) toggle — moved here from Tools
             // (section-plane-polish D3); same "toggle-section-active" dispatch
             // it always had. Checked only when a section is BOTH placed and
@@ -3162,6 +3167,7 @@ fn main() {
                 .item(&view_grid)
                 .item(&view_guides)
                 .item(&view_cube)
+                .item(&view_chips)
                 .item(&view_section_plane)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&win_model_info)
@@ -3923,6 +3929,7 @@ fn main() {
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
                 "view-cube" => "toggle-view-cube",
+                "view-chips" => "toggle-view-chips",
                 "view-section-plane" => "toggle-section-active",
                 "scenes-add" => "scenes-add",
                 "scenes-update" => "scenes-update",

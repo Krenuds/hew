@@ -395,3 +395,41 @@ describe('View Cube menu parity', () => {
     expect(entry?.label).toBe('Toggle View Cube')
   })
 })
+
+/**
+ * View ▸ View Chips — the top-left Orbit/Top/Iso/Front cluster the View Cube
+ * superseded, now hidden by default and offered from the same place the cube
+ * is. Identical five-surface shape, identical drift risk: nothing links App
+ * state, the web MenuBar, the `menuActionRef` dispatch, the palette and the
+ * native item except this block.
+ */
+describe('View Chips menu parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+
+  it('view-chips is built via check_item, attached to a submenu, and dispatches to toggle-view-chips', () => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"view-chips"`, 's').exec(source)
+    expect(binding, 'no check_item binding found for view-chips').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      source.includes(`.item(&${variable})`),
+      'view-chips is built but never attached to a SubmenuBuilder chain',
+    ).toBe(true)
+    expect(
+      /"view-chips"\s*=>\s*"toggle-view-chips"/.test(source),
+      'view-chips has no dispatch arm to toggle-view-chips',
+    ).toBe(true)
+  })
+
+  it('is offered from the web MenuBar (View ▸ View Chips)', () => {
+    expect(menuBarSource).toContain('label="View Chips"')
+    expect(menuBarSource).toContain('onToggleViewChips')
+    expect(menuBarSource).toContain('showViewChips')
+  })
+
+  it('is offered from the command palette', () => {
+    const entry = paletteEntries().find((e) => e.id === 'toggle-view-chips')
+    expect(entry, 'toggle-view-chips is missing from the command palette').toBeDefined()
+    expect(entry?.label).toBe('Toggle View Chips')
+  })
+})
