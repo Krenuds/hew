@@ -327,6 +327,7 @@ fn node_entity(n: NodeId) -> EntityRef {
         NodeId::Object(o) => EntityRef::Object(o),
         NodeId::Group(g) => EntityRef::Group(g),
         NodeId::Instance(i) => EntityRef::Instance(i),
+        NodeId::Sketch(s) => EntityRef::Sketch(s),
     }
 }
 

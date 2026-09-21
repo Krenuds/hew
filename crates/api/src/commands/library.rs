@@ -412,6 +412,7 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 NodeId::Object(o) => EntityRef::Object(o),
                 NodeId::Group(g) => EntityRef::Group(g),
                 NodeId::Instance(i) => EntityRef::Instance(i),
+                NodeId::Sketch(s) => EntityRef::Sketch(s),
             };
             resolver.public_of(ctx.doc, &entity).expect("just created")
         })

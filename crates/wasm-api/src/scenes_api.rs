@@ -245,6 +245,7 @@ impl ResolvedSceneJs {
                         NodeId::Object(_) => 0,
                         NodeId::Group(_) => 1,
                         NodeId::Instance(_) => 2,
+                        NodeId::Sketch(_) => 3,
                     })
                     .collect()
             })
@@ -261,6 +262,7 @@ impl ResolvedSceneJs {
                         NodeId::Object(id) => id.data().as_ffi(),
                         NodeId::Group(id) => id.data().as_ffi(),
                         NodeId::Instance(id) => id.data().as_ffi(),
+                        NodeId::Sketch(id) => id.data().as_ffi(),
                     })
                     .collect()
             })

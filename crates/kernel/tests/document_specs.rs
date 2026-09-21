@@ -5566,7 +5566,9 @@ fn array_copy_of_instances_shares_the_definition() {
         match r {
             NodeId::Instance(id) => new_instances.push(id),
             NodeId::Object(id) => new_objects.push(id),
-            NodeId::Group(_) => panic!("no group sources were listed"),
+            NodeId::Group(_) | NodeId::Sketch(_) => {
+                panic!("only objects and instances were listed")
+            }
         }
     }
     assert_eq!(new_instances.len(), 2);
@@ -7012,7 +7014,9 @@ proptest! {
                     _ => panic!("result group members are Objects"),
                 })
                 .collect(),
-            NodeId::Instance(_) => panic!("a boolean result is never an instance"),
+            NodeId::Instance(_) | NodeId::Sketch(_) => {
+                panic!("a boolean result is an object or a group")
+            }
         };
         if op == BooleanOp::Subtract {
             prop_assert_eq!(pieces.len(), 2, "the cut severs the bar");

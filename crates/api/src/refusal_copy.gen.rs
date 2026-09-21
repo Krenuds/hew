@@ -86,6 +86,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "SketchLocked" => {
             "That sketch is locked, so it can't be drawn into or changed — it's a drawing to build from, not stock. Select it and clear 'Locked sketch' in Object Info to edit it."
         }
+        "SketchNodeUnsupported" => {
+            "That works on objects, groups, and components, not on a sketch."
+        }
         "SketchGestureAlreadyOpen" => {
             "The drawing tools got out of step. Press Escape and try again."
         }

@@ -267,6 +267,7 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
         NodeId::Object(id) => EntityRef::Object(id),
         NodeId::Group(id) => EntityRef::Group(id),
         NodeId::Instance(id) => EntityRef::Instance(id),
+        NodeId::Sketch(id) => EntityRef::Sketch(id),
     };
     Ok(serde_json::json!({ "result": public_id_of(ctx, entity) }))
 }

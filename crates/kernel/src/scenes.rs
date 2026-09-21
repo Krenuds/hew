@@ -736,6 +736,7 @@ impl Document {
                     }
                 }
             }
+            NodeId::Sketch(_) => {}
         }
     }
 }
@@ -746,6 +747,7 @@ pub(crate) fn entity_of(node: NodeId) -> EntityRef {
         NodeId::Object(id) => EntityRef::Object(id),
         NodeId::Group(id) => EntityRef::Group(id),
         NodeId::Instance(id) => EntityRef::Instance(id),
+        NodeId::Sketch(id) => EntityRef::Sketch(id),
     }
 }
 

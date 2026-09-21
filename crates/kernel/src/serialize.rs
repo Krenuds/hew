@@ -2293,6 +2293,9 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 kind: "instance".to_string(),
                 id: inst_to_dense[iid],
             },
+            &crate::document::NodeId::Sketch(_) => {
+                unreachable!("{}", crate::document::SKETCH_NOT_A_MEMBER)
+            }
         }
     };
 
@@ -2495,6 +2498,9 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                     kind: "instance".to_string(),
                     id,
                 })
+            }
+            crate::document::NodeId::Sketch(_) => {
+                unreachable!("{}", crate::document::SKETCH_NOT_A_MEMBER)
             }
         }
     };

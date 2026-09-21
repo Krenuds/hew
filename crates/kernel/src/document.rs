@@ -63,6 +63,13 @@ use crate::tol;
 use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
+/// Why a walk over tree member lists never meets a [`NodeId::Sketch`]: a
+/// sketch is a node (it has a name, tags and visibility) but not a tree
+/// MEMBER — no group or definition lists one, and every op that would add
+/// one refuses with [`DocumentError::SketchNodeUnsupported`].
+/// `debug_validate_tree` holds the invariant.
+pub(crate) const SKETCH_NOT_A_MEMBER: &str = "a sketch is never a tree member";
+
 /// A node in the document tree (ARCHITECTURE.md): either a solid Object or a
 /// merge [`Group`](GroupRecord). This is the unit of selection, picking, and
 /// transform — *not* of rendering, which stays flat over leaf objects.
@@ -75,6 +82,11 @@ pub enum NodeId {
     /// A component instance: a tree node placing a shared
     /// [`ComponentDef`] at a per-instance pose (ARCHITECTURE.md).
     Instance(InstanceId),
+    /// A sketch: a named 2D drawing. It carries a name, tags and
+    /// visibility like any other node, but it is not yet a member of the
+    /// tree — it has no parent, no group lists it, and every structural op
+    /// refuses it with [`DocumentError::SketchNotInTree`].
+    Sketch(SketchId),
 }
 
 /// What an attribute dictionary hangs on (docs/agents/HEW_API.md §8): a document
@@ -2230,6 +2242,14 @@ pub enum DocumentError {
     /// a lie, and DEVELOPMENT.md rule 4 wants the refusal to say what is
     /// actually wrong. Unlock it, or draw on a different sketch.
     SketchLocked,
+    /// The operation was handed a [`NodeId::Sketch`] and does not take one.
+    /// A sketch is a node — it has a name, tags and visibility — but it is
+    /// not a member of the tree, so grouping, reparenting, duplicating,
+    /// component-making, booleans, annotation anchors and the node-list
+    /// transform all refuse it. The sketch is present and live; the refusal
+    /// is about the operation, which is why this is not
+    /// [`DocumentError::UnknownSketch`].
+    SketchNodeUnsupported,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
     /// `rename_tag`'s target path (or a nested path it would produce) is
@@ -2523,6 +2543,9 @@ impl std::fmt::Display for DocumentError {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
             DocumentError::SketchLocked => {
                 write!(f, "this sketch is locked; unlock it to change it")
+            }
+            DocumentError::SketchNodeUnsupported => {
+                write!(f, "this operation does not work on a sketch")
             }
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
             DocumentError::DuplicateTag => write!(f, "a tag with that path already exists"),
@@ -3525,6 +3548,7 @@ impl Document {
                         NodeId::Object(o) => self.objects.get(*o).is_some_and(|r| !r.hidden),
                         NodeId::Group(g) => self.groups.get(*g).is_some_and(|r| !r.hidden),
                         NodeId::Instance(i) => self.instances.get(*i).is_some_and(|r| !r.hidden),
+                        &NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     })
                     .collect();
                 (id, live_members, c.name.clone())
@@ -3864,6 +3888,7 @@ impl Document {
                     NodeId::Instance(iid) => {
                         doc.instances[*iid].parent = Some(gid);
                     }
+                    &NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 }
             }
         }
@@ -3970,6 +3995,7 @@ impl Document {
                             derived_inst_owner[ii] = Some(ci as u32);
                             doc.instances[iid].owner_def = Some(cid);
                         }
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     }
                 }
             }
@@ -4009,6 +4035,7 @@ impl Document {
                         }
                         NodeId::Group(g) => doc.groups[g].owner_def.is_some(),
                         NodeId::Instance(i) => doc.instances[i].owner_def.is_some(),
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     };
                     if def_owned {
                         return Err(LoadError::MalformedManifest {
@@ -4633,6 +4660,7 @@ impl Document {
                         out.push(rec.def);
                     }
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         out
@@ -4832,6 +4860,7 @@ impl Document {
                     }
                 }
                 NodeId::Instance(_) => {}
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         count
@@ -5023,6 +5052,7 @@ impl Document {
                             stack.push(Item::Def(rec.def, composed, depth + 1));
                         }
                     }
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 },
             }
         }
@@ -5473,6 +5503,7 @@ impl Document {
                         return Err(DocumentError::UnknownInstance);
                     }
                 }
+                NodeId::Sketch(_) => return Err(DocumentError::SketchNodeUnsupported),
             }
             // A root nested under another root would copy TWICE — once via
             // its ancestor's recursion, once as its own root (adversarial
@@ -5592,6 +5623,7 @@ impl Document {
                 NodeId::Instance(id) => {
                     item.user_hidden_instances.remove(&id);
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
 
@@ -5716,6 +5748,7 @@ impl Document {
                     // this item resolves to THIS definition.
                     self.stamp_library_provenance(EntityRef::Component(def), prov, def_sid);
                 }
+                NodeId::Sketch(_) => {}
             }
         }
         self.debug_validate();
@@ -6875,6 +6908,10 @@ impl Document {
         }
         match anchor.node {
             None => Ok(()),
+            // A live sketch is still not an anchor: nothing re-anchors an
+            // annotation when a sketch moves, so accepting one would let it
+            // report a stale measurement.
+            Some(NodeId::Sketch(_)) => Err(DocumentError::SketchNodeUnsupported),
             Some(node) if self.node_is_live(node) => Ok(()),
             Some(NodeId::Object(_)) => Err(DocumentError::UnknownObject),
             Some(NodeId::Group(_)) => Err(DocumentError::UnknownGroup),
@@ -7292,6 +7329,7 @@ impl Document {
                 .get(id)
                 .filter(|r| !r.hidden)
                 .map_or(&[], |r| r.tags.as_slice()),
+            NodeId::Sketch(_) => &[],
         }
     }
 
@@ -7348,6 +7386,7 @@ impl Document {
             NodeId::Object(id) => self.user_hidden_objects.contains(&id),
             NodeId::Group(id) => self.user_hidden_groups.contains(&id),
             NodeId::Instance(id) => self.user_hidden_instances.contains(&id),
+            NodeId::Sketch(_) => false,
         }
     }
 
@@ -7377,6 +7416,7 @@ impl Document {
                     self.user_hidden_instances.remove(&id);
                 }
             }
+            NodeId::Sketch(_) => {}
         }
     }
 
@@ -7827,6 +7867,7 @@ impl Document {
                     rec.tags = tags;
                 }
             }
+            NodeId::Sketch(_) => {}
         }
     }
 
@@ -7857,6 +7898,7 @@ impl Document {
                     .ok_or(DocumentError::UnknownInstance)?;
                 Ok((rec.name.clone(), rec.tags.clone()))
             }
+            NodeId::Sketch(_) => Err(DocumentError::SketchNodeUnsupported),
         }
     }
 
@@ -7881,6 +7923,7 @@ impl Document {
                     rec.tags = tags;
                 }
             }
+            NodeId::Sketch(_) => {}
         }
     }
 
@@ -7898,6 +7941,10 @@ impl Document {
             },
             NodeId::Instance(id) => DocChange {
                 instances_touched: vec![id],
+                ..Default::default()
+            },
+            NodeId::Sketch(id) => DocChange {
+                sketches_touched: vec![id],
                 ..Default::default()
             },
         }
@@ -7971,6 +8018,7 @@ impl Document {
             NodeId::Object(id) => self.objects.get(id).filter(|r| !r.hidden)?.group_parent(),
             NodeId::Group(id) => self.groups.get(id).filter(|r| !r.hidden)?.parent,
             NodeId::Instance(id) => self.instances.get(id).filter(|r| !r.hidden)?.parent,
+            NodeId::Sketch(_) => None,
         }
     }
 
@@ -7982,6 +8030,9 @@ impl Document {
             NodeId::Object(id) => self.objects.get(id).is_some_and(|r| !r.hidden),
             NodeId::Group(id) => self.groups.get(id).is_some_and(|r| !r.hidden),
             NodeId::Instance(id) => self.instances.get(id).is_some_and(|r| !r.hidden),
+            NodeId::Sketch(id) => {
+                self.sketches.contains_key(id) && !self.hidden_sketches.contains(&id)
+            }
         }
     }
 
@@ -8043,6 +8094,7 @@ impl Document {
             // definition's *shared* members (never baked) — counted by
             // `leaf_instances_under`, not here.
             NodeId::Instance(_) => {}
+            NodeId::Sketch(_) => {}
         }
     }
 
@@ -8072,6 +8124,7 @@ impl Document {
                     }
                 }
             }
+            NodeId::Sketch(_) => {}
         }
     }
 
@@ -8344,6 +8397,7 @@ impl Document {
             NodeId::Object(id) => self.objects.get(id).is_some_and(|r| !r.hidden),
             NodeId::Group(id) => self.groups.get(id).is_some_and(|r| !r.hidden),
             NodeId::Instance(id) => self.instances.get(id).is_some_and(|r| !r.hidden),
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         };
         if !visible {
             return;
@@ -8372,6 +8426,7 @@ impl Document {
                 NodeId::Object(id) => self.objects[id].hidden = hidden,
                 NodeId::Group(id) => self.groups[id].hidden = hidden,
                 NodeId::Instance(id) => self.instances[id].hidden = hidden,
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         for &sid in sketches {
@@ -8755,6 +8810,11 @@ impl Document {
                 .instances
                 .get(id)
                 .is_some_and(|r| !r.hidden && r.owner_def.is_none()),
+            NodeId::Sketch(id) => {
+                self.sketches.contains_key(id)
+                    && !self.hidden_sketches.contains(&id)
+                    && !self.def_sketches.contains_key(&id)
+            }
         }
     }
 
@@ -8775,6 +8835,7 @@ impl Document {
             NodeId::Object(id) => self.objects[id].owner = ObjectOwner::World { parent },
             NodeId::Group(id) => self.groups[id].parent = parent,
             NodeId::Instance(id) => self.instances[id].parent = parent,
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
 
@@ -10603,6 +10664,7 @@ impl Document {
                 NodeId::Object(id) => self.objects[id].hidden = true,
                 NodeId::Group(id) => self.groups[id].hidden = true,
                 NodeId::Instance(_) => unreachable!("instance operands were refused"),
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         let reanchored = self.reevaluate_liveness_recorded(&hidden_operands);
@@ -10663,11 +10725,15 @@ impl Document {
         node: NodeId,
         which: Operand,
     ) -> Result<Vec<ObjectId>, DocumentError> {
+        if matches!(node, NodeId::Sketch(_)) {
+            return Err(DocumentError::SketchNodeUnsupported);
+        }
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
                 NodeId::Group(_) => DocumentError::UnknownGroup,
                 NodeId::Instance(_) => DocumentError::UnknownInstance,
+                NodeId::Sketch(_) => DocumentError::UnknownSketch,
             });
         }
         // Instances are refused, never implicitly made unique
@@ -10723,6 +10789,7 @@ impl Document {
                         .and_then(|d| self.component_name(d).map(str::to_string))
                 })
                 .unwrap_or_else(|| "Component".to_string()),
+            NodeId::Sketch(_) => "Sketch".to_string(),
         }
     }
 
@@ -11727,11 +11794,15 @@ impl Document {
             }
         }
         for &m in members {
+            if matches!(m, NodeId::Sketch(_)) {
+                return Err(DocumentError::SketchNodeUnsupported);
+            }
             if !self.node_is_live(m) {
                 return Err(match m {
                     NodeId::Object(_) => DocumentError::UnknownObject,
                     NodeId::Group(_) => DocumentError::UnknownGroup,
                     NodeId::Instance(_) => DocumentError::UnknownInstance,
+                    NodeId::Sketch(_) => DocumentError::UnknownSketch,
                 });
             }
         }
@@ -11809,11 +11880,15 @@ impl Document {
             return Err(DocumentError::UnknownGroup);
         }
         for &node in nodes {
+            if matches!(node, NodeId::Sketch(_)) {
+                return Err(DocumentError::SketchNodeUnsupported);
+            }
             if !self.node_is_live(node) {
                 return Err(match node {
                     NodeId::Object(_) => DocumentError::UnknownObject,
                     NodeId::Group(_) => DocumentError::UnknownGroup,
                     NodeId::Instance(_) => DocumentError::UnknownInstance,
+                    NodeId::Sketch(_) => DocumentError::UnknownSketch,
                 });
             }
             if let Some(pg) = parent {
@@ -11969,11 +12044,15 @@ impl Document {
     /// On `Err` the document is untouched (the strong guarantee).
     pub fn delete_node(&mut self, node: NodeId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "delete_node", node = ?node);
+        if matches!(node, NodeId::Sketch(_)) {
+            return Err(DocumentError::SketchNodeUnsupported);
+        }
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
                 NodeId::Group(_) => DocumentError::UnknownGroup,
                 NodeId::Instance(_) => DocumentError::UnknownInstance,
+                NodeId::Sketch(_) => DocumentError::UnknownSketch,
             });
         }
         let parent = self.node_parent(node);
@@ -11986,6 +12065,7 @@ impl Document {
                 NodeId::Object(id) => self.objects[id].hidden = true,
                 NodeId::Group(id) => self.groups[id].hidden = true,
                 NodeId::Instance(id) => self.instances[id].hidden = true,
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         if let Some(pg) = parent {
@@ -12220,6 +12300,7 @@ impl Document {
                         return Err(DocumentError::UnknownInstance);
                     }
                 }
+                NodeId::Sketch(_) => return Err(DocumentError::SketchNodeUnsupported),
             }
         }
         for &s in sketches {
@@ -12578,6 +12659,7 @@ impl Document {
                             NodeId::Object(id) => object_ids.push(id),
                             NodeId::Instance(id) => instance_ids.push(id),
                             NodeId::Group(id) => group_ids.push(id),
+                            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                         }
                     }
                 }
@@ -12771,11 +12853,15 @@ impl Document {
             }
         }
         for &m in members {
+            if matches!(m, NodeId::Sketch(_)) {
+                return Err(DocumentError::SketchNodeUnsupported);
+            }
             if !self.node_is_live(m) {
                 return Err(match m {
                     NodeId::Object(_) => DocumentError::UnknownObject,
                     NodeId::Group(_) => DocumentError::UnknownGroup,
                     NodeId::Instance(_) => DocumentError::UnknownInstance,
+                    NodeId::Sketch(_) => DocumentError::UnknownSketch,
                 });
             }
         }
@@ -13457,6 +13543,7 @@ impl Document {
                     NodeId::Object(o) => self.objects.get(o).is_some_and(|r| !r.hidden),
                     NodeId::Group(g) => self.groups.get(g).is_some_and(|r| !r.hidden),
                     NodeId::Instance(i) => self.instances.get(i).is_some_and(|r| !r.hidden),
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 })
                 .collect(),
             // The instance held a live def by invariant; treat otherwise as a bug.
@@ -13549,6 +13636,7 @@ impl Document {
                     created_instances.push(iid);
                     created_roots.push(NodeId::Instance(iid));
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
 
@@ -13693,6 +13781,7 @@ impl Document {
                     let child = self.unique_copy_instance(i, new_def, Some(gid));
                     members.push(NodeId::Instance(child));
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         self.groups[gid].members = members;
@@ -13729,6 +13818,7 @@ impl Document {
                         walk(doc, m, hidden);
                     }
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         let members = self.components[def].members.clone();
@@ -13846,6 +13936,7 @@ impl Document {
                     created_instances.push(child);
                     members.push(NodeId::Instance(child));
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         self.groups[gid].members = members;
@@ -13892,6 +13983,7 @@ impl Document {
                     NodeId::Object(o) => self.objects.get(o).is_some_and(|r| !r.hidden),
                     NodeId::Group(g) => self.groups.get(g).is_some_and(|r| !r.hidden),
                     NodeId::Instance(i) => self.instances.get(i).is_some_and(|r| !r.hidden),
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 })
                 .collect(),
             _ => return Err(DocumentError::UnknownComponent),
@@ -13967,6 +14059,7 @@ impl Document {
                     let iid = self.unique_copy_instance(i, new_def, None);
                     new_members.push(NodeId::Instance(iid));
                 }
+                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             }
         }
         self.components[new_def].members = new_members;
@@ -14284,6 +14377,7 @@ impl Document {
                             surfaced_instances.push(i);
                         }
                     }
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 }
             }
         }
@@ -14401,6 +14495,7 @@ impl Document {
                     NodeId::Group(g) => created_groups.push(g),
                     NodeId::Instance(i) => created_instances.push(i),
                     NodeId::Object(_) => {}
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 }
             }
         }
@@ -14497,6 +14592,7 @@ impl Document {
                 NodeId::Object(o) => !dropped.contains(o),
                 NodeId::Group(g) => !dropped_groups.contains(g),
                 NodeId::Instance(i) => !dropped_instances.contains(i),
+                &NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
             });
 
         // Original def-owned sketches: same restore-or-unbake choice. A
@@ -14803,6 +14899,7 @@ impl Document {
                 .instances
                 .get(id)
                 .is_some_and(|r| !r.hidden && r.parent.is_none()),
+            NodeId::Sketch(_) => false,
         }
     }
 
@@ -15229,6 +15326,7 @@ impl Document {
             }
             Some(SessionFrame::Component(sess)) => match node {
                 NodeId::Object(id) => self.explode_scope_object(id),
+                NodeId::Sketch(id) => self.explode_scope_sketch(id),
                 // Surfaced member groups/instances ARE session geometry
                 // (nested components), and so is anything minted since the
                 // open — a mid-session placement, a group made of session
@@ -15368,11 +15466,15 @@ impl Document {
         // includes member groups and instances — their copies are ordinary
         // structural nodes that fold in whole.
         self.explode_scope_node(node)?;
+        if matches!(node, NodeId::Sketch(_)) {
+            return Err(DocumentError::SketchNodeUnsupported);
+        }
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
                 NodeId::Group(_) => DocumentError::UnknownGroup,
                 NodeId::Instance(_) => DocumentError::UnknownInstance,
+                NodeId::Sketch(_) => DocumentError::UnknownSketch,
             });
         }
         self.refuse_expansion_growth(&[node], 1)?;
@@ -15495,11 +15597,15 @@ impl Document {
             }
         }
         for &n in nodes {
+            if matches!(n, NodeId::Sketch(_)) {
+                return Err(DocumentError::SketchNodeUnsupported);
+            }
             if !self.node_is_live(n) {
                 return Err(match n {
                     NodeId::Object(_) => DocumentError::UnknownObject,
                     NodeId::Group(_) => DocumentError::UnknownGroup,
                     NodeId::Instance(_) => DocumentError::UnknownInstance,
+                    NodeId::Sketch(_) => DocumentError::UnknownSketch,
                 });
             }
         }
@@ -15655,6 +15761,7 @@ impl Document {
                 self.groups[new_gid].members = new_members;
                 Ok(NodeId::Group(new_gid))
             }
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
 
@@ -16173,6 +16280,7 @@ impl Document {
                         .or_else(|| self.components.get(r.def).and_then(|c| c.name.clone()))
                 }),
             ),
+            NodeId::Sketch(_) => ("sketch", None),
         };
         match (node, name) {
             (NodeId::Group(_), Some(name)) => format!("group '{name}'"),
@@ -17270,6 +17378,7 @@ impl Document {
                         NodeId::Object(id) => self.objects[id].hidden = false,
                         NodeId::Group(id) => self.groups[id].hidden = false,
                         NodeId::Instance(id) => self.instances[id].hidden = false,
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     }
                 }
                 for r in reanchored {
@@ -17568,6 +17677,7 @@ impl Document {
                         NodeId::Object(id) => self.objects[id].hidden = false,
                         NodeId::Group(id) => self.groups[id].hidden = false,
                         NodeId::Instance(id) => self.instances[id].hidden = false,
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     }
                 }
                 if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
@@ -18370,6 +18480,7 @@ impl Document {
                         NodeId::Object(id) => change.objects_touched.push(id),
                         NodeId::Group(id) => change.groups_touched.push(id),
                         NodeId::Instance(id) => change.instances_touched.push(id),
+                        NodeId::Sketch(id) => change.sketches_touched.push(id),
                     }
                 }
                 change
@@ -18387,6 +18498,7 @@ impl Document {
                         NodeId::Object(id) => change.objects_touched.push(id),
                         NodeId::Group(id) => change.groups_touched.push(id),
                         NodeId::Instance(id) => change.instances_touched.push(id),
+                        NodeId::Sketch(id) => change.sketches_touched.push(id),
                     }
                 }
                 change
@@ -18708,6 +18820,7 @@ impl Document {
                         NodeId::Object(id) => self.objects[id].hidden = true,
                         NodeId::Group(id) => self.groups[id].hidden = true,
                         NodeId::Instance(id) => self.instances[id].hidden = true,
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     }
                 }
                 if let Some(g) = *result_group {
@@ -19034,6 +19147,7 @@ impl Document {
                         NodeId::Object(id) => self.objects[id].hidden = true,
                         NodeId::Group(id) => self.groups[id].hidden = true,
                         NodeId::Instance(id) => self.instances[id].hidden = true,
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     }
                 }
                 if let Some(pg) = parent {
@@ -19623,6 +19737,7 @@ impl Document {
                         NodeId::Object(id) => change.objects_touched.push(id),
                         NodeId::Group(id) => change.groups_touched.push(id),
                         NodeId::Instance(id) => change.instances_touched.push(id),
+                        NodeId::Sketch(id) => change.sketches_touched.push(id),
                     }
                 }
                 change
@@ -19640,6 +19755,7 @@ impl Document {
                         NodeId::Object(id) => change.objects_touched.push(id),
                         NodeId::Group(id) => change.groups_touched.push(id),
                         NodeId::Instance(id) => change.instances_touched.push(id),
+                        NodeId::Sketch(id) => change.sketches_touched.push(id),
                     }
                 }
                 change
@@ -19859,6 +19975,7 @@ impl Document {
                             .instances
                             .get(i2)
                             .is_some_and(|r| !r.hidden && r.owner_def == Some(cid)),
+                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                     },
                 };
                 debug_assert!(
@@ -19938,6 +20055,7 @@ impl Document {
                         Some(Some(cid)),
                         "a definition member instance's owner disagrees — kernel bug"
                     ),
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 }
             }
         }
@@ -20275,6 +20393,7 @@ fn entity_ref_of_node(node: NodeId) -> EntityRef {
         NodeId::Object(id) => EntityRef::Object(id),
         NodeId::Group(id) => EntityRef::Group(id),
         NodeId::Instance(id) => EntityRef::Instance(id),
+        NodeId::Sketch(id) => EntityRef::Sketch(id),
     }
 }
 
@@ -20488,6 +20607,7 @@ fn library_copy_def(
                     dst, src, i, new_cid, None, ctx,
                 )));
             }
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
     dst.components[new_cid].members = members;
@@ -20668,6 +20788,7 @@ fn library_copy_def_group(
                     ctx,
                 )));
             }
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
     dst.groups[new_gid].members = members;
@@ -20752,6 +20873,7 @@ fn library_copy_node(
                     NodeId::Object(id) => src.objects.get(id).is_some_and(|r| !r.hidden),
                     NodeId::Group(id) => src.groups.get(id).is_some_and(|r| !r.hidden),
                     NodeId::Instance(id) => src.instances.get(id).is_some_and(|r| !r.hidden),
+                    NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
                 };
                 if !live {
                     continue;
@@ -20761,6 +20883,7 @@ fn library_copy_node(
             dst.groups[new_gid].members = members;
             NodeId::Group(new_gid)
         }
+        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
     }
 }
 
@@ -20822,6 +20945,7 @@ fn reparent_change(node: NodeId, prev: Option<GroupId>, next: Option<GroupId>) -
         NodeId::Object(o) => change.objects_touched.push(o),
         NodeId::Group(g) => change.groups_touched.push(g),
         NodeId::Instance(i) => change.instances_touched.push(i),
+        NodeId::Sketch(id) => change.sketches_touched.push(id),
     }
     change.groups_touched.extend(prev);
     change.groups_touched.extend(next);
@@ -20841,6 +20965,7 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
             NodeId::Object(o) => objects_touched.push(o),
             NodeId::Group(g) => groups_touched.push(g),
             NodeId::Instance(i) => instances_touched.push(i),
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
     DocChange {
@@ -20869,6 +20994,7 @@ fn boolean_nodes_change(
             NodeId::Object(o) => objects_touched.push(o),
             NodeId::Group(g) => groups_touched.push(g),
             NodeId::Instance(i) => instances_touched.push(i),
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
     objects_touched.extend_from_slice(result_objects);
@@ -20897,6 +21023,7 @@ fn delete_change(node: NodeId, parent: Option<GroupId>, subtree: &[NodeId]) -> D
             NodeId::Object(o) => objects_touched.push(o),
             NodeId::Group(g) => groups_touched.push(g),
             NodeId::Instance(i) => instances_touched.push(i),
+            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
         }
     }
     // `node` itself is always in `subtree` (collect_subtree's first push), but

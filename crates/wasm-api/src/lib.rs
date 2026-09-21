@@ -338,6 +338,7 @@ fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
             NodeId::Object(id) => (0u8, id.data().as_ffi()),
             NodeId::Group(id) => (1u8, id.data().as_ffi()),
             NodeId::Instance(id) => (2u8, id.data().as_ffi()),
+            NodeId::Sketch(id) => (3u8, id.data().as_ffi()),
         };
         kinds_arr.push(&JsValue::from_f64(k as f64));
         ids_arr.push(&JsValue::from_str(&id.to_string()));
@@ -529,13 +530,14 @@ fn anchor_node(node_kind: i8, node_id_: u64) -> Result<Option<NodeId>, ApiError>
 }
 
 /// Encode `Option<NodeId>` back to an FFI node-kind tag: `-1` = no node, else
-/// [`node_id`]'s `0`/`1`/`2` convention.
+/// [`node_id`]'s `0`/`1`/`2`/`3` convention.
 fn anchor_node_kind_out(node: Option<NodeId>) -> i8 {
     match node {
         None => -1,
         Some(NodeId::Object(_)) => 0,
         Some(NodeId::Group(_)) => 1,
         Some(NodeId::Instance(_)) => 2,
+        Some(NodeId::Sketch(_)) => 3,
     }
 }
 
@@ -546,6 +548,7 @@ fn anchor_node_id_out(node: Option<NodeId>) -> Option<u64> {
         Some(NodeId::Object(id)) => Some(id.data().as_ffi()),
         Some(NodeId::Group(id)) => Some(id.data().as_ffi()),
         Some(NodeId::Instance(id)) => Some(id.data().as_ffi()),
+        Some(NodeId::Sketch(id)) => Some(id.data().as_ffi()),
     }
 }
 
@@ -576,15 +579,18 @@ fn affine_transform(rows: &[f64]) -> Result<Transform, ApiError> {
 }
 
 /// Decode a `(kind, id)` FFI pair into a [`NodeId`]. `kind` is `0` = object,
-/// `1` = group, `2` = instance (matching [`NodeJs`]); any other value is
-/// rejected.
+/// `1` = group, `2` = instance, `3` = sketch (matching [`NodeJs`]); any other
+/// value is rejected. A sketch decodes like any node; the operations that do
+/// not take one refuse it kernel-side with `SketchNodeUnsupported`.
 fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
     match kind {
         0 => Ok(NodeId::Object(object_id(id))),
         1 => Ok(NodeId::Group(group_id(id))),
         2 => Ok(NodeId::Instance(instance_id(id))),
+        3 => Ok(NodeId::Sketch(sketch_id(id))),
         _ => Err(ApiError(
-            "BadNodeKind: node kind must be 0 (object), 1 (group), or 2 (instance)".to_string(),
+            "BadNodeKind: node kind must be 0 (object), 1 (group), 2 (instance), or 3 (sketch)"
+                .to_string(),
         )),
     }
 }
@@ -1134,8 +1140,8 @@ pub fn item_ghost_mesh(bytes: &[u8]) -> Result<GhostMeshJs, JsError> {
 
 // ------------------------------------------------------------------- nodes
 
-/// A document-tree node across the FFI: a `kind` tag (`"object"` or
-/// `"group"`) plus the opaque `u64` handle. The UI pairs these to address
+/// A document node across the FFI: a `kind` tag (`"object"`, `"group"`,
+/// `"instance"` or `"sketch"`) plus the opaque `u64` handle. The UI pairs these to address
 /// nodes for selection, picking, and grouping without conflating the two
 /// handle spaces (object and group slotmaps reuse bit patterns).
 #[wasm_bindgen]
@@ -1169,6 +1175,10 @@ fn node_js(node: NodeId) -> NodeJs {
         },
         NodeId::Instance(id) => NodeJs {
             kind: "instance".to_string(),
+            id: id.data().as_ffi(),
+        },
+        NodeId::Sketch(id) => NodeJs {
+            kind: "sketch".to_string(),
             id: id.data().as_ffi(),
         },
     }
@@ -5336,6 +5346,7 @@ impl Scene {
                 kernel::NodeId::Object(_) => 0,
                 kernel::NodeId::Group(_) => 1,
                 kernel::NodeId::Instance(_) => 2,
+                kernel::NodeId::Sketch(_) => 3,
             })
             .collect()
     }
@@ -5349,6 +5360,7 @@ impl Scene {
                 kernel::NodeId::Object(id) => id.data().as_ffi(),
                 kernel::NodeId::Group(id) => id.data().as_ffi(),
                 kernel::NodeId::Instance(id) => id.data().as_ffi(),
+                kernel::NodeId::Sketch(id) => id.data().as_ffi(),
             })
             .collect()
     }

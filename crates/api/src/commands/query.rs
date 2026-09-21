@@ -116,6 +116,7 @@ fn node_ref_json(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
         NodeId::Object(o) => (EntityRef::Object(o), "object"),
         NodeId::Group(g) => (EntityRef::Group(g), "group"),
         NodeId::Instance(i) => (EntityRef::Instance(i), "instance"),
+        NodeId::Sketch(s) => (EntityRef::Sketch(s), "sketch"),
     };
     let id = public_of_or_internal(ctx, &entity)?;
     Ok(json!({ "id": id, "kind": kind }))
@@ -186,6 +187,9 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "def": def_id,
             }))
         }
+        // The tree walk never yields one: a sketch is a node but not a tree
+        // member. Sketches are summarized by `hew.query.scene`'s own list.
+        NodeId::Sketch(_) => Err(CmdError::Internal("sketch in tree walk".into())),
     }
 }
 
@@ -294,6 +298,7 @@ fn anchor_json(ctx: &Ctx, anchor: &Anchor) -> Value {
             NodeId::Object(o) => EntityRef::Object(o),
             NodeId::Group(g) => EntityRef::Group(g),
             NodeId::Instance(i) => EntityRef::Instance(i),
+            NodeId::Sketch(s) => EntityRef::Sketch(s),
         };
         public_of(ctx, &entity)
     });
@@ -1071,9 +1076,9 @@ fn context(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         let (kind, entity) = match frame {
             NodeId::Group(g) => ("group", EntityRef::Group(g)),
             NodeId::Instance(i) => ("component", EntityRef::Instance(i)),
-            NodeId::Object(_) => {
+            NodeId::Object(_) | NodeId::Sketch(_) => {
                 return Err(CmdError::Internal(
-                    "session frame collapsed to an object, which never opens a session".into(),
+                    "session frame collapsed to a node kind that never opens a session".into(),
                 ));
             }
         };

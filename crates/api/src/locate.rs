@@ -746,6 +746,7 @@ pub fn node_bbox(ctx: &Ctx, node: kernel::NodeId) -> Option<(Point3, Point3)> {
         kernel::NodeId::Object(id) => entity_bbox(ctx, &EntityRef::Object(id)),
         kernel::NodeId::Group(id) => entity_bbox(ctx, &EntityRef::Group(id)),
         kernel::NodeId::Instance(id) => instance_bbox(ctx, id),
+        kernel::NodeId::Sketch(id) => entity_bbox(ctx, &EntityRef::Sketch(id)),
     }
 }
 
