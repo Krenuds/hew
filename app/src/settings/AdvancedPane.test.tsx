@@ -6,10 +6,12 @@
  * a committed origin, validation errors show inline, Test connection
  * commits first and words the answer.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdvancedPane } from './AdvancedPane'
 import { RelayError } from '../io/relayClient'
+import { getRemoteControl, setRemoteControl } from './remoteControl'
+import { setRemoteControlStatus } from '../api/remoteControlStatus'
 
 const store = vi.hoisted(() => ({
   available: true,
@@ -153,5 +155,52 @@ describe('AdvancedPane', () => {
       fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
       await waitFor(() => expect(screen.getByTestId('settings-server-test-fail')).toHaveTextContent(pattern))
     }
+  })
+})
+
+/**
+ * The remote-control row (docs/agents/HEW_API.md §11.5's consent gate). It
+ * shares `useRemoteControl` with the Windows mirror, so what matters here is
+ * that the row is wired to the singleton and that it appears at all — in a
+ * browser build, which is the only place a bridge exists, and which is what
+ * this jsdom suite is.
+ */
+describe('AdvancedPane, remote control', () => {
+  beforeEach(() => {
+    setRemoteControl(false)
+  })
+
+  it('offers the toggle, off, in both the browser and desktop layouts', () => {
+    for (const available of [false, true]) {
+      store.available = available
+      const { unmount } = render(<AdvancedPane />)
+      expect(screen.getByLabelText(/allow remote control/i)).not.toBeChecked()
+      expect(screen.queryByTestId('settings-remote-control-status')).not.toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('flipping it on writes the setting', () => {
+    render(<AdvancedPane />)
+    fireEvent.click(screen.getByLabelText(/allow remote control/i))
+    expect(getRemoteControl()).toBe(true)
+    expect(screen.getByLabelText(/allow remote control/i)).toBeChecked()
+  })
+
+  it('starts from the persisted value, not the default', () => {
+    setRemoteControl(true)
+    render(<AdvancedPane />)
+    expect(screen.getByLabelText(/allow remote control/i)).toBeChecked()
+  })
+
+  it('shows the session status once it is on', async () => {
+    setRemoteControl(true)
+    render(<AdvancedPane />)
+    act(() => {
+      setRemoteControlStatus({ kind: 'refused', message: 'another tab took remote control' })
+    })
+    expect(await screen.findByTestId('settings-remote-control-status')).toHaveTextContent(
+      /another tab took remote control/i,
+    )
   })
 })

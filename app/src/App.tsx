@@ -39,7 +39,8 @@ import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness, type PrintRecorder } from './test/harness'
-import { installLiveBridge } from './api/liveBridge'
+import { installLiveBridge, type LiveBridgeDeps } from './api/liveBridge'
+import { createWebSocketTransport } from './api/wsTransport'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { makeFileHost, isTauri, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
@@ -107,6 +108,7 @@ import {
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
+import { getRemoteControl, subscribe as subscribeRemoteControl } from './settings/remoteControl'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
 import { getShowViewCube, setShowViewCube, getShowViewChips, setShowViewChips, subscribe as subscribeViewportSettings } from './settings/viewport'
@@ -1554,12 +1556,20 @@ export default function App() {
     })
   }, [])
 
-  // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): wires the Tauri
-  // shell's local-socket JSON-RPC frames to this document's own live
-  // Scene, exactly like installTestHarness above — a no-op outside Tauri
-  // (isTauri gate lives inside installLiveBridge itself).
+  // `--live` (docs/agents/HEW_API.md §11.2, §11.5): wires a host's JSON-RPC
+  // frames to this document's own live Scene, exactly like
+  // installTestHarness above. Which host depends on where this is running,
+  // and that is the only difference — everything above the transport is the
+  // same code either way.
+  //
+  //   Desktop: the Tauri shell's local socket. Always available; §11.2's
+  //   owner-only permissions ARE the gate.
+  //   Browser: `crates/hew-bridge` over a WebSocket, and only while the user
+  //   has turned Remote Control on. Attaching to a live document is the
+  //   invasive act (§12), and over a network there is no filesystem
+  //   permission standing in for consent.
   useEffect(() => {
-    return installLiveBridge({
+    const deps: LiveBridgeDeps = {
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
       reconcile: () => reconcileRef.current(),
@@ -1568,7 +1578,32 @@ export default function App() {
       // written by the time the directive arrives; this syncs panels, the
       // renderer, and the camera exactly as a row click would.
       activateScene: (sid) => scenesRef.current.activate(sid),
+    }
+    if (isTauri) return installLiveBridge(deps)
+
+    let uninstall: (() => void) | null = null
+    const attach = (): void => {
+      if (uninstall !== null) return
+      uninstall = installLiveBridge(deps, createWebSocketTransport())
+    }
+    const detach = (): void => {
+      uninstall?.()
+      uninstall = null
+    }
+    if (getRemoteControl()) attach()
+    const unsubscribe = subscribeRemoteControl((on, source) => {
+      // A tab that merely LEARNED remote control is allowed — another
+      // window wrote the setting and the storage event carried it here —
+      // must not open a socket of its own. A bridge session belongs to one
+      // document (§11.5 "Ownership"), so connecting would take the agent
+      // off the tab the user is actually looking at.
+      if (on && source === 'local') attach()
+      else if (!on) detach()
     })
+    return () => {
+      unsubscribe()
+      detach()
+    }
   }, [])
 
   const handleToast = useCallback((message: string, code?: string) => {

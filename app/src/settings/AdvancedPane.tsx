@@ -1,20 +1,30 @@
 /**
- * AdvancedPane — the "Advanced" settings pane: which server "Open on Phone"
- * talks to (docs/design/self-hosting-relay.md §3). Hew cloud (app.hew3d.com)
- * or a self-hosted origin that serves both the Hew web app and its relay
- * under `/relay/` (docs/SELF_HOSTING.md), with an optional upload key and a
- * *Test connection* probe.
+ * AdvancedPane — the "Advanced" settings pane. Two knobs, each belonging to
+ * exactly one build:
  *
- * All behavior lives in `useServerSettingForm` (serverForm.ts), shared with
- * the Windows mirror in FluentSettingsPage.tsx; this file is the macOS-HIG
- * rendering on the SettingsForm grid. In the browser build the setting does
- * not exist (whatever origin serves the app is its server) and the pane says
- * so read-only.
+ *   Server (desktop): which server "Open on Phone" talks to
+ *   (docs/design/self-hosting-relay.md §3) — Hew cloud (app.hew3d.com) or a
+ *   self-hosted origin serving both the web app and its relay under
+ *   `/relay/` (docs/SELF_HOSTING.md), with an optional upload key and a
+ *   *Test connection* probe. In the browser the setting does not exist
+ *   (whatever origin serves the app is its server) and the pane says so
+ *   read-only.
+ *
+ *   Allow remote control (browser): docs/agents/HEW_API.md §11.5's consent
+ *   gate. Off by default; turning it on is what opens this tab's session to
+ *   `hew-cli --live` running on the server. The desktop has no bridge — a
+ *   live client there uses the local socket — so the row is absent.
+ *
+ * All behavior lives in `useServerSettingForm` (serverForm.ts) and
+ * `useRemoteControl` (remoteControlForm.ts), shared with the Windows mirror
+ * in FluentSettingsPage.tsx; this file is the macOS-HIG rendering on the
+ * SettingsForm grid.
  */
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 import { SettingsForm, SettingsNote, SettingsRow, SettingsSeparator } from './SettingsForm'
 import { describeIdentity, useServerSettingForm } from './serverForm'
+import { useRemoteControl } from './remoteControlForm'
 import { CLOUD_ORIGIN } from './server'
 
 const radioLabelStyle: CSSProperties = {
@@ -51,6 +61,17 @@ function buttonStyle(disabled: boolean): CSSProperties {
   }
 }
 
+// The checkbox carries its own inline <label> (macOS checkboxes put the text
+// to the right of the box), so the row label is a plain span (no htmlFor).
+const checkboxLabelStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '7px',
+  fontSize: '13px',
+  color: 'var(--text-primary, #eee)',
+  cursor: 'pointer',
+}
+
 const errorStyle: CSSProperties = {
   gridColumn: '2',
   marginTop: '-6px',
@@ -69,6 +90,44 @@ const okStyle: CSSProperties = {
   color: 'var(--success-text, #8c8)',
 }
 
+/** The §11.5 consent gate, rendered only where a bridge can exist. A
+ * fragment rather than its own form, so its rows sit on the same grid as
+ * everything else in the pane. */
+function RemoteControlRows() {
+  const remote = useRemoteControl()
+  if (!remote.available) return null
+  return (
+    <>
+      <SettingsSeparator />
+      <SettingsRow label="Remote control:" alignTop>
+        <label style={checkboxLabelStyle}>
+          <input
+            type="checkbox"
+            checked={remote.on}
+            onChange={(e) => remote.setOn(e.target.checked)}
+            style={{ accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
+          />
+          Allow remote control
+        </label>
+      </SettingsRow>
+      {remote.statusText !== '' && (
+        <div
+          style={remote.status.kind === 'connected' ? okStyle : errorStyle}
+          role="status"
+          data-testid="settings-remote-control-status"
+        >
+          {remote.statusText}
+        </div>
+      )}
+      <SettingsNote>
+        Lets a client running on this server — <code>hew-cli --live</code>, or an AI assistant through
+        it — read and edit the document in this tab, in your undo history, in front of you. Off until
+        you ask for it, and only this tab: turn it on somewhere else and that tab takes over.
+      </SettingsNote>
+    </>
+  )
+}
+
 export function AdvancedPane() {
   const form = useServerSettingForm()
 
@@ -85,6 +144,7 @@ export function AdvancedPane() {
           In the browser, Hew talks to the server it was loaded from — there is nothing to configure here.
           The desktop app can be pointed at a self-hosted server under Settings ▸ Advanced.
         </SettingsNote>
+        <RemoteControlRows />
       </SettingsForm>
     )
   }
@@ -200,6 +260,8 @@ export function AdvancedPane() {
         trust that authority on this computer and on the phone. Over plain <code>http://</code> the phone's in-app
         scanner can't open the camera; scan with the camera app instead.
       </SettingsNote>
+
+      <RemoteControlRows />
     </SettingsForm>
   )
 }
