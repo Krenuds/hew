@@ -199,6 +199,23 @@ export function filterTreeKeys(
   return { matches, ancestors }
 }
 
+/**
+ * The one sketch a selection names, or `undefined`: a whole sketch, or any
+ * number of shapes/lines/curves that all belong to the same sketch. Anything
+ * else in the selection — an object, a second sketch, an imprint — means the
+ * selection does not name a sketch. What Draw Into Sketch acts on.
+ */
+export function selectedSketchOf(selected: readonly NodeRef[]): bigint | undefined {
+  let sketch: bigint | undefined
+  for (const n of selected) {
+    const owner = n.kind === 'sketch' ? n.id : n.sketch
+    if (owner === undefined) return undefined
+    if (sketch !== undefined && sketch !== owner) return undefined
+    sketch = owner
+  }
+  return sketch
+}
+
 /** The positional label of a sketch's `index`-th shape (one connected
  *  island), 1-based and numbered WITHIN its sketch: "Shape 1". A shape is a
  *  derived child of its sketch — it has no name of its own, and its number

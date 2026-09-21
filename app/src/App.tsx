@@ -34,7 +34,7 @@ import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/Unsa
 import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
+import { selectedSketchOf, nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -390,6 +390,9 @@ export default function App() {
   const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
+  // Bumped by New Sketch / Draw Into Sketch, which change which sketch the
+  // next stroke joins without changing the document (so no `docRev` bump).
+  const [sketchTargetRev, setSketchTargetRev] = useState(0)
   /** Whether Paste/Paste In Place have something to work with — gates the
    *  Edit menu items, the native menu (sync_menu_state), and the palette.
    *  Reflects THIS window's local clipboard cache; refreshed from the
@@ -1752,6 +1755,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [docRev, sessionStack],
   )
+  // The sketches the next stroke would join, for the Outliner's "drawing"
+  // mark. The draw tools change them as they mint sketches — every such
+  // stroke bumps `docRev` — and New Sketch / Draw Into Sketch change them
+  // without touching the document, which is what `sketchTargetRev` is for.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const activeSketchIds = useMemo(
+    () => new Set(viewportApi.current?.activeSketchIds?.() ?? []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [docRev, sketchTargetRev],
+  )
 
   // Compute the lit set for isolation.
   // When the context is non-empty, compute the leaf objects of the deepest context node.
@@ -1861,6 +1874,20 @@ export default function App() {
               if (componentMemberIds === null) return false
               return canBooleanInComponent(selectedIds, (n) => componentMemberIds.has(n.id))
             })(),
+      // Draw Into Sketch: the selection names exactly one sketch — the whole
+      // sketch, or any shapes/lines/curves of the same one — it is unlocked,
+      // and drawing is at the top level (the remembered target is per plane
+      // in world space; inside a component the draw tools target the
+      // definition's own sketches).
+      canDrawIntoSketch: (() => {
+        const sketch = selectedSketchOf(selectedIds)
+        return (
+          sketch !== undefined &&
+          !componentFrameOpen &&
+          activeContext.length === 0 &&
+          !scene.sketch_locked(sketch)
+        )
+      })(),
       canGroup: !componentFrameOpen && !hasSketch && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
@@ -4284,6 +4311,10 @@ export default function App() {
       // enabled/disabled through sync_menu_state, and the handlers themselves
       // re-check the selection, so a stale click is a no-op.
       case 'edit-group': handleGroup(); break
+      case 'edit-new-sketch': handleNewSketch(); break
+      case 'edit-draw-into-sketch':
+        if (menuGates?.canDrawIntoSketch ?? false) handleDrawIntoSketch()
+        break
       case 'edit-ungroup': handleUngroup(); break
       case 'edit-make-component': handleMakeComponent(); break
       case 'edit-place-copy': handlePlaceInstance(); break
@@ -5036,6 +5067,7 @@ export default function App() {
     const enabled: Record<string, boolean> = {
       'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
       'edit-group': menuGates?.canGroup ?? false,
+      'edit-draw-into-sketch': menuGates?.canDrawIntoSketch ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
       'edit-make-component': menuGates?.canMakeComponent ?? false,
       'edit-place-copy': menuGates?.canPlaceCopy ?? false,
@@ -5475,6 +5507,25 @@ export default function App() {
     }
   }
 
+  // New Sketch / Draw Into Sketch steer which sketch the next stroke joins
+  // (tools/sketchGesture.ts). Neither changes the document, so neither is an
+  // undo step; `sketchTargetRev` re-renders the Outliner's "drawing" mark.
+  const handleNewSketch = () => {
+    viewportApi.current?.newSketch()
+    setSketchTargetRev((r) => r + 1)
+    handleToast('New sketch — the next thing you draw starts it.')
+  }
+  const handleDrawIntoSketch = (sketch?: bigint) => {
+    const target = sketch ?? selectedSketchOf(selectedIds)
+    if (target === undefined) return
+    const result = viewportApi.current?.drawIntoSketch(target)
+    setSketchTargetRev((r) => r + 1)
+    if (result === 'locked') {
+      handleToast("That sketch is locked. Clear 'Locked sketch' in Object Info to draw into it.")
+    } else if (result === 'ok') {
+      handleToast('New strokes on this plane join this sketch.')
+    }
+  }
   const handleGroup = () => {
     // Re-check eligibility: the keyboard accelerator (Ctrl+G) dispatches here
     // unconditionally, unlike the menu items sync_menu_state disables, so the
@@ -5690,6 +5741,7 @@ export default function App() {
           canBoolean,
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
+          canDrawIntoSketch: menuGates?.canDrawIntoSketch ?? false,
           hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,
           clipboardHasContent: menuGates?.clipboardHasContent ?? false,
         }}
@@ -6149,6 +6201,8 @@ export default function App() {
               onSetHiddenMany={handleSetHiddenMany}
               onReparent={handleReparent}
               onDropRefused={(reason) => handleToast(reason)}
+              activeSketchIds={activeSketchIds}
+              onDrawIntoSketch={(sketch) => handleDrawIntoSketch(sketch)}
             />
           </TraySection>
           <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -6660,6 +6714,7 @@ export default function App() {
           canBoolean: menuGates?.canBoolean ?? false,
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
+          canDrawIntoSketch: menuGates?.canDrawIntoSketch ?? false,
           sceneActive: scenes.activeSid !== null,
           scenesAny: scenes.entries.length > 0,
           hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
-import { runSketchGesture, makeSketchPlaneCache, type SketchTarget } from './sketchGesture'
+import {
+  runSketchGesture,
+  makeSketchPlaneCache,
+  startNewSketch,
+  drawIntoSketch,
+  activeSketches,
+  type SketchTarget,
+} from './sketchGesture'
 import { groundDrawPlane, planeKey } from './drawPlane'
 import type { DrawPlane } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -532,5 +539,68 @@ describe('runSketchGesture — locked sketches', () => {
 
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
     expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(1n)
+  })
+})
+
+describe('steering the active sketch', () => {
+  /** A scene of ground sketches keyed by handle; `locked` lists the locked
+   *  ones and any handle not in `live` reads as stale. `begin_ground_sketch`
+   *  mints 100n, 101n, … so a minted handle is recognisable. */
+  function sceneOf(live: bigint[], locked: bigint[] = []) {
+    let next = 100n
+    return {
+      begin_ground_sketch: vi.fn(() => next++),
+      sketch_locked: (h: bigint) => locked.includes(h),
+      sketch_plane: (h: bigint) => (live.includes(h) || h >= 100n ? GROUND : undefined),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+    } as unknown as WasmScene
+  }
+  const strokeInto = (scene: WasmScene, cache: ReturnType<typeof makeSketchPlaneCache>) =>
+    runSketchGesture(scene, cache, GROUND_PLANE, (sketch) => sketch)
+
+  it('New Sketch makes the next stroke mint instead of joining the remembered sketch', () => {
+    const scene = sceneOf([1n])
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 1n)
+    expect(strokeInto(scene, cache)).toBe(1n)
+
+    startNewSketch(cache)
+    expect(activeSketches(scene, cache)).toEqual([])
+    // Nothing is minted by the command itself...
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    // ...the next stroke mints, and later strokes join what it minted.
+    expect(strokeInto(scene, cache)).toBe(100n)
+    expect(strokeInto(scene, cache)).toBe(100n)
+    expect(activeSketches(scene, cache)).toEqual([100n])
+  })
+
+  it('Draw Into makes an older sketch the one the next stroke on its plane joins', () => {
+    const scene = sceneOf([1n, 2n])
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 2n) // the most recent sketch
+
+    expect(drawIntoSketch(scene, cache, 1n)).toBe('ok')
+    expect(activeSketches(scene, cache)).toEqual([1n])
+    expect(strokeInto(scene, cache)).toBe(1n)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+  })
+
+  it('Draw Into refuses a locked sketch and a stale handle, remembering nothing', () => {
+    const scene = sceneOf([1n, 2n], [1n])
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 2n)
+
+    expect(drawIntoSketch(scene, cache, 1n)).toBe('locked')
+    expect(drawIntoSketch(scene, cache, 9n)).toBe('unknown')
+    expect(activeSketches(scene, cache)).toEqual([2n])
+  })
+
+  it('stops calling a remembered sketch active once it is locked or gone', () => {
+    const cache = makeSketchPlaneCache()
+    cache.set(GROUND_KEY, 1n)
+    expect(activeSketches(sceneOf([1n]), cache)).toEqual([1n])
+    expect(activeSketches(sceneOf([1n], [1n]), cache)).toEqual([])
+    expect(activeSketches(sceneOf([]), cache)).toEqual([])
   })
 })

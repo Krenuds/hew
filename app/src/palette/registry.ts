@@ -54,6 +54,9 @@ export type PaletteGate =
   | 'canBoolean'
   | 'canImport'
   | 'canDrawText'
+  /** The selection names exactly one unlocked sketch, at the top level —
+   *  gates "Draw Into Sketch". */
+  | 'canDrawIntoSketch'
   /** A Scene is currently active (docs/design/scenes.md §5) — gates
    *  "Update Scene", which has nothing to re-capture with none active. */
   | 'sceneActive'
@@ -207,6 +210,8 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'edit-delete-guides', label: 'Delete Guide Lines', description: 'Remove every construction guide.', group: 'Actions' },
   { id: 'edit-group', label: 'Group', description: 'Group the selected objects so they move together.', group: 'Actions', synonyms: ['make group'], gate: 'canGroup' },
   { id: 'edit-ungroup', label: 'Ungroup', description: 'Dissolve the selected group back into its members.', group: 'Actions', synonyms: ['dissolve group'], gate: 'canUngroup' },
+  { id: 'edit-new-sketch', label: 'New Sketch', description: 'Start a fresh sketch with the next thing you draw, instead of adding to the last one.', group: 'Actions', synonyms: ['start sketch', 'fresh sketch', 'end sketch', 'new drawing'] },
+  { id: 'edit-draw-into-sketch', label: 'Draw Into Sketch', description: 'Make the selected sketch the one new strokes on its plane join.', group: 'Actions', synonyms: ['edit sketch', 'active sketch', 'add to sketch', 'continue sketch'], gate: 'canDrawIntoSketch' },
   { id: 'edit-make-component', label: 'Make Component', description: 'Turn the selection into a reusable component definition.', group: 'Actions', synonyms: ['create component', 'component'], gate: 'canMakeComponent' },
   { id: 'edit-place-copy', label: 'Place Copy', description: 'Place another instance of the selected component.', group: 'Actions', synonyms: ['duplicate', 'instance', 'copy component'], gate: 'canPlaceCopy' },
   { id: 'edit-explode', label: 'Explode', description: 'Break the selected component instance into plain objects.', group: 'Actions', synonyms: ['explode instance', 'break component'], gate: 'canExplode' },

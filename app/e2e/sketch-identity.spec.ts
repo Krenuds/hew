@@ -206,3 +206,62 @@ test('a sketch\'s name and hidden state are saved with the document', async ({ p
   await expect(rowFor(page, 'Ground floor').getByTitle('Show')).toBeVisible()
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
 })
+
+test('New Sketch ends the current sketch, and Draw Into goes back to an old one', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+
+  // The draw tools keep everything on one plane in one sketch...
+  await drawRect(page, ctx, 0, 0, 2, 2)
+  await drawRect(page, ctx, 4, 0, 6, 2)
+  const [plan] = await page.evaluate(() => window.__hew_test!.getSketchIds())
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(1)
+  expect(await page.evaluate(() => window.__hew_test!.getActiveSketchIds())).toEqual([plan])
+
+  // ...until Object ▸ New Sketch: the next stroke starts a fresh one. Nothing
+  // is minted by the command itself, so it leaves no empty sketch behind.
+  await page.keyboard.press('Space')
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
+  await page.getByText('New Sketch', { exact: true }).click()
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toEqual([plan])
+  expect(await page.evaluate(() => window.__hew_test!.getActiveSketchIds())).toEqual([])
+
+  await drawRect(page, ctx, 0, 4, 2, 6)
+  const afterNew = await page.evaluate(() => window.__hew_test!.getSketchIds())
+  expect(afterNew).toHaveLength(2)
+  const furniture = afterNew.find((id) => id !== plan)!
+  expect(await page.evaluate(() => window.__hew_test!.getActiveSketchIds())).toEqual([furniture])
+
+  // Two rows now, and the one strokes will join says so.
+  await page.keyboard.press('Space')
+  await expect(rowFor(page, 'Sketch 2').getByText('drawing', { exact: true })).toBeVisible()
+  await expect(rowFor(page, 'Sketch 1').getByText('drawing', { exact: true })).toHaveCount(0)
+
+  // Double-click the OLD sketch's row: draw into it again.
+  await rowFor(page, 'Sketch 1').dblclick()
+  expect(await page.evaluate(() => window.__hew_test!.getActiveSketchIds())).toEqual([plan])
+  await expect(rowFor(page, 'Sketch 1').getByText('drawing', { exact: true })).toBeVisible()
+
+  // A third rectangle joins the first sketch, not the most recent one.
+  const before = await page.evaluate(
+    (s) => window.__hew_test!.getSketchIslands(s).length,
+    plan,
+  )
+  await drawRect(page, ctx, 4, 4, 6, 6)
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(2)
+  expect(
+    await page.evaluate((s) => window.__hew_test!.getSketchIslands(s).length, plan),
+  ).toBe(before + 1)
+  expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
+})
+
+test('a locked sketch refuses Draw Into', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  await drawRect(page, ctx, 0, 0, 2, 2)
+  const [plan] = await page.evaluate(() => window.__hew_test!.getSketchIds())
+  await page.evaluate((s) => window.__hew_test!.setSketchLocked(s, true), plan)
+  await page.keyboard.press('Space')
+
+  await rowFor(page, 'Sketch 1').dblclick()
+  expect(await page.evaluate(() => window.__hew_test!.getActiveSketchIds())).toEqual([])
+  await expect(page.getByText(/That sketch is locked/)).toBeVisible()
+})

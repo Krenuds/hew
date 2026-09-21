@@ -116,6 +116,12 @@ interface Props {
    *  member, a sketch row) is indistinguishable from a drag that never
    *  registered. */
   onDropRefused?: (reason: string) => void
+  /** The sketches a stroke would currently join (one per plane drawn on, at
+   *  most) — their rows carry a "drawing" mark. */
+  activeSketchIds?: ReadonlySet<bigint>
+  /** Double-click on a sketch row: make it the sketch new strokes on its
+   *  plane join (Object ▸ Draw Into Sketch). */
+  onDrawIntoSketch?: (sketch: bigint) => void
 }
 
 const EMPTY_KEYS: ReadonlySet<string> = new Set()
@@ -222,6 +228,8 @@ export function DocumentTree({
   onSetHiddenMany,
   onReparent,
   onDropRefused,
+  activeSketchIds,
+  onDrawIntoSketch,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -985,7 +993,10 @@ export function DocumentTree({
                 icon={<NodeIcon kind="sketch" />}
                 selected={isSelected(node)}
                 isPrimary={primaryKey === key}
-                active={false}
+                // The sketch the next stroke on its plane joins.
+                active={activeSketchIds?.has(sketch) ?? false}
+                activeLabel="drawing"
+                onDoubleClick={() => onDrawIntoSketch?.(sketch)}
                 // Dimmed when shown only as the path to a matching shape.
                 dimmed={fullPath.length > 0 || (isFilterAncestor && !matched)}
                 hidden={hidden}
@@ -1517,6 +1528,7 @@ function Row({
   selected,
   isPrimary,
   active,
+  activeLabel,
   dimmed,
   hidden,
   hiddenByParent,
@@ -1540,6 +1552,10 @@ function Row({
   selected: boolean
   isPrimary?: boolean
   active: boolean
+  /** The chip an `active` row shows. Defaults to "editing" (an open group or
+   *  component); a sketch row says "drawing" — the next stroke on its plane
+   *  joins it. */
+  activeLabel?: string
   dimmed: boolean
   hidden?: boolean
   /** Hidden only because an ancestor group is hidden, not this row's own
@@ -1636,7 +1652,9 @@ function Row({
       )}
       {icon}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
-      {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}>editing</span>}
+      {active && (
+        <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}>{activeLabel ?? 'editing'}</span>
+      )}
       {onToggleAllHidden !== undefined && (
         <button
           onClick={(e) => {

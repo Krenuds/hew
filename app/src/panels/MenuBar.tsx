@@ -198,6 +198,9 @@ export interface MenuBarProps {
      *  `canImport` — 3D Text placement is an instance placement. Defaults
      *  to enabled when omitted. */
     canDrawText?: boolean
+    /** The selection names exactly one unlocked sketch at the top level —
+     *  enables Draw Into Sketch. Defaults to disabled when omitted. */
+    canDrawIntoSketch?: boolean
     /** Cut/Copy (Lane D): at least one structural (object/group/instance)
      *  node is selected. */
     hasStructuralSelection?: boolean
@@ -920,6 +923,13 @@ export function MenuBar({
               shortcut={`${mod}⇧G`}
               disabled={!(editGates?.canUngroup ?? false)}
               onClick={withClose(() => onEditAction?.('edit-ungroup'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem label="New Sketch" onClick={withClose(() => onEditAction?.('edit-new-sketch'))} />
+            <MenuItem
+              label="Draw Into Sketch"
+              disabled={!(editGates?.canDrawIntoSketch ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-draw-into-sketch'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem

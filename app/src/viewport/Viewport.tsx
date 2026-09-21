@@ -77,7 +77,7 @@ import { AxesTool } from '../tools/AxesTool'
 import { getDrawingAxes, type DrawingAxes } from '../tools/drawingAxes'
 import { DimensionTool } from '../tools/DimensionTool'
 import { TextTool, type PlacedLeader } from '../tools/TextTool'
-import { makeSketchPlaneCache } from '../tools/sketchGesture'
+import { makeSketchPlaneCache, startNewSketch, drawIntoSketch, activeSketches } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray, ApertureBasis } from './math'
 import {
@@ -935,6 +935,17 @@ export interface ViewportApi {
   /** Replace the renderer's user-hidden world sketch set (the sketch half of
    * `setHidden`; the kernel half is `scene.set_hidden_sketches`). */
   setHiddenSketches: (hiddenSketchIds: bigint[]) => void
+  /** New Sketch: the next stroke on any plane starts a fresh sketch instead
+   * of joining the one last drawn into there. Mints nothing, costs no undo
+   * step (`startNewSketch`, tools/sketchGesture.ts). */
+  newSketch: () => void
+  /** Draw Into This Sketch: the next top-level stroke on `sketch`'s plane
+   * joins it. `'locked'` / `'unknown'` refuse and remember nothing
+   * (`drawIntoSketch`, tools/sketchGesture.ts). */
+  drawIntoSketch: (sketch: bigint) => 'ok' | 'locked' | 'unknown'
+  /** The sketches a top-level stroke would currently join — one per plane
+   * drawn on, at most — for the Outliner's active mark. */
+  activeSketchIds: () => bigint[]
   /** Select every visible top-level node + free sketch (Edit ▸ Select All);
    * inside a group's editing context, its direct members. */
   selectAll: () => void
@@ -5826,6 +5837,10 @@ export default function Viewport({
       scheduleRender()
     }
 
+    const newSketch = (): void => startNewSketch(sketchPlaneCache)
+    const drawInto = (sketch: bigint) => drawIntoSketch(wasmScene, sketchPlaneCache, sketch)
+    const activeSketchIds = (): bigint[] => activeSketches(wasmScene, sketchPlaneCache)
+
     function setAxesVisible(visible: boolean): void {
       originAxes.visible = visible
       // Hidden axes must not snap or flash a cue — gate inference too.
@@ -6115,7 +6130,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, setHiddenSketches, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, orbitBy, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, setHiddenSketches, newSketch, drawIntoSketch: drawInto, activeSketchIds, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, orbitBy, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories

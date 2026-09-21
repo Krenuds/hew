@@ -2893,6 +2893,18 @@ fn main() {
                 Some("CmdOrCtrl+G"),
                 Some("CmdOrCtrl+G"),
             )?;
+            // New Sketch is always available; Draw Into Sketch needs a
+            // selection that names one unlocked sketch.
+            let edit_new_sketch =
+                MenuItemBuilder::with_id("edit-new-sketch", "New Sketch").build(handle)?;
+            let edit_draw_into_sketch = gated_item(
+                handle,
+                &mut gated,
+                "edit-draw-into-sketch",
+                "Draw Into Sketch",
+                None,
+                None,
+            )?;
             let edit_ungroup = gated_item(
                 handle,
                 &mut gated,
@@ -2984,6 +2996,9 @@ fn main() {
             let object_menu = SubmenuBuilder::new(handle, "Object")
                 .item(&edit_group)
                 .item(&edit_ungroup)
+                .separator()
+                .item(&edit_new_sketch)
+                .item(&edit_draw_into_sketch)
                 .separator()
                 .item(&edit_make_component)
                 .item(&edit_make_unique)
@@ -3924,6 +3939,8 @@ fn main() {
                 "edit-union" => "edit-union",
                 "edit-subtract" => "edit-subtract",
                 "edit-intersect" => "edit-intersect",
+                "edit-new-sketch" => "edit-new-sketch",
+                "edit-draw-into-sketch" => "edit-draw-into-sketch",
                 "view-axes" => "toggle-axes",
                 "view-reset-axes" => "reset-axes",
                 "view-grid" => "toggle-grid",

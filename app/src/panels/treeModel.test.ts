@@ -14,6 +14,7 @@ import {
   nodeKindToNumber,
   isTreeMemberKind,
   shapeLabel,
+  selectedSketchOf,
   canMakeComponent,
   canPlaceInstance,
   canExplodeInstance,
@@ -1038,5 +1039,27 @@ describe('dropTargetFor', () => {
 
   it('refuses a multi-node drag when one of the dragged groups would contain the target', () => {
     expect(dropTargetFor([a, g], h, view())).toBeNull()
+  })
+})
+
+describe('selectedSketchOf', () => {
+  const sk: NodeRef = { kind: 'sketch', id: 5n }
+  const shape: NodeRef = { kind: 'sketch-island', id: 105n, sketch: 5n }
+  const line: NodeRef = { kind: 'sketch-edge', id: 9n, sketch: 5n }
+
+  it('names the sketch for a whole-sketch selection', () => {
+    expect(selectedSketchOf([sk])).toBe(5n)
+  })
+
+  it('names the owning sketch for shapes, lines and curves of one sketch', () => {
+    expect(selectedSketchOf([shape, line])).toBe(5n)
+    expect(selectedSketchOf([sk, shape])).toBe(5n)
+  })
+
+  it('names nothing for an empty, mixed, or two-sketch selection', () => {
+    expect(selectedSketchOf([])).toBeUndefined()
+    expect(selectedSketchOf([shape, { kind: 'object', id: 1n }])).toBeUndefined()
+    expect(selectedSketchOf([shape, { kind: 'sketch-island', id: 1n, sketch: 6n }])).toBeUndefined()
+    expect(selectedSketchOf([{ kind: 'imprint', id: 1n, object: 2n }])).toBeUndefined()
   })
 })

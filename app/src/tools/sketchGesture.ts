@@ -55,7 +55,7 @@
 import type { V3 } from '../viewport/geoHelpers'
 import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
 import type { DrawPlane } from './drawPlane'
-import { planeKey } from './drawPlane'
+import { planeFromSketch, planeKey } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
 
 /**
@@ -75,11 +75,18 @@ export type SketchTarget =
  * `planeKey`. One instance is shared by every draw tool of a Viewport, so
  * everything drawn on one plane at top level lands in the same sketch.
  * `set(key, null)` drops a handle known to be stale; `clear()` drops every
- * cached handle (the document was replaced). */
+ * cached handle (the document was replaced, or the user asked for a New
+ * Sketch); `handles()` lists what is remembered, for showing the user which
+ * sketches their next strokes will join.
+ *
+ * This cache IS the "active sketch": the sketch remembered for a plane is
+ * the one a stroke on that plane lands in. `startNewSketch` and
+ * `drawIntoSketch` below are the two ways a user steers it. */
 export interface SketchPlaneCache {
   get(key: string): bigint | null
   set(key: string, handle: bigint | null): void
   clear(): void
+  handles(): bigint[]
 }
 
 /** A standalone `SketchPlaneCache` boxing a `Map<planeKey, handle>`. */
@@ -92,7 +99,62 @@ export function makeSketchPlaneCache(): SketchPlaneCache {
       else handles.set(key, handle)
     },
     clear: () => handles.clear(),
+    handles: () => [...handles.values()],
   }
+}
+
+/** The cache key a top-level (world) stroke on `plane` looks up. */
+function worldKey(plane: DrawPlane): string {
+  return `world:${planeKey(plane)}`
+}
+
+/**
+ * New Sketch: forget every remembered target, so the next stroke on ANY plane
+ * mints a fresh sketch instead of joining the one last drawn into there. The
+ * sketches themselves are untouched. Nothing is minted here — a sketch is
+ * born with its first stroke, inside that stroke's own undo step — so this
+ * costs no undo entry and leaves no empty sketch behind if the user changes
+ * their mind.
+ *
+ * On a non-ground plane a stroke that starts ON an existing sketch's
+ * geometry still adopts that sketch (sketch mode — the hover is the more
+ * specific intent); start it off the old lines to begin the new one.
+ */
+export function startNewSketch(cache: SketchPlaneCache): void {
+  cache.clear()
+}
+
+/**
+ * Draw Into This Sketch: remember `sketch` as the target for its own plane,
+ * so the next top-level stroke there joins it — the way back into an older
+ * sketch on a plane (the ground above all) where the draw tools would
+ * otherwise keep extending the most recent one.
+ *
+ * Refuses a locked sketch (`'locked'` — it is a finished drawing; unlock it
+ * to edit it) and a stale or deleted handle (`'unknown'`), remembering
+ * nothing in either case. A remembered sketch that is later locked, deleted
+ * or moved off its plane is dropped by `runSketchGesture`'s own pre-check,
+ * exactly as any other remembered handle is.
+ */
+export function drawIntoSketch(
+  wasmScene: WasmScene,
+  cache: SketchPlaneCache,
+  sketch: bigint,
+): 'ok' | 'locked' | 'unknown' {
+  const plane = planeFromSketch(wasmScene, sketch, null)
+  if (plane === null) return 'unknown'
+  if (wasmScene.sketch_locked(sketch)) return 'locked'
+  cache.set(worldKey(plane), sketch)
+  return 'ok'
+}
+
+/** The sketches a top-level stroke would currently join: every remembered
+ * handle that is still a legal target (live and unlocked). For marking them
+ * in the Outliner. */
+export function activeSketches(wasmScene: WasmScene, cache: SketchPlaneCache): bigint[] {
+  return cache
+    .handles()
+    .filter((h) => wasmScene.sketch_plane(h) !== undefined && !wasmScene.sketch_locked(h))
 }
 
 /** Tolerance for "this sketch still lies on the target plane". Mirrors the

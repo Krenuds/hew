@@ -813,6 +813,11 @@ export interface HewTestHarness {
    * deleting a shared partition edge merges the two regions it divided. */
   getSketchRegionCount(sketch: string): number
 
+  /** The sketches a top-level stroke would currently join — one per plane
+   * drawn on, at most (`ViewportApi.activeSketchIds`). The probe for New
+   * Sketch and Draw Into Sketch, which steer it. */
+  getActiveSketchIds(): string[]
+
   /** Is `sketch` a LOCKED SKETCH — one drawn *against* rather than *into*? */
   isSketchLocked(sketch: string): boolean
 
@@ -1943,6 +1948,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       ),
 
     getSketchRegionCount: (sketch) => query((s) => s.sketch_regions(BigInt(sketch)).length),
+
+    getActiveSketchIds: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.activeSketchIds().map((id) => id.toString())
+    },
 
     isSketchLocked: (sketch) => query((s) => s.sketch_locked(BigInt(sketch))),
 
