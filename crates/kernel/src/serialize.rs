@@ -210,7 +210,23 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// manifest to v16 output. Gated one way by [`LOCKED_MIN_VERSION`], the
 /// [`ATTRS_MIN_VERSION`] posture. Geometry buffer unchanged
 /// (`GEOMETRY_FORMAT_VERSION` stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 17;
+/// **v18** (sketch node metadata): a sketch is a node, so its record gains
+/// the three optional fields every other node record already carries —
+/// `sketches[].name`, `sketches[].tags` and `sketches[].hidden` (USER-hidden
+/// view state). Each is written ONLY when set, so a document whose sketches
+/// have no name, no tags and none hidden produces a byte-identical manifest
+/// to v17 output. Gated one way by [`SKETCH_META_MIN_VERSION`], the
+/// [`LOCKED_MIN_VERSION`] posture. Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 18;
+
+/// The manifest version at which `sketches[].name`, `sketches[].tags` and
+/// `sketches[].hidden` were introduced. Version-gated one way, the
+/// [`LOCKED_MIN_VERSION`] posture: a file declaring an OLDER version that
+/// carries any of the three is malformed for its own declared version and
+/// rejected, never silently honored (reject-not-repair). Optional at v18+ —
+/// absence means unnamed, untagged and visible.
+pub(crate) const SKETCH_META_MIN_VERSION: u32 = 18;
 
 /// The manifest version at which `sketches[].locked` (the locked-sketch
 /// flag) was introduced. Version-gated one way, the [`ATTRS_MIN_VERSION`]
@@ -1995,6 +2011,18 @@ pub(crate) struct SketchDto {
     /// smuggled field and rejected ([`LOCKED_MIN_VERSION`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// Optional display name (manifest v18+) — the sketch as a node. Absent
+    /// means unnamed. Presence in a pre-v18 file is a smuggled field and
+    /// rejected ([`SKETCH_META_MIN_VERSION`]), as are `tags` and `hidden`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Per-node tag paths (manifest v18+). Absent means untagged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
+    /// USER-hidden view state (manifest v18+). Absent means visible. Not the
+    /// delete tombstone — a deleted sketch is never written at all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2181,6 +2209,13 @@ pub(crate) struct DocSaveData {
     /// from this set is an ordinary sketch; the writer emits `locked` only
     /// for members, so a document with none writes v16-identical output.
     pub locked_sketches: std::collections::BTreeSet<SketchId>,
+    /// Name and tag paths of the sketches that have either (manifest v18+).
+    /// A sketch absent from this map is unnamed and untagged; the writer
+    /// emits the fields only for members, so a document with none writes
+    /// v17-identical output.
+    pub sketch_meta: std::collections::BTreeMap<SketchId, (Option<String>, Vec<Vec<String>>)>,
+    /// The USER-hidden sketches among `sketches` (manifest v18+).
+    pub sketch_hidden: std::collections::BTreeSet<SketchId>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
@@ -2436,6 +2471,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             dto.attrs = attrs_for(crate::document::EntityRef::Sketch(*sk_id));
             dto.owner = data.sketch_owner.get(sk_id).map(|cid| comp_to_dense[cid]);
             dto.locked = data.locked_sketches.contains(sk_id);
+            if let Some((name, tags)) = data.sketch_meta.get(sk_id) {
+                dto.name = name.clone();
+                dto.tags = tags.clone();
+            }
+            dto.hidden = data.sketch_hidden.contains(sk_id);
             dto
         })
         .collect();
@@ -2684,6 +2724,9 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         curves: curve_dtos,
         owner: None,   // patched by the caller (`encode_document`), like `id`
         locked: false, // patched by the caller (`encode_document`), like `id`
+        name: None,    // likewise
+        tags: Vec::new(),
+        hidden: false,
     }
 }
 
@@ -2848,6 +2891,11 @@ pub(crate) struct DocLoadRaw {
     /// `false` for every sketch in a pre-v17 file, which is the default the
     /// field-by-version table gives it.
     pub sketch_locked: Vec<bool>,
+    /// Per-sketch node metadata (manifest v18+), parallel to `sketch_owner`:
+    /// unnamed, untagged and visible for every sketch in a pre-v18 file.
+    pub sketch_names: Vec<Option<String>>,
+    pub sketch_tags: Vec<Vec<Vec<String>>>,
+    pub sketch_hidden: Vec<bool>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
@@ -2989,6 +3037,11 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // `SketchOwner` (manifest v13+; absent/`None` in older files → world).
     let sketch_owner: Vec<Option<u32>> = manifest.sketches.iter().map(|s| s.owner).collect();
     let sketch_locked: Vec<bool> = manifest.sketches.iter().map(|s| s.locked).collect();
+    let sketch_names: Vec<Option<String>> =
+        manifest.sketches.iter().map(|s| s.name.clone()).collect();
+    let sketch_tags: Vec<Vec<Vec<String>>> =
+        manifest.sketches.iter().map(|s| s.tags.clone()).collect();
+    let sketch_hidden: Vec<bool> = manifest.sketches.iter().map(|s| s.hidden).collect();
 
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
@@ -3276,6 +3329,9 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketches,
         sketch_owner,
         sketch_locked,
+        sketch_names,
+        sketch_tags,
+        sketch_hidden,
         guides,
         annotations,
         consumed: manifest.consumed.clone(),
@@ -3440,6 +3496,19 @@ fn validate_manifest_references(
                 what: format!(
                     "sketch {} is locked in a v{} manifest (introduced at v{})",
                     sk.id, manifest.format_version, LOCKED_MIN_VERSION
+                ),
+            });
+        }
+        // Sketch node metadata is gated the same way: no pre-v18 writer
+        // emitted a name, tags or a hidden flag on a sketch.
+        if manifest.format_version < SKETCH_META_MIN_VERSION
+            && (sk.name.is_some() || !sk.tags.is_empty() || sk.hidden)
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} carries a name, tags or a hidden flag in a v{} manifest \
+                     (introduced at v{})",
+                    sk.id, manifest.format_version, SKETCH_META_MIN_VERSION
                 ),
             });
         }
@@ -3991,6 +4060,10 @@ fn encode_scenes(data: &DocSaveData) -> Vec<SceneDto> {
     }
     for row in &data.instances {
         live_node_sids.extend(sid_of(EntityRef::Instance(row.0)));
+    }
+    // A sketch is a node too (manifest v18+): a Scene may hide one.
+    for (sid, _) in &data.sketches {
+        live_node_sids.extend(sid_of(EntityRef::Sketch(*sid)));
     }
     let live_tag_sids: std::collections::BTreeSet<u64> = data
         .tag_meta

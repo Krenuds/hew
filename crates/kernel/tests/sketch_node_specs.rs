@@ -11,12 +11,17 @@
 //! 1. What a sketch node answers: liveness, parent, leaves.
 //! 2. Every structural op refuses it, touching nothing.
 //! 3. The sketch-specific paths are unaffected.
+//! 4. Name, tags and user-hidden: set, undone, swept with the tag registry.
+//! 5. Persistence: manifest v18, written only when set, gated one way.
+//! 6. Name and tags ride every whole-sketch copy.
+//! 7. Scenes capture and restore a hidden sketch.
 
+use std::io::{Cursor, Read, Write};
 use std::num::NonZeroU32;
 
 use kernel::{
-    Anchor, BooleanOp, Document, DocumentError, NodeId, ObjectId, Plane, Point3, SketchId,
-    Transform, Vec3,
+    Anchor, BooleanOp, Document, DocumentError, LoadError, NodeId, ObjectId, Plane, Point3,
+    SceneProps, SketchId, Transform, Vec3,
 };
 
 // ----------------------------------------------------------------- helpers
@@ -231,4 +236,382 @@ fn delete_sketch_still_deletes_it() {
     assert!(doc.sketch(s).is_none());
     doc.undo().expect("undo");
     assert!(doc.sketch(s).is_some());
+}
+
+// ===================================== 4. name, tags and user-hidden
+
+fn tag(path: &[&str]) -> Vec<String> {
+    path.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn a_sketch_is_named_and_the_name_undoes() {
+    let (mut doc, _, s) = box_and_sketch();
+    let node = NodeId::Sketch(s);
+
+    doc.set_node_name(node, Some("Ground floor".to_string()))
+        .expect("a sketch takes a name");
+    assert_eq!(doc.sketch_name(s), Some("Ground floor"));
+
+    doc.undo().expect("undo the rename");
+    assert_eq!(doc.sketch_name(s), None);
+    doc.redo().expect("redo the rename");
+    assert_eq!(doc.sketch_name(s), Some("Ground floor"));
+
+    doc.set_node_name(node, None).expect("and gives it up");
+    assert_eq!(doc.sketch_name(s), None);
+}
+
+#[test]
+fn a_sketch_is_tagged_and_untagged() {
+    let (mut doc, _, s) = box_and_sketch();
+    let node = NodeId::Sketch(s);
+
+    doc.add_node_tag(node, tag(&["Plans", "Ground"])).unwrap();
+    assert_eq!(doc.node_tags(node), &[tag(&["Plans", "Ground"])]);
+
+    let depth = doc.undo_depth();
+    doc.add_node_tag(node, tag(&["Plans", "Ground"])).unwrap();
+    assert_eq!(
+        doc.undo_depth(),
+        depth,
+        "a tag it already has costs no step"
+    );
+
+    doc.remove_node_tag(node, &tag(&["Plans", "Ground"]))
+        .unwrap();
+    assert!(doc.node_tags(node).is_empty());
+    doc.undo().unwrap();
+    assert_eq!(doc.node_tags(node), &[tag(&["Plans", "Ground"])]);
+}
+
+/// The registry sweeps reach sketches: renaming or deleting a tag rewrites it
+/// on a sketch exactly as on an object, in the same undo step.
+#[test]
+fn tag_rename_and_delete_sweep_sketches() {
+    let (mut doc, o, s) = box_and_sketch();
+    let (sk, ob) = (NodeId::Sketch(s), NodeId::Object(o));
+    doc.add_node_tag(sk, tag(&["Plans", "Ground"])).unwrap();
+    doc.add_node_tag(ob, tag(&["Plans", "Ground"])).unwrap();
+
+    doc.rename_tag(&tag(&["Plans"]), tag(&["Drawings"]))
+        .expect("rename the parent");
+    assert_eq!(doc.node_tags(sk), &[tag(&["Drawings", "Ground"])]);
+    assert_eq!(doc.node_tags(ob), &[tag(&["Drawings", "Ground"])]);
+    doc.undo().unwrap();
+    assert_eq!(doc.node_tags(sk), &[tag(&["Plans", "Ground"])]);
+
+    doc.delete_tag(&tag(&["Plans"])).expect("delete the parent");
+    assert!(doc.node_tags(sk).is_empty());
+    assert!(doc.node_tags(ob).is_empty());
+    doc.undo().unwrap();
+    assert_eq!(doc.node_tags(sk), &[tag(&["Plans", "Ground"])]);
+}
+
+/// A tag rename that would collide with a path only a SKETCH carries is
+/// refused like any other collision.
+#[test]
+fn a_tag_carried_only_by_a_sketch_still_blocks_a_colliding_rename() {
+    let (mut doc, o, s) = box_and_sketch();
+    doc.add_node_tag(NodeId::Sketch(s), tag(&["B"])).unwrap();
+    doc.add_node_tag(NodeId::Object(o), tag(&["A"])).unwrap();
+
+    assert_eq!(
+        doc.rename_tag(&tag(&["A"]), tag(&["B"])).unwrap_err(),
+        DocumentError::DuplicateTag
+    );
+}
+
+/// User-hidden is view state, like every other node's: set, read back,
+/// listed, and deliberately not an undo step.
+#[test]
+fn a_sketch_is_user_hidden_as_view_state() {
+    let (mut doc, _, s) = box_and_sketch();
+    let node = NodeId::Sketch(s);
+    let depth = doc.undo_depth();
+
+    doc.set_node_user_hidden(node, true);
+    assert!(doc.node_user_hidden(node));
+    assert!(doc.user_hidden_nodes().contains(&node));
+    assert_eq!(doc.undo_depth(), depth, "hiding is not an undo step");
+    assert!(doc.sketch(s).is_some(), "hidden from view, not deleted");
+
+    doc.set_node_user_hidden(node, false);
+    assert!(!doc.node_user_hidden(node));
+}
+
+/// A deleted sketch is not a live node: naming it refuses with the honest
+/// error, and undoing the delete brings it back still named.
+#[test]
+fn a_deleted_sketch_refuses_a_name_and_returns_with_its_own() {
+    let (mut doc, _, s) = box_and_sketch();
+    let node = NodeId::Sketch(s);
+    doc.set_node_name(node, Some("Ground floor".to_string()))
+        .unwrap();
+    doc.delete_sketch(s).unwrap();
+
+    assert_eq!(
+        doc.set_node_name(node, Some("x".to_string())).unwrap_err(),
+        DocumentError::UnknownSketch
+    );
+    doc.undo().expect("undo the delete");
+    assert_eq!(doc.sketch_name(s), Some("Ground floor"));
+}
+
+// ======================================================== 5. persistence
+
+fn manifest_json(bytes: &[u8]) -> serde_json::Value {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut buf = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
+    serde_json::from_slice(&buf).unwrap()
+}
+
+/// Re-write `manifest.json` inside `.hew` bytes through `edit`.
+fn patch_manifest(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let mut manifest = manifest_json(bytes);
+    edit(&mut manifest);
+    let patched = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::<u8>::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    out.start_file("manifest.json", opts).unwrap();
+    out.write_all(&patched).unwrap();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        out.start_file(name, opts).unwrap();
+        out.write_all(&data).unwrap();
+    }
+    out.finish().unwrap().into_inner()
+}
+
+#[test]
+fn name_tags_and_hidden_round_trip() {
+    let (mut doc, _, s) = box_and_sketch();
+    let node = NodeId::Sketch(s);
+    doc.set_node_name(node, Some("Ground floor".to_string()))
+        .unwrap();
+    doc.add_node_tag(node, tag(&["Plans"])).unwrap();
+    doc.set_node_user_hidden(node, true);
+
+    let loaded = Document::load(&doc.save()).expect("v18 loads");
+    let s2 = loaded.sketch_ids()[0];
+    let node2 = NodeId::Sketch(s2);
+    assert_eq!(loaded.sketch_name(s2), Some("Ground floor"));
+    assert_eq!(loaded.node_tags(node2), &[tag(&["Plans"])]);
+    assert!(loaded.node_user_hidden(node2));
+    assert_eq!(loaded.save(), doc.save(), "and saves back byte-identical");
+}
+
+/// Written only when set: a sketch with no name, no tags and not hidden
+/// writes none of the three keys, so such a document differs from its v17
+/// output in the version number alone.
+#[test]
+fn an_unnamed_visible_sketch_writes_no_new_keys() {
+    let (doc, _, _) = box_and_sketch();
+    let manifest = manifest_json(&doc.save());
+
+    assert_eq!(manifest["format_version"], 18);
+    let sketch = &manifest["sketches"][0];
+    for key in ["name", "tags", "hidden"] {
+        assert!(sketch.get(key).is_none(), "`{key}` is absent when unset");
+    }
+}
+
+/// Clearing the last of a sketch's metadata leaves no trace: the document
+/// saves exactly as one that never had any.
+#[test]
+fn cleared_metadata_saves_like_none_ever_set() {
+    let (mut doc, _, s) = box_and_sketch();
+    let pristine = doc.save();
+    let node = NodeId::Sketch(s);
+
+    doc.set_node_name(node, Some("x".to_string())).unwrap();
+    doc.add_node_tag(node, tag(&["T"])).unwrap();
+    doc.delete_tag(&tag(&["T"])).unwrap();
+    doc.set_node_name(node, None).unwrap();
+
+    assert_eq!(
+        manifest_json(&doc.save())["sketches"],
+        manifest_json(&pristine)["sketches"]
+    );
+}
+
+/// Gated one way: a v17 manifest carrying any of the three fields is
+/// malformed for its own declared version and rejected, never honored.
+#[test]
+fn sketch_metadata_smuggled_into_a_v17_manifest_is_rejected() {
+    let (doc, _, _) = box_and_sketch();
+    let bytes = doc.save();
+    let smuggle = |key: &'static str, value: serde_json::Value| {
+        patch_manifest(&bytes, move |m| {
+            m["format_version"] = 17.into();
+            m["sketches"][0][key] = value;
+        })
+    };
+
+    for (key, value) in [
+        ("name", serde_json::json!("Ground floor")),
+        ("tags", serde_json::json!([["Plans"]])),
+        ("hidden", serde_json::json!(true)),
+    ] {
+        assert!(
+            matches!(
+                Document::load(&smuggle(key, value)),
+                Err(LoadError::MalformedManifest { .. })
+            ),
+            "`{key}` in a v17 manifest is rejected"
+        );
+    }
+}
+
+#[test]
+fn a_v17_file_loads_with_every_sketch_unnamed_and_visible() {
+    let (doc, _, _) = box_and_sketch();
+    let v17 = patch_manifest(&doc.save(), |m| m["format_version"] = 17.into());
+
+    let loaded = Document::load(&v17).expect("an honest v17 file loads");
+    let s = loaded.sketch_ids()[0];
+    assert_eq!(loaded.sketch_name(s), None);
+    assert!(loaded.node_tags(NodeId::Sketch(s)).is_empty());
+    assert!(!loaded.node_user_hidden(NodeId::Sketch(s)));
+}
+
+// ============================== 6. name and tags ride whole-sketch copies
+
+/// A named, tagged sketch drawn inside a component definition.
+fn definition_with_a_named_sketch(
+    doc: &mut Document,
+) -> (kernel::ComponentId, kernel::InstanceId, SketchId) {
+    let o = a_box(doc, 0.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (sid, _) = doc
+        .begin_sketch_on_plane_in_instance(inst, ground())
+        .unwrap();
+    {
+        let sk = doc.sketch_mut(sid).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0)),
+            (Point3::new(3.0, 0.0, 0.0), Point3::new(3.0, 3.0, 0.0)),
+            (Point3::new(3.0, 3.0, 0.0), Point3::new(0.0, 3.0, 0.0)),
+            (Point3::new(0.0, 3.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+    }
+    doc.set_node_name(NodeId::Sketch(sid), Some("Layout".to_string()))
+        .expect("a definition-owned sketch takes a name");
+    doc.add_node_tag(NodeId::Sketch(sid), tag(&["Plans"]))
+        .unwrap();
+    (comp, inst, sid)
+}
+
+#[test]
+fn explode_instance_carries_the_name_onto_the_baked_sketch() {
+    let mut doc = Document::new();
+    let (_, inst, _) = definition_with_a_named_sketch(&mut doc);
+
+    let before: std::collections::BTreeSet<_> = doc.sketch_ids().into_iter().collect();
+    doc.explode_instance(inst).expect("explode");
+    let baked: Vec<_> = doc
+        .sketch_ids()
+        .into_iter()
+        .filter(|s| !before.contains(s))
+        .collect();
+
+    assert_eq!(baked.len(), 1);
+    assert_eq!(doc.sketch_name(baked[0]), Some("Layout"));
+    assert_eq!(doc.node_tags(NodeId::Sketch(baked[0])), &[tag(&["Plans"])]);
+}
+
+/// Copying geometry OFF a sketch yields fresh, unnamed stock — the same rule
+/// the locked flag follows.
+#[test]
+fn copying_islands_off_a_named_sketch_yields_an_unnamed_one() {
+    let (mut doc, _, s) = box_and_sketch();
+    doc.set_node_name(NodeId::Sketch(s), Some("Ground floor".to_string()))
+        .unwrap();
+    let islands: Vec<_> = doc.sketch(s).unwrap().islands().keys().collect();
+
+    let (copy, _) = doc
+        .copy_sketch_islands(
+            s,
+            &islands,
+            &Transform::translation(Vec3::new(0.0, 9.0, 0.0)),
+        )
+        .unwrap();
+    assert_eq!(doc.sketch_name(copy), None);
+}
+
+// ===================================================== 7. scenes
+
+/// A Scene captures the user-hidden nodes by stable id, and a hidden sketch
+/// is one of them. The writer prunes ids that name nothing live, so a sketch
+/// it did not count as a node would be dropped from the Scene on save without
+/// a word; this pins that it survives, and that applying the Scene hides the
+/// sketch again.
+#[test]
+fn a_scene_captures_and_restores_a_hidden_sketch() {
+    let (mut doc, _, s) = box_and_sketch();
+    let node = NodeId::Sketch(s);
+    doc.set_node_user_hidden(node, true);
+    let scene = doc
+        .add_scene(None, SceneProps::ALL, None, None, None)
+        .expect("a scene capturing the hidden sketch");
+    doc.set_node_user_hidden(node, false);
+
+    let mut loaded = Document::load(&doc.save()).expect("the file reopens");
+    let s2 = loaded.sketch_ids()[0];
+    assert!(!loaded.node_user_hidden(NodeId::Sketch(s2)));
+
+    let resolved = loaded.apply_scene(scene).expect("the scene applies");
+    assert!(loaded.node_user_hidden(NodeId::Sketch(s2)));
+    assert_eq!(resolved.hidden_nodes, Some(vec![NodeId::Sketch(s2)]));
+    assert_eq!(resolved.hidden_sketch_ids, Some(vec![s2]));
+}
+
+/// Hiding a TAG hides the sketches that carry it, in the resolved leaf sets
+/// the renderer and inference are fed.
+#[test]
+fn a_scene_with_a_hidden_tag_hides_the_sketches_carrying_it() {
+    let (mut doc, _, s) = box_and_sketch();
+    doc.add_node_tag(NodeId::Sketch(s), tag(&["Plans"]))
+        .unwrap();
+    doc.set_tag_hidden(tag(&["Plans"]), true);
+    let scene = doc
+        .add_scene(None, SceneProps::ALL, None, None, None)
+        .unwrap();
+
+    let resolved = doc.apply_scene(scene).unwrap();
+    assert_eq!(resolved.hidden_sketch_ids, Some(vec![s]));
+}
+
+/// Gated like the rest of the sketch-as-node format: in a manifest older than
+/// v18 a Scene that names a sketch's id is a dangling reference, exactly as
+/// it was when that version was current.
+#[test]
+fn a_scene_hiding_a_sketch_in_a_v17_manifest_is_rejected() {
+    let (mut doc, _, s) = box_and_sketch();
+    doc.set_node_user_hidden(NodeId::Sketch(s), true);
+    doc.add_scene(None, SceneProps::ALL, None, None, None)
+        .unwrap();
+    doc.set_node_user_hidden(NodeId::Sketch(s), false);
+
+    let v17 = patch_manifest(&doc.save(), |m| m["format_version"] = 17.into());
+    assert!(matches!(
+        Document::load(&v17),
+        Err(LoadError::DanglingReference { .. })
+    ));
 }

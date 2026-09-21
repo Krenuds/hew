@@ -9,7 +9,7 @@
 //! edit. These three commands are the conformance suite's documented
 //! allowlist entry for the one-envelope-one-undo property.
 
-use super::entity::{resolve_node, unknown_entity};
+use super::entity::{resolve_meta_node, unknown_entity};
 use super::{CmdError, Ctx, Handler};
 use crate::locate;
 use crate::refusal::Refusal;
@@ -211,7 +211,7 @@ fn tag_assign(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: TagAssignParams =
         serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
     validate_tag_path(&p.path)?;
-    let node = resolve_node(ctx, &p.id)?;
+    let node = resolve_meta_node(ctx, &p.id)?;
     if p.remove {
         ctx.doc.remove_node_tag(node, &p.path)?;
     } else {
@@ -290,6 +290,7 @@ fn tag_rename(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         );
         nodes.extend(doc.group_ids().into_iter().map(kernel::NodeId::Group));
         nodes.extend(doc.instance_ids().into_iter().map(kernel::NodeId::Instance));
+        nodes.extend(doc.sketch_ids().into_iter().map(kernel::NodeId::Sketch));
         nodes
             .into_iter()
             .any(|n| doc.node_tags(n).iter().any(|t| covers(t)))

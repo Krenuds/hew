@@ -740,7 +740,10 @@ fn a_document_with_no_locked_sketch_writes_no_locked_key() {
     rect_sketch(&mut doc, 2.0, 2.0, 3.0, 3.0);
 
     let m = manifest_json(&doc.save());
-    assert_eq!(m["format_version"], 17);
+    assert!(
+        m["format_version"].as_u64().unwrap() >= 17,
+        "the key exists from v17 on"
+    );
     for sk in m["sketches"].as_array().unwrap() {
         assert!(
             sk.get("locked").is_none(),

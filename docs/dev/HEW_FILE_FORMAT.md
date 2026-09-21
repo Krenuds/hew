@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 17,
+  "format_version": 18,
   "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
@@ -149,7 +149,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     { "sid": 42, "name": "Assembled", "description": "Everything, three-quarter view.",
       "camera": { "projection": "perspective", "fov_deg": 45.0,
                   "eye": [4.0, -6.0, 3.0], "target": [0.0, 0.0, 0.0], "up": [0.0, 0.0, 1.0] },
-      "hidden_nodes": [4, 6],        // sids of user-hidden objects/groups/instances; absent = not captured
+      "hidden_nodes": [4, 6],        // sids of user-hidden objects/groups/instances/sketches; absent = not captured
       "hidden_tags": [11],           // sids of hidden tag-registry entries; absent = not captured
       "section": null,               // null = captured, no plane; an object = captured plane; absent = not captured
       "display": { "grid": true, "axes": false, "guides": true } }
@@ -162,7 +162,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `17`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `18`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -262,6 +262,7 @@ of the manifest:
 | `sketches[].curves[].kind` | 12 | `"circle"` — the chain's edges are chord facets approximating the stored circle, which is what a `curves[]` entry meant at v10/v11 |
 | `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
 | `sketches[].locked` | 17 | absent — an ordinary sketch (the only kind before v17) |
+| `sketches[].name`, `sketches[].tags`, `sketches[].hidden` | 18 | unnamed, empty list (no tags), `false` (visible) — a sketch carried no node metadata before v18 |
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 | `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
 | `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
@@ -319,6 +320,12 @@ with any subset of them, or none, is perfectly ordinary.
   rejected. At v17+ the field is optional and written only when `true`, so a
   document with no locked sketch is byte-identical to the v16 output of the
   same document.
+- **`sketches[].name`, `sketches[].tags`, `sketches[].hidden` (v18)** are
+  version-gated the same single direction: a file declaring a version older
+  than 18 that carries any of the three on a sketch is malformed for its own
+  declared version and MUST be rejected. At v18+ each is optional and written
+  only when set, so a document whose sketches are all unnamed, untagged and
+  visible differs from its v17 output in `format_version` alone.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -775,6 +782,22 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   loses only the protection, never shape — the sketch's vertices, edges,
   regions and curves are stored exactly as any other sketch's.
 
+- `name` (v18+, optional string), `tags` (v18+, optional list of root-first
+  tag paths) and `hidden` (v18+, optional boolean) — the sketch as a **node**.
+  They mean exactly what the same three fields mean on `objects[]`,
+  `groups[]` and `instances[]`: a display name, the tag paths the sketch
+  carries, and USER-hidden view state. `hidden` is not deletion — a deleted
+  sketch is never written. Absent means unnamed, untagged and visible.
+
+  A sketch is a node but not a tree member: it never appears in `roots` or in
+  any `members` list, and a NodeRef has no `"sketch"` kind. The fields hang on
+  the `sketches[]` record itself.
+
+  A writer emits each key ONLY when set. A reader MUST reject any of the three
+  on a sketch in a manifest declaring a version older than 18
+  (reject-not-repair). Tag paths follow the same rules as any node's: a path
+  need not be registered in the top-level `tags` registry to be carried.
+
   Not to be confused with the axis or plane constraint an editor may apply to
   a drawing gesture while drawing: that is transient UI state and is never
   serialized.
@@ -1011,7 +1034,7 @@ entirely when empty. Each entry:
   - `camera` — the same shape and validation as the top-level `camera`
     block (§4.11).
   - `hidden_nodes` — sorted list of `sid`s of the objects/groups/instances
-    that are user-hidden (§4.10) in this Scene. A **full set**, not a
+    (and, at v18+, sketches) that are user-hidden (§4.10) in this Scene. A **full set**, not a
     delta: any node not listed is visible, so geometry created after the
     Scene was captured is visible in it. May be nested (a member of a
     group, or of a component definition — a hidden definition member is
@@ -1027,8 +1050,10 @@ entirely when empty. Each entry:
     toggles; opaque to the file format's readers other than the app.
 
 **References.** Every `sid` in `hidden_nodes` / `hidden_tags` MUST name a
-live entity of the file (an object, group, or instance for the former; a
-tag-registry entry for the latter). A dangling one is a fatal
+live entity of the file (an object, group, or instance — or, in a manifest
+declaring v18 or later, a sketch — for the former; a tag-registry entry for
+the latter). In an older manifest a sketch's `sid` there is dangling like
+any other non-node. A dangling one is a fatal
 `DanglingReference`, never dropped. **Writers prune**: an in-memory Scene
 may hold the sid of a deleted node or tag (kept so that undoing the
 deletion re-links it), and the writer filters those out at save time —

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::camera::CameraState;
 use crate::document::{Document, DocumentError, EntityRef, NodeId};
-use crate::ids::{InstanceId, ObjectId};
+use crate::ids::{InstanceId, ObjectId, SketchId};
 use crate::math::{Point3, Vec3};
 use crate::tol;
 
@@ -140,6 +140,10 @@ pub struct ResolvedScene {
     /// `None` when neither hidden property is captured (nothing to push).
     pub hidden_object_ids: Option<Vec<ObjectId>>,
     pub hidden_instance_ids: Option<Vec<InstanceId>>,
+    /// The hidden SKETCHES, resolved the same way: a directly hidden sketch,
+    /// or one carrying a hidden tag. A sketch is a leaf of its own — no group
+    /// holds one — so this is never reached through a group.
+    pub hidden_sketch_ids: Option<Vec<SketchId>>,
     /// The hidden tag paths, for the app's tag-panel state. `None` when
     /// `hidden_tags` is not captured.
     pub hidden_tag_paths: Option<Vec<Vec<String>>>,
@@ -521,7 +525,8 @@ impl Document {
             .filter(|(_, hidden)| *hidden)
             .map(|(p, _)| p.to_vec())
             .collect();
-        self.union_hidden_leaves(&nodes, &tags)
+        let (objects, instances, _) = self.union_hidden_leaves(&nodes, &tags);
+        (objects, instances)
     }
 
     // ------------------------------------------------------------ internals
@@ -579,6 +584,7 @@ impl Document {
                 EntityRef::Object(id) => Some((sid, NodeId::Object(*id))),
                 EntityRef::Group(id) => Some((sid, NodeId::Group(*id))),
                 EntityRef::Instance(id) => Some((sid, NodeId::Instance(*id))),
+                EntityRef::Sketch(id) => Some((sid, NodeId::Sketch(*id))),
                 _ => None,
             })
             .filter(|(_, node)| self.node_live(*node))
@@ -632,7 +638,7 @@ impl Document {
         // from the live document — otherwise a tags-only Scene would un-hide
         // the user's manually hidden nodes in the renderer while the kernel
         // still holds them hidden.
-        let (hidden_object_ids, hidden_instance_ids) =
+        let (hidden_object_ids, hidden_instance_ids, hidden_sketch_ids) =
             if hidden_nodes.is_some() || hidden_tag_paths.is_some() {
                 let live_nodes: Vec<NodeId>;
                 let live_tags: Vec<Vec<String>>;
@@ -658,10 +664,10 @@ impl Document {
                         &live_tags
                     }
                 };
-                let (o, i) = self.union_hidden_leaves(nodes, tags);
-                (Some(o), Some(i))
+                let (o, i, s) = self.union_hidden_leaves(nodes, tags);
+                (Some(o), Some(i), Some(s))
             } else {
-                (None, None)
+                (None, None, None)
             };
 
         ResolvedScene {
@@ -669,6 +675,7 @@ impl Document {
             display: scene.display,
             hidden_object_ids,
             hidden_instance_ids,
+            hidden_sketch_ids,
             hidden_tag_paths,
             hidden_nodes,
             section: scene.section,
@@ -685,12 +692,13 @@ impl Document {
         &self,
         hidden_nodes: &[NodeId],
         hidden_tag_paths: &[Vec<String>],
-    ) -> (Vec<ObjectId>, Vec<InstanceId>) {
+    ) -> (Vec<ObjectId>, Vec<InstanceId>, Vec<SketchId>) {
         let mut objects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut instances: BTreeSet<InstanceId> = BTreeSet::new();
+        let mut sketches: BTreeSet<SketchId> = BTreeSet::new();
 
         for &node in hidden_nodes {
-            self.collect_scene_leaves(node, &mut objects, &mut instances);
+            self.collect_scene_leaves(node, &mut objects, &mut instances, &mut sketches);
         }
 
         if !hidden_tag_paths.is_empty() {
@@ -698,6 +706,7 @@ impl Document {
             all_nodes.extend(self.visible_object_ids().into_iter().map(NodeId::Object));
             all_nodes.extend(self.group_ids().into_iter().map(NodeId::Group));
             all_nodes.extend(self.instance_ids().into_iter().map(NodeId::Instance));
+            all_nodes.extend(self.sketch_ids().into_iter().map(NodeId::Sketch));
             for node in all_nodes {
                 let covered = self.node_tags(node).iter().any(|path| {
                     hidden_tag_paths.iter().any(|anchor| {
@@ -705,7 +714,7 @@ impl Document {
                     })
                 });
                 if covered {
-                    self.collect_scene_leaves(node, &mut objects, &mut instances);
+                    self.collect_scene_leaves(node, &mut objects, &mut instances, &mut sketches);
                 }
             }
         }
@@ -713,6 +722,7 @@ impl Document {
         (
             objects.into_iter().collect(),
             instances.into_iter().collect(),
+            sketches.into_iter().collect(),
         )
     }
 
@@ -721,6 +731,7 @@ impl Document {
         node: NodeId,
         objects: &mut BTreeSet<ObjectId>,
         instances: &mut BTreeSet<InstanceId>,
+        sketches: &mut BTreeSet<SketchId>,
     ) {
         match node {
             NodeId::Object(id) => {
@@ -732,11 +743,13 @@ impl Document {
             NodeId::Group(id) => {
                 if let Some(members) = self.group_members(id) {
                     for m in members {
-                        self.collect_scene_leaves(m, objects, instances);
+                        self.collect_scene_leaves(m, objects, instances, sketches);
                     }
                 }
             }
-            NodeId::Sketch(_) => {}
+            NodeId::Sketch(id) => {
+                sketches.insert(id);
+            }
         }
     }
 }

@@ -55,6 +55,17 @@ pub(crate) fn resolve_node(ctx: &Ctx, id: &str) -> Result<NodeId, CmdError> {
     }
 }
 
+/// Resolves a public id to a node that carries a name and tags: a tree node,
+/// or a sketch. Wider than [`resolve_node`] on purpose — a sketch is a node
+/// but not a tree member, so the structural and transform commands keep the
+/// narrower resolver and never see one.
+pub(crate) fn resolve_meta_node(ctx: &Ctx, id: &str) -> Result<NodeId, CmdError> {
+    match ctx.resolver().resolve(id) {
+        Some(EntityRef::Sketch(s)) => Ok(NodeId::Sketch(s)),
+        _ => resolve_node(ctx, id),
+    }
+}
+
 // ---------------------------------------------------------------- rename
 
 #[derive(Debug, serde::Deserialize)]
@@ -76,6 +87,7 @@ fn rename(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         EntityRef::Object(o) => ctx.doc.set_node_name(NodeId::Object(o), p.name)?,
         EntityRef::Group(g) => ctx.doc.set_node_name(NodeId::Group(g), p.name)?,
         EntityRef::Instance(i) => ctx.doc.set_node_name(NodeId::Instance(i), p.name)?,
+        EntityRef::Sketch(s) => ctx.doc.set_node_name(NodeId::Sketch(s), p.name)?,
         EntityRef::Component(c) => ctx.doc.set_component_name(c, p.name)?,
         EntityRef::Material(m) => {
             // Unlike node display names, a palette material's name is a
@@ -88,10 +100,10 @@ fn rename(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             })?;
             ctx.doc.set_material_name(m, name)?
         }
-        EntityRef::Sketch(_) | EntityRef::Guide(_) | EntityRef::Tag(_) => {
+        EntityRef::Guide(_) | EntityRef::Tag(_) => {
             return Err(CmdError::Refusal(Refusal::api(
                 "rename_unsupported",
-                "Only objects, groups, instances, component definitions, and materials can be renamed today.",
+                "Only objects, groups, instances, sketches, component definitions, and materials can be renamed today.",
             )));
         }
     };

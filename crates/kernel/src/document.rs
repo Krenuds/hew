@@ -206,6 +206,13 @@ impl ObjectRecord {
     }
 }
 
+/// The node metadata of a sketch ([`Document::sketch_meta`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SketchMeta {
+    name: Option<String>,
+    tags: Vec<Vec<String>>,
+}
+
 /// A merge group: a non-destructive container recording membership only — no
 /// geometry, no pose. Transforming a group bakes the transform into every
 /// leaf object beneath it, so a group stays purely structural.
@@ -3004,6 +3011,18 @@ pub struct Document {
     user_hidden_objects: BTreeSet<ObjectId>,
     user_hidden_groups: BTreeSet<GroupId>,
     user_hidden_instances: BTreeSet<InstanceId>,
+    /// USER-hidden sketches — the sketch column of the `user_hidden_*` view
+    /// state above, and nothing to do with `hidden_sketches`, which is the
+    /// delete tombstone. Persisted as `sketches[].hidden` (manifest v18+).
+    user_hidden_sketches: BTreeSet<SketchId>,
+    /// A sketch's display name and tag paths — what `ObjectRecord`,
+    /// `GroupRecord` and `InstanceRecord` carry inline. A side table like
+    /// `locked_sketches`, for the same reason: `Sketch` has no wrapper
+    /// record, and this keeps node metadata out of every `self.sketches`
+    /// call site and out of `Sketch`'s `PartialEq`. An entry with no name
+    /// and no tags is never kept. Persisted as `sketches[].name` / `.tags`
+    /// (manifest v18+).
+    sketch_meta: BTreeMap<SketchId, SketchMeta>,
     /// The working camera view at last save (manifest v13+; docs/design/
     /// camera.md §5): `None` for a document that never had one saved (every
     /// pre-v13 file, and a brand-new in-memory `Document` before the app's
@@ -3632,6 +3651,18 @@ impl Document {
             sketches,
             sketch_owner,
             locked_sketches,
+            sketch_meta: self
+                .sketch_meta
+                .iter()
+                .filter(|(id, _)| !self.hidden_sketches.contains(id))
+                .map(|(&id, m)| (id, (m.name.clone(), m.tags.clone())))
+                .collect(),
+            sketch_hidden: self
+                .user_hidden_sketches
+                .iter()
+                .copied()
+                .filter(|id| self.sketches.contains_key(*id) && !self.hidden_sketches.contains(id))
+                .collect(),
             guides,
             annotations,
             roots,
@@ -3793,6 +3824,21 @@ impl Document {
         for (i, locked) in raw.sketch_locked.iter().enumerate() {
             if *locked {
                 doc.locked_sketches.insert(sketch_ids[i]);
+            }
+        }
+
+        // ── 4d. Sketch node metadata (manifest v18+), parallel to the sketch
+        // list the same way: unnamed, untagged and visible in a pre-v18 file.
+        for (i, &sid) in sketch_ids.iter().enumerate() {
+            doc.set_sketch_meta(
+                sid,
+                SketchMeta {
+                    name: raw.sketch_names.get(i).cloned().flatten(),
+                    tags: raw.sketch_tags.get(i).cloned().unwrap_or_default(),
+                },
+            );
+            if raw.sketch_hidden.get(i).copied().unwrap_or(false) {
+                doc.user_hidden_sketches.insert(sid);
             }
         }
 
@@ -4318,14 +4364,18 @@ impl Document {
         // dropped — the WRITER prunes, the reader rejects).
         doc.section_plane = raw.section_plane;
         {
+            // A sketch counts as a hideable node only from v18, when it
+            // became one; in an older file a Scene naming a sketch's sid is
+            // still a dangling reference, as it was when that file was
+            // written (reject-not-repair).
+            let sketch_nodes = raw.format_version >= crate::serialize::SKETCH_META_MIN_VERSION;
             let node_sids: BTreeSet<u64> = doc
                 .sids
                 .iter()
-                .filter(|(e, _)| {
-                    matches!(
-                        e,
-                        EntityRef::Object(_) | EntityRef::Group(_) | EntityRef::Instance(_)
-                    )
+                .filter(|(e, _)| match e {
+                    EntityRef::Object(_) | EntityRef::Group(_) | EntityRef::Instance(_) => true,
+                    EntityRef::Sketch(_) => sketch_nodes,
+                    _ => false,
                 })
                 .map(|(_, &s)| s)
                 .collect();
@@ -6117,6 +6167,27 @@ impl Document {
     /// [`Document::copy_sketch_islands`] deliberately does NOT: copying
     /// geometry *off* a locked sketch is how you get ordinary stock to build
     /// from, and a locked copy would defeat the point.
+    /// Writes a sketch's node metadata, keeping the table free of empty
+    /// entries so "no name, no tags" has exactly one representation.
+    fn set_sketch_meta(&mut self, sketch: SketchId, meta: SketchMeta) {
+        if meta == SketchMeta::default() {
+            self.sketch_meta.remove(&sketch);
+        } else {
+            self.sketch_meta.insert(sketch, meta);
+        }
+    }
+
+    /// Carries a sketch's name and tags onto a whole-sketch COPY — the same
+    /// three sites, and for the same reason, as
+    /// [`Document::carry_sketch_locked`]: a copy of a named drawing is still
+    /// that drawing. User-hidden view state is deliberately not carried; a
+    /// fresh copy is visible, as a duplicated object is.
+    fn carry_sketch_meta(&mut self, from: SketchId, to: SketchId) {
+        if let Some(meta) = self.sketch_meta.get(&from).cloned() {
+            self.sketch_meta.insert(to, meta);
+        }
+    }
+
     fn carry_sketch_locked(&mut self, from: SketchId, to: SketchId) {
         if self.locked_sketches.contains(&from) {
             self.locked_sketches.insert(to);
@@ -7329,7 +7400,11 @@ impl Document {
                 .get(id)
                 .filter(|r| !r.hidden)
                 .map_or(&[], |r| r.tags.as_slice()),
-            NodeId::Sketch(_) => &[],
+            NodeId::Sketch(id) => self
+                .sketch_meta
+                .get(&id)
+                .filter(|_| self.node_live(node))
+                .map_or(&[], |m| m.tags.as_slice()),
         }
     }
 
@@ -7386,7 +7461,7 @@ impl Document {
             NodeId::Object(id) => self.user_hidden_objects.contains(&id),
             NodeId::Group(id) => self.user_hidden_groups.contains(&id),
             NodeId::Instance(id) => self.user_hidden_instances.contains(&id),
-            NodeId::Sketch(_) => false,
+            NodeId::Sketch(id) => self.user_hidden_sketches.contains(&id),
         }
     }
 
@@ -7416,7 +7491,13 @@ impl Document {
                     self.user_hidden_instances.remove(&id);
                 }
             }
-            NodeId::Sketch(_) => {}
+            NodeId::Sketch(id) => {
+                if hidden {
+                    self.user_hidden_sketches.insert(id);
+                } else {
+                    self.user_hidden_sketches.remove(&id);
+                }
+            }
         }
     }
 
@@ -7430,6 +7511,7 @@ impl Document {
                 .iter()
                 .map(|&i| NodeId::Instance(i)),
         );
+        out.extend(self.user_hidden_sketches.iter().map(|&i| NodeId::Sketch(i)));
         out
     }
 
@@ -7663,6 +7745,11 @@ impl Document {
                 existing.extend(rec.tags.iter().cloned());
             }
         }
+        for (id, meta) in &self.sketch_meta {
+            if !self.hidden_sketches.contains(id) {
+                existing.extend(meta.tags.iter().cloned());
+            }
+        }
         for tag in existing.iter().filter(|t| covers(t)) {
             let target = rewrite(tag);
             if existing.contains(&target) && !covers(&target) {
@@ -7721,6 +7808,15 @@ impl Document {
             rec.tags = rewrite_list(&prev);
             nodes.push((NodeId::Instance(id), prev, rec.tags.clone()));
             change.instances_touched.push(id);
+        }
+        for (&id, meta) in self.sketch_meta.iter_mut() {
+            if self.hidden_sketches.contains(&id) || !meta.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = meta.tags.clone();
+            meta.tags = rewrite_list(&prev);
+            nodes.push((NodeId::Sketch(id), prev, meta.tags.clone()));
+            change.sketches_touched.push(id);
         }
 
         if registry.is_empty() && nodes.is_empty() {
@@ -7833,6 +7929,22 @@ impl Document {
             nodes.push((NodeId::Instance(id), prev, rec.tags.clone()));
             change.instances_touched.push(id);
         }
+        // A sketch left with no name and no tags drops out of the table, so
+        // the sweep collects first and writes through `set_sketch_meta`.
+        let untagged: Vec<(SketchId, Vec<Vec<String>>)> = self
+            .sketch_meta
+            .iter()
+            .filter(|(id, meta)| {
+                !self.hidden_sketches.contains(id) && meta.tags.iter().any(|t| covers(t))
+            })
+            .map(|(&id, meta)| (id, meta.tags.clone()))
+            .collect();
+        for (id, prev) in untagged {
+            let next: Vec<Vec<String>> = prev.iter().filter(|t| !covers(t)).cloned().collect();
+            self.apply_node_tags(NodeId::Sketch(id), next.clone());
+            nodes.push((NodeId::Sketch(id), prev, next));
+            change.sketches_touched.push(id);
+        }
 
         if registry.is_empty() && nodes.is_empty() {
             // Unknown tag — nothing changed, no undo entry.
@@ -7867,7 +7979,10 @@ impl Document {
                     rec.tags = tags;
                 }
             }
-            NodeId::Sketch(_) => {}
+            NodeId::Sketch(id) => {
+                let name = self.sketch_meta.get(&id).and_then(|m| m.name.clone());
+                self.set_sketch_meta(id, SketchMeta { name, tags });
+            }
         }
     }
 
@@ -7898,7 +8013,13 @@ impl Document {
                     .ok_or(DocumentError::UnknownInstance)?;
                 Ok((rec.name.clone(), rec.tags.clone()))
             }
-            NodeId::Sketch(_) => Err(DocumentError::SketchNodeUnsupported),
+            NodeId::Sketch(id) => {
+                if !self.node_live(node) {
+                    return Err(DocumentError::UnknownSketch);
+                }
+                let meta = self.sketch_meta.get(&id).cloned().unwrap_or_default();
+                Ok((meta.name, meta.tags))
+            }
         }
     }
 
@@ -7923,7 +8044,7 @@ impl Document {
                     rec.tags = tags;
                 }
             }
-            NodeId::Sketch(_) => {}
+            NodeId::Sketch(id) => self.set_sketch_meta(id, SketchMeta { name, tags }),
         }
     }
 
@@ -8208,6 +8329,15 @@ impl Document {
             .get(id)
             .filter(|r| !r.hidden)
             .and_then(|r| r.name.as_deref())
+    }
+
+    /// A live sketch's display name, or `None` if stale/deleted or unnamed.
+    /// Set through [`Document::set_node_name`] with a [`NodeId::Sketch`].
+    pub fn sketch_name(&self, id: SketchId) -> Option<&str> {
+        self.sketch_meta
+            .get(&id)
+            .filter(|_| self.node_live(NodeId::Sketch(id)))
+            .and_then(|m| m.name.as_deref())
     }
 
     /// A visible group's display name, or `None` if stale/hidden or unnamed.
@@ -10789,7 +10919,11 @@ impl Document {
                         .and_then(|d| self.component_name(d).map(str::to_string))
                 })
                 .unwrap_or_else(|| "Component".to_string()),
-            NodeId::Sketch(_) => "Sketch".to_string(),
+            NodeId::Sketch(id) => self
+                .sketch_meta
+                .get(&id)
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| "Sketch".to_string()),
         }
     }
 
@@ -13656,6 +13790,7 @@ impl Document {
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
             self.carry_sketch_locked(sid, new_sid);
+            self.carry_sketch_meta(sid, new_sid);
             created_sketches.push(new_sid);
         }
 
@@ -14091,6 +14226,7 @@ impl Document {
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
             self.carry_sketch_locked(sid, new_sid);
+            self.carry_sketch_meta(sid, new_sid);
             self.def_sketches.insert(new_sid, new_def);
             cloned_sketches.push(new_sid);
         }
@@ -16280,7 +16416,10 @@ impl Document {
                         .or_else(|| self.components.get(r.def).and_then(|c| c.name.clone()))
                 }),
             ),
-            NodeId::Sketch(_) => ("sketch", None),
+            NodeId::Sketch(id) => (
+                "sketch",
+                self.sketch_meta.get(&id).and_then(|m| m.name.clone()),
+            ),
         };
         match (node, name) {
             (NodeId::Group(_), Some(name)) => format!("group '{name}'"),
@@ -19849,6 +19988,7 @@ impl Document {
             self.debug_validate_sids();
             self.debug_validate_materials();
             self.debug_validate_locked_sketches();
+            self.debug_validate_sketch_meta();
         }
     }
 
@@ -19863,6 +20003,30 @@ impl Document {
             assert!(
                 self.sketches.contains_key(*sid),
                 "locked-sketch table holds a dead sketch id — kernel bug"
+            );
+        }
+    }
+
+    /// The sketch node-metadata tables name only real sketches, and the meta
+    /// table keeps no empty entry (`set_sketch_meta`'s one-representation
+    /// rule — two documents that look the same must save the same).
+    /// Tombstoned ids are fine, as for the locked table: undoing a delete
+    /// must bring the sketch back still named.
+    fn debug_validate_sketch_meta(&self) {
+        for (sid, meta) in &self.sketch_meta {
+            assert!(
+                self.sketches.contains_key(*sid),
+                "sketch-meta table holds a dead sketch id — kernel bug"
+            );
+            assert!(
+                *meta != SketchMeta::default(),
+                "sketch-meta table holds an empty entry — kernel bug"
+            );
+        }
+        for sid in &self.user_hidden_sketches {
+            assert!(
+                self.sketches.contains_key(*sid),
+                "user-hidden sketch table holds a dead sketch id — kernel bug"
             );
         }
     }
@@ -20625,6 +20789,9 @@ fn library_copy_def(
         library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
         if src.locked_sketches.contains(&s) {
             dst.locked_sketches.insert(new_s);
+        }
+        if let Some(meta) = src.sketch_meta.get(&s).cloned() {
+            dst.sketch_meta.insert(new_s, meta);
         }
         dst.def_sketches.insert(new_s, new_cid);
         ctx.all_sketches.push(new_s);

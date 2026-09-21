@@ -810,6 +810,39 @@ fn tag_assign_assigns_and_removes_a_tag_from_a_node() {
     assert_eq!(data["refusal"], "unknown_entity");
 }
 
+/// A sketch is a node that carries tags, so `tag.assign` reaches it — in one
+/// undo step, like any other node.
+#[test]
+fn tag_assign_tags_a_sketch() {
+    let mut doc = Document::new();
+    let sketch = doc.add_sketch(
+        kernel::Plane::from_polygon(&[
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 0.0, 0.0),
+            kernel::Point3::new(0.0, 1.0, 0.0),
+        ])
+        .expect("ground plane"),
+    );
+    let sketch_pub = public_of(&doc, &EntityRef::Sketch(sketch));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.tag.assign",
+        json!({ "id": sketch_pub, "path": ["Plans"] }),
+    );
+    assert_eq!(
+        doc.node_tags(NodeId::Sketch(sketch)),
+        &[vec!["Plans".to_string()]]
+    );
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+}
+
 #[test]
 fn tag_set_visible_toggles_visibility_and_adds_no_undo_entry() {
     let mut doc = Document::new();

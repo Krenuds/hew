@@ -256,10 +256,33 @@ fn rename_renames_a_material_and_refuses_a_null_name() {
 }
 
 #[test]
-fn rename_refuses_kinds_the_kernel_cannot_rename() {
+fn rename_names_a_sketch_in_one_undo_step() {
     let mut doc = Document::new();
     let sketch = build_circle_sketch(&mut doc, 5.0, 5.0, 1.0);
     let public = public_of(&doc, &kernel::EntityRef::Sketch(sketch));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.rename",
+        json!({ "id": public, "name": "Ground floor" }),
+    );
+    assert_eq!(doc.sketch_name(sketch), Some("Ground floor"));
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+}
+
+#[test]
+fn rename_refuses_kinds_the_kernel_cannot_rename() {
+    let mut doc = Document::new();
+    let guide = doc
+        .add_guide_point(kernel::Point3::new(1.0, 2.0, 0.0))
+        .expect("a guide point");
+    let public = public_of(&doc, &kernel::EntityRef::Guide(guide));
     let mut conn = Connection::new(Profile::Core, "test");
     hello_attach(&mut conn, &mut doc);
 

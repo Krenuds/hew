@@ -668,12 +668,12 @@ for, not shipped.
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` | Required |
 | `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn-but-not-yet-pushed shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one before it is ever pushed/pulled) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` Standard) |
-| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
+| `hew.entity` | `rename` (objects, groups, instances, sketches, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
 | `hew.component` | `create`, `place`, `make_unique`, `explode` | Standard |
 | `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity` | Standard |
-| `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
+| `hew.tag` | `create`, `assign` (objects, groups, instances, sketches), `set_visible`, `delete`, `rename` | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
 | `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
@@ -1027,7 +1027,7 @@ the hidden-tag registry flags, the user-hidden node set, the section
 plane — into the document (`Document::apply_scene`), and returns what
 changed: `camera` (present only if captured), `section` (present,
 possibly `null`, only if captured), and `hidden_object_ids`/
-`hidden_instance_ids` (public ids, present as a pair only when
+`hidden_instance_ids`/`hidden_sketch_ids` (public ids, present together only when
 `hidden_nodes` or `hidden_tags` is captured — possibly empty arrays —
 and OMITTED entirely, not empty-arrayed, when neither is, so a
 camera-only Scene can never read as "show everything" and silently

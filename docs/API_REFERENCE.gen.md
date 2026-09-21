@@ -1387,6 +1387,7 @@ Rename an entity.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 
@@ -3797,7 +3798,7 @@ Apply a Scene: write its captured camera/hidden-set/section state into the docum
 
 ```json
 {
-  "description": "each key present only when the Scene captured that property; hidden_object_ids/hidden_instance_ids appear as a pair (possibly empty arrays) whenever hidden_nodes or hidden_tags is captured, and are OMITTED entirely — not empty-arrayed — when neither is, so a partial-capture Scene can never read as \"show everything\"",
+  "description": "each key present only when the Scene captured that property; hidden_object_ids/hidden_instance_ids/hidden_sketch_ids appear together (possibly empty arrays) whenever hidden_nodes or hidden_tags is captured, and are OMITTED entirely — not empty-arrayed — when neither is, so a partial-capture Scene can never read as \"show everything\"",
   "properties": {
     "camera": {
       "properties": {
@@ -3852,6 +3853,12 @@ Apply a Scene: write its captured camera/hidden-set/section state into the docum
       "type": "array"
     },
     "hidden_object_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "hidden_sketch_ids": {
       "items": {
         "type": "string"
       },
@@ -6062,6 +6069,7 @@ Assign a tag to nodes.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
 
 ### `hew.tag.create`
 

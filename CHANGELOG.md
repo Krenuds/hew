@@ -14,12 +14,14 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 - **API:** Dimensions and leader text can be created through the API, so a script or an agent that builds a model can dimension it. They save into the `.hew` and are there when the file is opened in Hew.
 - **API:** Headless output carries dimensions. Line drawings, printed PDFs, and rendered snapshots all show the model's dimensions and leader text, in whichever unit format is asked for.
+- **API:** `hew.entity.rename` and `hew.tag.assign` work on a sketch, so a script can name a drawing and file it under a tag like any other part of the model.
 - **Measurements:** Each dimension in the Measurements box carries a dot colored by the axis it runs along, so `W,D` is unambiguous on a wall or a tilted plane instead of depending on how that plane happened to be built. Move, Line, and Push/Pull show one for the axis the gesture is on.
 - **Self-hosting:** Remote control. `hew-bridge` gives `hew-cli --live` and the MCP server the same reach into a browser tab they already have into an open desktop app: a client on your server dispatches into the document someone has open, in their undo history, in front of them. Two gates are required, not one: the person in the tab turns it on, and everything under `/bridge/` sits behind an authenticating front that the bridge verifies itself rather than trusting.
 - **Web:** **Settings ▸ Advanced ▸ Allow remote control**, off by default and asked for per tab, is how that consent is given. One tab holds the session at a time: the most recent to turn it on takes it, and the tab it displaced is told so.
 
 ### Changed
 
+- **File format:** `.hew` documents are saved as manifest version 18, which lets a sketch carry a name, tags, and hidden state. Older builds of Hew will not open a document saved by this one.
 - **API:** `hew-cli mcp --live` no longer has to be started after someone has consented. It starts whether or not anything is attached, finds the instance when a tool call needs one, and recovers on its own when a tab reloads. A call made with nothing attached says so and the next one succeeds, with no restart. With `--launch`, the app is started by the first tool call rather than when the server starts.
 
 ### Fixed

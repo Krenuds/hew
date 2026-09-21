@@ -1818,6 +1818,7 @@ impl Registry {
                 "unknown_object",
                 "unknown_group",
                 "unknown_instance",
+                "unknown_sketch",
                 "unknown_component",
                 "unknown_material",
             ];
@@ -2310,6 +2311,7 @@ impl Registry {
                 "unknown_object",
                 "unknown_group",
                 "unknown_instance",
+                "unknown_sketch",
             ];
         }
         {
@@ -2834,9 +2836,10 @@ impl Registry {
                     "camera": camera_result_schema,
                     "section": section_result_schema,
                     "hidden_object_ids": { "type": "array", "items": { "type": "string" } },
-                    "hidden_instance_ids": { "type": "array", "items": { "type": "string" } }
+                    "hidden_instance_ids": { "type": "array", "items": { "type": "string" } },
+                    "hidden_sketch_ids": { "type": "array", "items": { "type": "string" } }
                 },
-                "description": "each key present only when the Scene captured that property; hidden_object_ids/hidden_instance_ids appear as a pair (possibly empty arrays) whenever hidden_nodes or hidden_tags is captured, and are OMITTED entirely — not empty-arrayed — when neither is, so a partial-capture Scene can never read as \"show everything\""
+                "description": "each key present only when the Scene captured that property; hidden_object_ids/hidden_instance_ids/hidden_sketch_ids appear together (possibly empty arrays) whenever hidden_nodes or hidden_tags is captured, and are OMITTED entirely — not empty-arrayed — when neither is, so a partial-capture Scene can never read as \"show everything\""
             });
             cmd.refusals = vec!["unknown_scene"];
         }

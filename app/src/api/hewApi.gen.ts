@@ -415,7 +415,7 @@ export interface EntityMoveResult {
 /**
  * `hew.entity.rename` (v1) — Rename an entity.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, rename_unsupported, unknown_object, unknown_group, unknown_instance, unknown_component, unknown_material
+ * Refusals: unknown_entity, rename_unsupported, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_component, unknown_material
  */
 export interface EntityRenameParams {
   id: string
@@ -1007,6 +1007,7 @@ export interface ScenesApplyResult {
   camera?: { eye: [number, number, number]; fov_deg: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }
   hidden_instance_ids?: string[]
   hidden_object_ids?: string[]
+  hidden_sketch_ids?: string[]
   /** null means captured-but-no-plane-placed */
   section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }
 }
@@ -1374,7 +1375,7 @@ export interface SolidUnionResult {
 /**
  * `hew.tag.assign` (v1) — Assign a tag to nodes.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_object, unknown_group, unknown_instance
+ * Refusals: unknown_entity, unknown_object, unknown_group, unknown_instance, unknown_sketch
  */
 export interface TagAssignParams {
   id: string

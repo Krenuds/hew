@@ -214,6 +214,16 @@ impl ResolvedSceneJs {
             .unwrap_or_default()
     }
 
+    /// Renderer-level hidden sketch handles: directly hidden sketches plus
+    /// those carrying a hidden tag.
+    pub fn hidden_sketch_ids(&self) -> Vec<u64> {
+        self.inner
+            .hidden_sketch_ids
+            .as_ref()
+            .map(|v| v.iter().map(|id| id.data().as_ffi()).collect())
+            .unwrap_or_default()
+    }
+
     /// True when the Scene captures the visible-tags property.
     pub fn has_hidden_tags(&self) -> bool {
         self.inner.hidden_tag_paths.is_some()

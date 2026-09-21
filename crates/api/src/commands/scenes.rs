@@ -417,6 +417,13 @@ fn apply(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             .collect();
         out["hidden_instance_ids"] = json!(ids);
     }
+    if let Some(sketches) = &resolved.hidden_sketch_ids {
+        let ids: Vec<String> = sketches
+            .iter()
+            .filter_map(|&s| resolver.public_of(ctx.doc, &EntityRef::Sketch(s)))
+            .collect();
+        out["hidden_sketch_ids"] = json!(ids);
+    }
     Ok(out)
 }
 
