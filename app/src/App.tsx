@@ -129,6 +129,7 @@ const TRAY_WIDTH_DEFAULT = 304
 const TRAY_WIDTH_MIN = 220
 const TRAY_WIDTH_MAX = 560
 const TRAY_WIDTH_KEY = 'hew.trayWidth'
+const RAIL_NARROW_KEY = 'hew.railNarrow'
 const clampTrayWidth = (w: number): number =>
   Math.min(TRAY_WIDTH_MAX, Math.max(TRAY_WIDTH_MIN, Math.round(w)))
 /** Help ▸ Hew Help target — the online user guide's index. */
@@ -616,6 +617,14 @@ export default function App() {
     const n = raw !== null ? Number(raw) : NaN
     return Number.isFinite(n) ? clampTrayWidth(n) : TRAY_WIDTH_DEFAULT
   })
+  /** Icons-only tool rail; per window like the tray width, persisted. */
+  const [railNarrow, setRailNarrow] = useState<boolean>(
+    () => window.localStorage.getItem(RAIL_NARROW_KEY) === '1',
+  )
+  useEffect(() => {
+    window.localStorage.setItem(RAIL_NARROW_KEY, railNarrow ? '1' : '0')
+  }, [railNarrow])
+  const toggleRailNarrow = useCallback(() => setRailNarrow((narrow) => !narrow), [])
   /** Open document windows (Tauri multi-window only) — the Window menu's
    *  tail of focus-this-window entries. Populated by `list_windows` at
    *  mount and kept fresh by the shell's `window-list` broadcast (window
@@ -5840,6 +5849,8 @@ export default function App() {
           // SAVE affordances hide where no store exists.
           onOpenLibrary={openLibraryEntry}
           libraryOpen={showLibrary}
+          narrow={railNarrow}
+          onToggleNarrow={toggleRailNarrow}
         />
         <div
           ref={viewportHostRef}
