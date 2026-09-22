@@ -369,6 +369,54 @@ pub enum RecordedCall {
         vertex: u64,
         p: [f64; 3],
     },
+    /// `set_sketch_edge_length(sketch, edge, length)`.
+    SetSketchEdgeLength { sketch: u64, edge: u64, length: f64 },
+    /// `set_sketch_rectangle_size(sketch, island, width, height)`.
+    SetSketchRectangleSize {
+        sketch: u64,
+        island: u64,
+        width: f64,
+        height: f64,
+    },
+    /// `set_sketch_circle_radius(sketch, curve, radius)`.
+    SetSketchCircleRadius {
+        sketch: u64,
+        curve: u64,
+        radius: f64,
+    },
+    /// `mirror_sketch_islands(sketch, islands, axis_point, axis_dir)`.
+    MirrorSketchIslands {
+        sketch: u64,
+        islands: Vec<u64>,
+        axis_point: [f64; 3],
+        axis_dir: [f64; 3],
+    },
+    /// `array_sketch_islands(sketch, islands, step, count)`.
+    ArraySketchIslands {
+        sketch: u64,
+        islands: Vec<u64>,
+        step: [f64; 3],
+        count: u32,
+    },
+    /// `extend_sketch_edge(sketch, edge, near, target)`.
+    ExtendSketchEdge {
+        sketch: u64,
+        edge: u64,
+        near: [f64; 3],
+        target: u64,
+    },
+    /// `fillet_sketch_corner(sketch, vertex, radius)`.
+    FilletSketchCorner {
+        sketch: u64,
+        vertex: u64,
+        radius: f64,
+    },
+    /// `chamfer_sketch_corner(sketch, vertex, distance)`.
+    ChamferSketchCorner {
+        sketch: u64,
+        vertex: u64,
+        distance: f64,
+    },
     /// `ungroup(group)`.
     Ungroup { group: u64 },
     /// `delete_sketch(sketch)`.

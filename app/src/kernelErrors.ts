@@ -77,6 +77,16 @@ const DESCRIPTIONS: Record<string, string> = {
     'A circle needs at least 24 segments — below that it stops being a circle and becomes a polygon. Use the Polygon tool for a coarser shape.',
   SegmentsAboveCap:
     'That is more segments than a circle can hold. Enter a smaller count.',
+  InvalidDimension: 'Enter a length greater than zero.',
+  NotARectangle:
+    'Only a rectangle takes a width x height. Select one of its lines to set that length instead.',
+  CircleNotFree:
+    'That circle touches other lines, so resizing it would drag them along. Move it clear first.',
+  NothingToExtendTo: "That line doesn't reach the edge you picked. Pick an edge it points at.",
+  NotACorner:
+    'Pick a corner where exactly two straight lines meet. A free end, a junction of three, or a curve cannot be rounded.',
+  CornerTooSmall:
+    "That size doesn't fit on the lines at the corner. Try a smaller radius or distance.",
   RestoreConflicts:
     'Undo needs to put the original outline back, but newer drawing is in its way. Erase the overlapping lines and undo again.',
   OffsetTooSmall:

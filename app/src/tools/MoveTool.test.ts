@@ -123,6 +123,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     state_hash: vi.fn(() => state.hash),
     history_generation: vi.fn(() => state.gen),
     max_array_count: vi.fn(() => 1000),
+    array_sketch_islands: vi.fn(() => { state.hash++; state.gen++ }),
     scene_undo: vi.fn(() => { state.hash++; state.gen++; return { free: () => { /* no-op */ } } }),
     scene_redo: vi.fn(() => { state.hash++; state.gen++; return { free: () => { /* no-op */ } } }),
   }
@@ -460,20 +461,27 @@ describe('MoveTool — sketch copy (playtest: "you can\'t Copy a Sketch")', () =
     expect(t.onToast).not.toHaveBeenCalled()
   })
 
-  it('a sketch copy does not arm the ×N array window (scoped out until a kernel duplicate op exists)', () => {
+  it('a sketch copy arms the ×N array window: the copy gesture retracts and array_sketch_islands lays the array down', () => {
     const t = makeTool([{ kind: 'sketch-island', id: 40n, sketch: 3n }])
     t.tool.onKey(makeKeyEvent('Alt'))
     beginGestureLockedX(t.tool)
     typeKeys(t.tool, '2')
     t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
 
     typeKeys(t.tool, 'x3')
     t.tool.onKey(makeKeyEvent('Enter'))
-    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    // One gesture step to retract, then one array call for the sketch.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.array_sketch_islands).toHaveBeenCalledTimes(1)
+    const [sketch, islands, sx, sy, sz, count] = (t.scene.array_sketch_islands as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(sketch).toBe(3n)
+    expect(Array.from(islands as BigUint64Array)).toEqual([40n])
+    expect([sx, sy, sz, count]).toEqual([2, 0, 0, 3])
     expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
   })
 
-  it('a mixed selection duplicates objects AND replays sketches, without arming the array', () => {
+  it('a mixed selection duplicates objects AND replays sketches, and arrays both', () => {
     const t = makeTool([
       { kind: 'object', id: 1n },
       { kind: 'sketch-island', id: 40n, sketch: 3n },
@@ -492,8 +500,12 @@ describe('MoveTool — sketch copy (playtest: "you can\'t Copy a Sketch")', () =
 
     typeKeys(t.tool, 'x3')
     t.tool.onKey(makeKeyEvent('Enter'))
-    expect(t.scene.scene_undo).not.toHaveBeenCalled()
-    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    // Both steps of the copy retract (the sketch gesture and the node
+    // array), then the sketch array and a 3-count node array land.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.scene.array_sketch_islands).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect((t.scene.duplicate_selection_array as ReturnType<typeof vi.fn>).mock.calls[1][3]).toBe(3)
   })
 })
 

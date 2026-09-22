@@ -43,7 +43,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel, resolveLabel, shapeLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
 import { findImprint, imprintName, isImprintRef } from '../tools/imprints'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
-import { formatLength } from '../settings/units'
+import { formatLength, parseLengthToMeters, parseDimensionsToMeters } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 
@@ -56,6 +56,45 @@ import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
  * before the round trip.
  */
 const MIN_CIRCLE_SEGMENTS = MIN_SEGMENTS_PER_TURN
+
+/** The one number a drawn sketch thing is, and the handle that resizes it. */
+type SketchMeasure =
+  | { kind: 'length'; edgeId: bigint; meters: number }
+  | { kind: 'size'; islandId: bigint; width: number; height: number }
+  | { kind: 'radius'; curveId: bigint; meters: number }
+
+const MEASURE_LABEL: Record<SketchMeasure['kind'], string> = {
+  length: 'Length',
+  size: 'Size',
+  radius: 'Radius',
+}
+
+const MEASURE_TITLE: Record<SketchMeasure['kind'], string> = {
+  length: "Type a new length. The end drawn last slides along the line; lines meeting it follow.",
+  size: 'Type a new width x height. The rectangle grows from its first corner.',
+  radius: 'Type a new radius. The circle scales about its centre.',
+}
+
+function formatMeasure(m: SketchMeasure): string {
+  switch (m.kind) {
+    case 'length':
+    case 'radius':
+      return formatLength(m.meters)
+    case 'size':
+      return `${formatLength(m.width)} x ${formatLength(m.height)}`
+  }
+}
+
+function measureHandle(m: SketchMeasure): bigint {
+  switch (m.kind) {
+    case 'length':
+      return m.edgeId
+    case 'size':
+      return m.islandId
+    case 'radius':
+      return m.curveId
+  }
+}
 
 interface Props {
   scene: WasmScene
@@ -231,18 +270,40 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
       // just how many facets the chain currently has — nothing stores it.
       let curveId: bigint | null = null
       let segments: number | null = null
+      // The one number a drawn thing is: a line's length, a rectangle's
+      // width x height, a circle's radius. Typed back, it resizes the thing
+      // in place (`set_sketch_edge_length` / `set_sketch_rectangle_size` /
+      // `set_sketch_circle_radius`) — no solver, one undo step.
+      let measure: SketchMeasure | null = null
       if (kind === 'sketch-curve') {
         const cid = scene.sketch_edge_curve(sketchId, id)
         if (cid !== undefined) {
           curveId = cid
-          if (scene.sketch_curve_geom(sketchId, cid) !== undefined) {
+          const geom = scene.sketch_curve_geom(sketchId, cid)
+          if (geom !== undefined) {
             segments = scene.sketch_curve_edges(sketchId, cid).length
+            measure = { kind: 'radius', curveId: cid, meters: geom[3] }
           }
+        }
+      } else if (kind === 'sketch-edge') {
+        const ends = scene.sketch_edge_endpoints(sketchId, id)
+        if (ends !== undefined) {
+          measure = {
+            kind: 'length',
+            edgeId: id,
+            meters: Math.hypot(ends[3] - ends[0], ends[4] - ends[1], ends[5] - ends[2]),
+          }
+        }
+      } else if (kind === 'sketch-island') {
+        const size = scene.sketch_island_rectangle(sketchId, id)
+        if (size !== undefined) {
+          measure = { kind: 'size', islandId: id, width: size[0], height: size[1] }
         }
       }
 
       return {
         sketchId,
+        measure,
         // Whether the owning sketch is a LOCKED SKETCH — reference geometry
         // rather than stock. Read off the owner, so selecting one line of a
         // locked sketch still shows (and can flip) the lock.
@@ -344,6 +405,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
       defName,
       instanceIds,
       points: null as number | null,
+      measure: null as SketchMeasure | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, selectedIds])
@@ -570,6 +632,66 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     }
     onDocumentChanged()
   }, [nodeInfo, localSegments, scene, onDocumentChanged, onSelectMany, onToast])
+
+  // --------------------------------------------------------------------------
+  // Retype a number: the Length / Size / Radius field of a drawn line,
+  // rectangle or circle. Same posture as Segments: local text, synced on a
+  // composite identity so uncommitted text never leaks across selections,
+  // committed on blur/Enter through one kernel op that is one undo step.
+  // --------------------------------------------------------------------------
+  const measure = nodeInfo?.measure ?? null
+  const measureText = measure === null ? '' : formatMeasure(measure)
+  const measureSyncKey =
+    nodeInfo !== null && measure !== null
+      ? `${nodeInfo.sketchId}:${measure.kind}:${measureHandle(measure)}`
+      : null
+  const [localMeasure, setLocalMeasure] = useState('')
+  const prevMeasureSyncRef = useRef<{ key: string | null; value: string }>({ key: null, value: '' })
+  useEffect(() => {
+    const prev = prevMeasureSyncRef.current
+    if (measureSyncKey !== prev.key || measureText !== prev.value) {
+      prevMeasureSyncRef.current = { key: measureSyncKey, value: measureText }
+      setLocalMeasure(measureText)
+    }
+  }, [measureSyncKey, measureText])
+
+  const commitMeasure = useCallback(() => {
+    if (nodeInfo === null || measure === null || nodeInfo.sketchId === undefined) return
+    const sketchId = nodeInfo.sketchId
+    const typed = localMeasure.trim()
+    if (typed === '' || typed === measureText) {
+      setLocalMeasure(measureText)
+      return
+    }
+    try {
+      if (measure.kind === 'size') {
+        const dims = parseDimensionsToMeters(typed)
+        if (dims === null) {
+          setLocalMeasure(measureText)
+          return
+        }
+        scene.set_sketch_rectangle_size(sketchId, measure.islandId, dims[0], dims[1])
+      } else {
+        const meters = parseLengthToMeters(typed)
+        if (meters === null) {
+          setLocalMeasure(measureText)
+          return
+        }
+        if (measure.kind === 'length') {
+          scene.set_sketch_edge_length(sketchId, measure.edgeId, meters)
+        } else {
+          scene.set_sketch_circle_radius(sketchId, measure.curveId, meters)
+        }
+      }
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const raw = err instanceof Error ? err.message : String(err)
+      onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
+      setLocalMeasure(measureText)
+      return
+    }
+    onDocumentChanged()
+  }, [nodeInfo, measure, measureText, localMeasure, scene, onDocumentChanged, onToast])
 
   // --------------------------------------------------------------------------
   // Tag add state — hidden behind a "+" affordance (HIG-style disclosure).
@@ -875,6 +997,35 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
             />
             <span>{nodeInfo.locked ? 'Reference' : 'Stock'}</span>
           </label>
+        </div>
+      )}
+
+      {/* Length / Size / Radius — the one number a drawn line, rectangle or
+       * circle is. Typing a new one resizes it in place: a line's far end
+       * slides along the line, a rectangle grows from its first corner, a
+       * circle scales about its centre. One undo step. */}
+      {measure !== null && (
+        <div>
+          <div style={LABEL_STYLE}>{MEASURE_LABEL[measure.kind]}</div>
+          <input
+            style={INPUT_STYLE}
+            aria-label={MEASURE_LABEL[measure.kind]}
+            type="text"
+            value={localMeasure}
+            onChange={(e) => setLocalMeasure(e.target.value)}
+            onBlur={commitMeasure}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur()
+              } else if (e.key === 'Escape') {
+                e.stopPropagation()
+                setLocalMeasure(measureText)
+                e.currentTarget.blur()
+              }
+            }}
+            title={MEASURE_TITLE[measure.kind]}
+            spellCheck={false}
+          />
         </div>
       )}
 

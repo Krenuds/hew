@@ -130,10 +130,10 @@ describe('dockVerbsFor', () => {
     ).not.toContain('save-to-library')
   })
 
-  it('sketch: primary Push/Pull, then Move, Rotate, Scale, Erase', () => {
+  it('sketch: primary Push/Pull, then Move, Rotate, Scale, Fillet, Mirror, Erase', () => {
     const verbs = dockVerbsFor('sketch')
     expect(verbs.map((v) => v.id)).toEqual([
-      'tool-pushpull', 'tool-move', 'tool-rotate', 'tool-scale', 'edit-delete',
+      'tool-pushpull', 'tool-move', 'tool-rotate', 'tool-scale', 'tool-fillet', 'tool-mirror', 'edit-delete',
     ])
   })
 

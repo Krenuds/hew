@@ -17,6 +17,9 @@ import rectangleSvg from '@material-symbols/svg-400/outlined/rectangle.svg?raw'
 import circleSvg from '@material-symbols/svg-400/outlined/circle.svg?raw'
 import hexagonSvg from '@material-symbols/svg-400/outlined/hexagon.svg?raw'
 import lineCurveSvg from '@material-symbols/svg-400/outlined/line_curve.svg?raw'
+import roundedCornerSvg from '@material-symbols/svg-400/outlined/rounded_corner.svg?raw'
+import lineEndArrowSvg from '@material-symbols/svg-400/outlined/line_end_arrow.svg?raw'
+import flipSvg from '@material-symbols/svg-400/outlined/flip.svg?raw'
 import polylineSvg from '@material-symbols/svg-400/outlined/polyline.svg?raw'
 import unfoldMoreSvg from '@material-symbols/svg-400/outlined/unfold_more.svg?raw'
 import conversionPathSvg from '@material-symbols/svg-400/outlined/conversion_path.svg?raw'
@@ -67,6 +70,9 @@ export type ToolName =
   | 'Slice'
   | 'Section Plane'
   | 'Edit Vertex'
+  | 'Fillet'
+  | 'Extend'
+  | 'Mirror'
   | 'Drawing Axes'
   | 'Text'
   | 'Orbit'
@@ -99,6 +105,9 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Slice': contentCutSvg,
   'Section Plane': verticalSplitSvg,
   'Edit Vertex': dragPanSvg,
+  'Fillet': roundedCornerSvg,
+  'Extend': lineEndArrowSvg,
+  'Mirror': flipSvg,
   'Drawing Axes': lineAxisSvg,
   'Text': textFieldsSvg,
   'Orbit': threeDRotationSvg,
@@ -134,6 +143,9 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Slice': { x: 0.1, y: 0.9 },
   'Section Plane': { x: 0.1, y: 0.9 },
   'Edit Vertex': { x: 0.5, y: 0.5 },
+  'Fillet': { x: 0.1, y: 0.9 },
+  'Extend': { x: 0.1, y: 0.9 },
+  'Mirror': { x: 0.1, y: 0.9 },
   'Drawing Axes': { x: 0.1, y: 0.9 },
   'Text': { x: 0.1, y: 0.9 },
   'Orbit': { x: 0.5, y: 0.5 },

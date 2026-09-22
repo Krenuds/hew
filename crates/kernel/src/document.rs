@@ -57,7 +57,8 @@ use crate::serialize::{
     encode_document,
 };
 use crate::sketch::{
-    CurveGeom, Sketch, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId, SketchVertexId,
+    CurveGeom, Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
+    SketchVertexId,
 };
 use crate::tol;
 use crate::topo::{Object, WatertightState};
@@ -6078,6 +6079,143 @@ impl Document {
             instances_touched,
             ..Default::default()
         })
+    }
+
+    /// Sets a sketch edge's length by moving its second-drawn end
+    /// ([`Sketch::set_edge_length`]), as one undo step.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`], [`DocumentError::SketchLocked`],
+    ///   [`DocumentError::SketchGestureAlreadyOpen`] — from the gesture.
+    /// - [`DocumentError::Sketch`] — what the sketch refuses.
+    pub fn set_sketch_edge_length(
+        &mut self,
+        sketch: SketchId,
+        edge: SketchEdgeId,
+        length: f64,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "set_sketch_edge_length", length);
+        self.retype_sketch(sketch, |s| s.set_edge_length(edge, length))
+    }
+
+    /// Resizes a rectangle island about its first corner
+    /// ([`Sketch::resize_rectangle`]), as one undo step. Errors as
+    /// [`Document::set_sketch_edge_length`].
+    pub fn set_sketch_rectangle_size(
+        &mut self,
+        sketch: SketchId,
+        island: SketchIslandId,
+        width: f64,
+        height: f64,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "set_sketch_rectangle_size", width, height);
+        self.retype_sketch(sketch, |s| s.resize_rectangle(island, width, height))
+    }
+
+    /// Sets a drawn circle's radius about its centre
+    /// ([`Sketch::set_circle_radius`]), as one undo step. Errors as
+    /// [`Document::set_sketch_edge_length`].
+    pub fn set_sketch_circle_radius(
+        &mut self,
+        sketch: SketchId,
+        curve: SketchCurveId,
+        radius: f64,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "set_sketch_circle_radius", radius);
+        self.retype_sketch(sketch, |s| s.set_circle_radius(curve, radius))
+    }
+
+    /// Draws the mirror image of sketch islands across an in-plane line
+    /// ([`Sketch::mirror_islands`]), as one undo step. Errors as
+    /// [`Document::set_sketch_edge_length`].
+    pub fn mirror_sketch_islands(
+        &mut self,
+        sketch: SketchId,
+        islands: &[SketchIslandId],
+        axis_point: Point3,
+        axis_dir: Vec3,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "mirror_sketch_islands", islands = islands.len());
+        self.retype_sketch(sketch, |s| {
+            s.mirror_islands(islands, axis_point, axis_dir).map(|_| ())
+        })
+    }
+
+    /// Draws further copies of sketch islands along a step
+    /// ([`Sketch::array_islands`]), as one undo step. Errors as
+    /// [`Document::set_sketch_edge_length`].
+    pub fn array_sketch_islands(
+        &mut self,
+        sketch: SketchId,
+        islands: &[SketchIslandId],
+        step: Vec3,
+        count: usize,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "array_sketch_islands", islands = islands.len(), count);
+        self.retype_sketch(sketch, |s| {
+            s.array_islands(islands, step, count).map(|_| ())
+        })
+    }
+
+    /// Extends a sketch line to meet another ([`Sketch::extend_edge`]), as
+    /// one undo step. Errors as [`Document::set_sketch_edge_length`].
+    pub fn extend_sketch_edge(
+        &mut self,
+        sketch: SketchId,
+        edge: SketchEdgeId,
+        near: Point3,
+        target: SketchEdgeId,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "extend_sketch_edge");
+        self.retype_sketch(sketch, |s| s.extend_edge(edge, near, target).map(|_| ()))
+    }
+
+    /// Rounds a sketch corner ([`Sketch::fillet_corner`]), as one undo
+    /// step. Errors as [`Document::set_sketch_edge_length`].
+    pub fn fillet_sketch_corner(
+        &mut self,
+        sketch: SketchId,
+        corner: SketchVertexId,
+        radius: f64,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "fillet_sketch_corner", radius);
+        self.retype_sketch(sketch, |s| s.fillet_corner(corner, radius).map(|_| ()))
+    }
+
+    /// Cuts a sketch corner ([`Sketch::chamfer_corner`]), as one undo step.
+    /// Errors as [`Document::set_sketch_edge_length`].
+    pub fn chamfer_sketch_corner(
+        &mut self,
+        sketch: SketchId,
+        corner: SketchVertexId,
+        distance: f64,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "chamfer_sketch_corner", distance);
+        self.retype_sketch(sketch, |s| s.chamfer_corner(corner, distance).map(|_| ()))
+    }
+
+    /// One typed-number edit of a sketch's contents, bracketed as a gesture
+    /// so it lands as a single [`DocAction::SketchGesture`] — exact undo, and
+    /// the anchor re-evaluation every sketch edit runs. The sketch op itself
+    /// gives the strong guarantee, so a refusal just drops the gesture.
+    fn retype_sketch(
+        &mut self,
+        sketch: SketchId,
+        edit: impl FnOnce(&mut Sketch) -> Result<(), SketchError>,
+    ) -> Result<DocChange, DocumentError> {
+        self.begin_sketch_gesture(sketch)?;
+        let result = match self.sketch_mut(sketch) {
+            Some(s) => edit(s),
+            None => {
+                self.cancel_sketch_gesture();
+                return Err(DocumentError::UnknownSketch);
+            }
+        };
+        if let Err(e) = result {
+            self.cancel_sketch_gesture();
+            return Err(DocumentError::Sketch(e));
+        }
+        self.end_sketch_gesture(sketch)
     }
 
     /// Drops the open gesture (if any) without recording anything — the

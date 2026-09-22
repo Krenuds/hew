@@ -175,6 +175,28 @@ below.
   the walls selected beside it, or held in a selected group, so every
   placement shows the plan; explode gives it back where the walls land,
   and make-unique and the library keep a grouped plan in its group
+- **Retype a number** — Object Info shows a drawn line's Length, a
+  rectangle's Size (width x height) and a circle's Radius, and takes a new
+  one: the line's second-drawn end slides along the line and the lines
+  meeting it follow, the rectangle grows from its first corner, the circle
+  scales about its centre and stays a true circle. No solver; one undo
+  step; anything the sketch's own rules would refuse (a crossing, a merge,
+  a circle glued to other lines) is refused whole
+  (`set_sketch_edge_length` / `set_sketch_rectangle_size` /
+  `set_sketch_circle_radius`)
+- **2D verbs on a drawn sketch** — Fillet (Alt-click chamfers; a typed
+  size re-applies), Extend (click a line near its end, then the line it
+  should reach), Mirror (select shapes, click two points of the axis), and
+  ×N / /N arrays of sketch copies through the Move tool's array window.
+  Each is drawn geometry through the sticky rules — the image welds where
+  it touches, a mirrored or arrayed circle stays a circle, a fillet is a
+  true arc — one undo step, refused whole when the sketch's own rules would
+  refuse it (`NotACorner`, `CornerTooSmall`, `NothingToExtendTo`). Trim
+  needs no verb: a line is split at every crossing as it is drawn, so
+  erasing the piece between two crossings is the trim
+- **Look at Sketch** (Camera menu, palette) — squares the camera to the
+  selected sketch in parallel projection, framed to its lines: the plan
+  view. No grid snap yet
 - **New Sketch and Draw Into Sketch** (Object menu, command palette) —
   the draw tools keep everything drawn on one plane in one sketch so
   mixed-tool profiles close; New Sketch makes the next stroke start a fresh

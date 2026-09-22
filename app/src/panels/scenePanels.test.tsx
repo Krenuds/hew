@@ -9,7 +9,7 @@
  */
 
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import { MaterialPalette } from './MaterialPalette'
 import { DocumentTree } from './DocumentTree'
@@ -41,6 +41,11 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
     sketch_refacet_curve: vi.fn(),
+    sketch_edge_endpoints: () => undefined as Float64Array | undefined,
+    sketch_island_rectangle: () => undefined as Float64Array | undefined,
+    set_sketch_edge_length: vi.fn(),
+    set_sketch_rectangle_size: vi.fn(),
+    set_sketch_circle_radius: vi.fn(),
     top_level_nodes: () => [],
     object_name: (_id: bigint) => undefined as string | undefined,
     group_name: (_id: bigint) => undefined as string | undefined,
@@ -2854,5 +2859,115 @@ describe('TagsPanel', () => {
     // Sibling/ancestor rows are not highlighted.
     const structureRow = screen.getByText('Structure').closest('div') as HTMLElement
     expect(structureRow.style.background).not.toContain('accent-tint-18')
+  })
+})
+
+describe('ObjectInfoPanel — retype a number', () => {
+  const originalFormat = getLengthUnit()
+  beforeEach(() => {
+    setLengthUnit('mm')
+  })
+  afterEach(() => {
+    setLengthUnit(originalFormat)
+  })
+
+  it("shows a line's length and sets it on Enter through one kernel op", () => {
+    const set_sketch_edge_length = vi.fn()
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n]),
+      sketch_edge_endpoints: () => new Float64Array([0, 0, 0, 3.5052, 0, 0]),
+      set_sketch_edge_length,
+    })
+    const onDocumentChanged = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-edge', id: 7n, sketch: 5n }]}
+        onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const field = screen.getByLabelText('Length') as HTMLInputElement
+    expect(field.value).toBe('3505.2 mm')
+
+    fireEvent.change(field, { target: { value: '3657.6' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+    fireEvent.blur(field)
+
+    expect(set_sketch_edge_length).toHaveBeenCalledTimes(1)
+    const [sketch, edge, meters] = set_sketch_edge_length.mock.calls[0] as [bigint, bigint, number]
+    expect(sketch).toBe(5n)
+    expect(edge).toBe(7n)
+    expect(meters).toBeCloseTo(3.6576, 6)
+    expect(onDocumentChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it("shows a rectangle's size and sets width x height", () => {
+    const set_sketch_rectangle_size = vi.fn()
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n]),
+      sketch_island_rectangle: () => new Float64Array([3, 2]),
+      set_sketch_rectangle_size,
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-island', id: 50n, sketch: 5n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const field = screen.getByLabelText('Size') as HTMLInputElement
+    expect(field.value).toBe('3000 mm x 2000 mm')
+    fireEvent.change(field, { target: { value: '4000 x 1000' } })
+    fireEvent.blur(field)
+    expect(set_sketch_rectangle_size).toHaveBeenCalledWith(5n, 50n, 4, 1)
+  })
+
+  it("shows a circle's radius, sets it, and reverts on a kernel refusal with a toast", () => {
+    const set_sketch_circle_radius = vi.fn(() => {
+      throw new Error('CircleNotFree: only a circle standing on its own can be resized')
+    })
+    const onToast = vi.fn()
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n]),
+      sketch_edge_curve: () => 9n,
+      sketch_curve_geom: () => new Float64Array([0, 0, 0, 1]),
+      sketch_curve_edges: () => new BigUint64Array([100n, 101n]),
+      set_sketch_circle_radius,
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-curve', id: 3n, sketch: 5n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+        onToast={onToast}
+      />,
+    )
+    const field = screen.getByLabelText('Radius') as HTMLInputElement
+    expect(field.value).toBe('1000 mm')
+    fireEvent.change(field, { target: { value: '2500' } })
+    fireEvent.blur(field)
+    expect(set_sketch_circle_radius).toHaveBeenCalledWith(5n, 9n, 2.5)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(field.value).toBe('1000 mm')
+  })
+
+  it('shows no Size field for a shape that is not a rectangle', () => {
+    const scene = makeScene({ sketch_ids: () => new BigUint64Array([5n]) })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-island', id: 50n, sketch: 5n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.queryByLabelText('Size')).not.toBeInTheDocument()
   })
 })

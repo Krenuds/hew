@@ -3379,6 +3379,9 @@ fn main() {
                 None,
                 None,
             )?;
+            let tool_fillet = check_item(handle, &mut checks, "tool-fillet", "Fillet", None, None)?;
+            let tool_extend = check_item(handle, &mut checks, "tool-extend", "Extend", None, None)?;
+            let tool_mirror = check_item(handle, &mut checks, "tool-mirror", "Mirror", None, None)?;
             let tool_axes =
                 check_item(handle, &mut checks, "tool-axes", "Drawing Axes", None, None)?;
             let tool_text = check_item(handle, &mut checks, "tool-text", "Text", None, None)?;
@@ -3399,6 +3402,9 @@ fn main() {
                 .item(&tool_offset)
                 .item(&tool_slice)
                 .item(&tool_edit_vertex)
+                .item(&tool_fillet)
+                .item(&tool_extend)
+                .item(&tool_mirror)
                 .separator()
                 .item(&tool_tape_measure)
                 .item(&tool_protractor)
@@ -3478,6 +3484,16 @@ fn main() {
                 MenuItemBuilder::with_id("cam-zoom-window", "Zoom Window").build(handle)?;
             let cam_zoom_extents =
                 MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
+            // Look at Sketch is selection-gated like the Edit sketch items,
+            // so it carries the app's own action id for `sync_menu_state`.
+            let cam_look_at_sketch = gated_item(
+                handle,
+                &mut gated,
+                "view-sketch",
+                "Look at Sketch",
+                None,
+                None,
+            )?;
             // No standalone fov-entry menu item (camera-playtest2.md §2 —
             // Kurt's playtest call): the lens is reachable only through
             // Zoom (typed-degree/mm entry, or Shift-drag/wheel — design
@@ -3524,6 +3540,7 @@ fn main() {
                 .separator()
                 .item(&cam_zoom_window)
                 .item(&cam_zoom_extents)
+                .item(&cam_look_at_sketch)
                 .separator()
                 .item(&cam_parallel_projection)
                 .separator()
@@ -3975,6 +3992,9 @@ fn main() {
                 "tool-slice" => "tool-slice",
                 "tool-section-plane" => "tool-section-plane",
                 "tool-edit-vertex" => "tool-edit-vertex",
+                "tool-fillet" => "tool-fillet",
+                "tool-extend" => "tool-extend",
+                "tool-mirror" => "tool-mirror",
                 "tool-axes" => "tool-axes",
                 "tool-text" => "tool-text",
                 "cam-orbit" => "tool-orbit",
@@ -3985,6 +4005,7 @@ fn main() {
                 "cam-look-around" => "tool-look-around",
                 "cam-zoom-window" => "tool-zoom-window",
                 "cam-zoom-extents" => "zoom-extents",
+                "view-sketch" => "view-sketch",
                 "cam-parallel-projection" => "toggle-parallel-projection",
                 "cam-view-top" => "view-top",
                 "cam-view-bottom" => "view-bottom",

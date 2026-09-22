@@ -67,6 +67,9 @@ import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
+import { FilletTool } from '../tools/FilletTool'
+import { ExtendTool } from '../tools/ExtendTool'
+import { MirrorTool } from '../tools/MirrorTool'
 import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
 import { LibraryPlaceTool, type LibraryPlacement } from '../tools/LibraryPlaceTool'
 import { PositionCameraTool } from '../tools/PositionCameraTool'
@@ -748,6 +751,9 @@ export interface ViewportApi {
    * target here (e.g. a thin sketch edge).
    */
   zoomToWorldBounds: (min: [number, number, number], max: [number, number, number]) => void
+  /** Square the camera to a sketch: parallel projection, looking straight
+   *  down its plane normal, framed to its lines — the plan view. */
+  lookAtSketch: (sketch: bigint) => void
   /**
    * Reposition the orbit camera to a standard axis-aligned or isometric view
    * (Camera ▸ Standard Views), re-framing the scene each time. The current
@@ -5352,6 +5358,46 @@ export default function Viewport({
       scheduleRender()
     }
 
+    /** Plan view of one sketch: the camera sits on the sketch's plane
+     *  normal looking straight at it, in parallel projection, with the
+     *  sketch's lines framed. Up is world +Z unless the plane is level, then
+     *  +Y so a plan reads with north up. */
+    function lookAtSketch(sketch: bigint): void {
+      const plane = wasmScene.sketch_plane(sketch)
+      if (plane === undefined) return
+      const lines = wasmScene.sketch_lines(sketch)
+      const n = new THREE.Vector3(plane[3], plane[4], plane[5]).normalize()
+      // Frame the lines; an empty sketch frames a small patch of its plane.
+      const box = new THREE.Box3()
+      for (let i = 0; i + 2 < lines.length; i += 3) {
+        box.expandByPoint(new THREE.Vector3(lines[i], lines[i + 1], lines[i + 2]))
+      }
+      if (box.isEmpty()) {
+        const p = new THREE.Vector3(plane[0], plane[1], plane[2])
+        box.expandByPoint(p.clone().addScalar(-1))
+        box.expandByPoint(p.clone().addScalar(1))
+      }
+      const center = box.getCenter(new THREE.Vector3())
+      const radius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 0.5)
+      const distance = rig.perspectiveFramingDistance(radius, 1.2)
+      // Look from the side of the plane the camera is on now, so a plan
+      // drawn on a ceiling is not viewed from inside the slab.
+      const side = camera.position.clone().sub(center).dot(n) < 0 ? -1 : 1
+      const eye = center.clone().addScaledVector(n, side * distance)
+      const up = Math.abs(n.z) > 0.99 ? [0, 1, 0] : [0, 0, 1]
+      setCamera(
+        [eye.x, eye.y, eye.z],
+        [center.x, center.y, center.z],
+        up as [number, number, number],
+        rig.perspective.fov,
+        'parallel',
+      )
+      rig.frameOrthoToRadius(radius, 1.2, el.clientWidth / el.clientHeight)
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
+    }
+
     function setCamera(
       position: [number, number, number],
       target: [number, number, number],
@@ -6132,7 +6178,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, setHiddenSketches, newSketch, drawIntoSketch: drawInto, activeSketchIds, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, orbitBy, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, lookAtSketch, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, setHiddenSketches, newSketch, drawIntoSketch: drawInto, activeSketchIds, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, orbitBy, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -6804,6 +6850,29 @@ export default function Viewport({
       )
     }
 
+    /** The 2D verbs redraw sketch geometry: rebuild the sketch buffers and
+     *  report the document change, as the vertex drag does. */
+    function refreshAfterSketchVerb(): void {
+      handleSceneRefresh()
+      sceneRenderer.refreshAllSketches()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
+    function makeFilletTool(): FilletTool {
+      return new FilletTool(wasmScene, refreshAfterSketchVerb, handleToast, (text: string) => {
+        onMeasurementRef.current?.(text)
+      })
+    }
+
+    function makeExtendTool(): ExtendTool {
+      return new ExtendTool(wasmScene, refreshAfterSketchVerb, handleToast)
+    }
+
+    function makeMirrorTool(): MirrorTool {
+      return new MirrorTool(wasmScene, () => selectedIdsRef.current, refreshAfterSketchVerb, handleToast)
+    }
+
     function makeEditVertexTool(): EditVertexTool {
       return new EditVertexTool(
         wasmScene,
@@ -7065,6 +7134,21 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeEditVertexTool())
+          break
+        case 'Fillet':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeFilletTool())
+          break
+        case 'Extend':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeExtendTool())
+          break
+        case 'Mirror':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeMirrorTool())
           break
         case 'Drawing Axes':
           cameraModeRef.current = false
@@ -8949,6 +9033,9 @@ export default function Viewport({
       // every modifier read from one place. Shift wins over plain ⌘/Ctrl (Alt
       // wins over both, inside the tool itself) — Ctrl/Cmd+Shift replaces
       // within the object, ⌘/Ctrl alone still fills the whole object.
+      // Fillet reads Alt live off the click too: Alt-click cuts the corner
+      // straight instead of rounding it.
+      if (activeTool instanceof FilletTool) activeTool.chamfer = ev.altKey
       if (activeTool instanceof PaintTool) {
         activeTool.setEyedropper(ev.altKey)
         if (ev.shiftKey) {

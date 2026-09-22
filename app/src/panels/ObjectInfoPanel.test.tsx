@@ -112,6 +112,7 @@ describe('ObjectInfoPanel — locked sketches', () => {
       sketch_edge_island: () => 7n,
       sketch_locked: () => locked,
       set_sketch_locked: vi.fn(),
+      sketch_island_rectangle: () => undefined,
       ...overrides,
     })
   }

@@ -4121,6 +4121,252 @@ impl Scene {
         Ok(())
     }
 
+    /// Sets a sketch line's length by moving its second-drawn end along the
+    /// line (`Document::set_sketch_edge_length`); the lines meeting that end
+    /// stretch with it. One undo step. Refuses a locked sketch, a length
+    /// that is not positive, and a move the sketch's own rules refuse
+    /// (`WouldRetopologize`, `DegenerateSegment`).
+    pub fn set_sketch_edge_length(
+        &mut self,
+        sketch: u64,
+        edge: u64,
+        length: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_sketch_edge_length(
+                sketch_id(sketch),
+                SketchEdgeId::from(KeyData::from_ffi(edge)),
+                length,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetSketchEdgeLength {
+            sketch,
+            edge,
+            length,
+        });
+        Ok(())
+    }
+
+    /// The side lengths `[width, height]` of `island` when it is a
+    /// rectangle — its first edge's length, then the next edge's — or
+    /// `undefined` for any other shape. The pair `set_sketch_rectangle_size`
+    /// takes.
+    pub fn sketch_island_rectangle(&self, sketch: u64, island: u64) -> Option<Vec<f64>> {
+        let s = self.doc.sketch(sketch_id(sketch))?;
+        let (w, h) = s.rectangle_size(kernel::SketchIslandId::from(KeyData::from_ffi(island)))?;
+        Some(vec![w, h])
+    }
+
+    /// Resizes a rectangle island about its first corner
+    /// (`Document::set_sketch_rectangle_size`). One undo step. Refuses a
+    /// shape that is not a rectangle (`NotARectangle`), a size that is not
+    /// positive, a locked sketch, and a corner move the sketch refuses.
+    pub fn set_sketch_rectangle_size(
+        &mut self,
+        sketch: u64,
+        island: u64,
+        width: f64,
+        height: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_sketch_rectangle_size(
+                sketch_id(sketch),
+                kernel::SketchIslandId::from(KeyData::from_ffi(island)),
+                width,
+                height,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetSketchRectangleSize {
+            sketch,
+            island,
+            width,
+            height,
+        });
+        Ok(())
+    }
+
+    /// Sets a drawn circle's radius about its centre
+    /// (`Document::set_sketch_circle_radius`), keeping it a true circle. One
+    /// undo step. Refuses a circle that shares its island with other
+    /// geometry (`CircleNotFree`), a radius that is not positive, and a
+    /// locked sketch.
+    pub fn set_sketch_circle_radius(
+        &mut self,
+        sketch: u64,
+        curve: u64,
+        radius: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_sketch_circle_radius(
+                sketch_id(sketch),
+                kernel::SketchCurveId::from(KeyData::from_ffi(curve)),
+                radius,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetSketchCircleRadius {
+            sketch,
+            curve,
+            radius,
+        });
+        Ok(())
+    }
+
+    /// Draws the mirror image of sketch islands across the in-plane line
+    /// through `(ax, ay, az)` along `(dx, dy, dz)`, into the same sketch
+    /// (`Document::mirror_sketch_islands`). One undo step; the originals
+    /// stay; a drawn circle stays a circle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mirror_sketch_islands(
+        &mut self,
+        sketch: u64,
+        islands: &[u64],
+        ax: f64,
+        ay: f64,
+        az: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Result<(), ApiError> {
+        let ids: Vec<kernel::SketchIslandId> = islands
+            .iter()
+            .map(|&i| kernel::SketchIslandId::from(KeyData::from_ffi(i)))
+            .collect();
+        let change = self
+            .doc
+            .mirror_sketch_islands(
+                sketch_id(sketch),
+                &ids,
+                Point3::new(ax, ay, az),
+                Vec3::new(dx, dy, dz),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::MirrorSketchIslands {
+            sketch,
+            islands: islands.to_vec(),
+            axis_point: [ax, ay, az],
+            axis_dir: [dx, dy, dz],
+        });
+        Ok(())
+    }
+
+    /// Draws `count` further copies of sketch islands, each a further
+    /// `(sx, sy, sz)` along the plane, into the same sketch
+    /// (`Document::array_sketch_islands`). One undo step.
+    pub fn array_sketch_islands(
+        &mut self,
+        sketch: u64,
+        islands: &[u64],
+        sx: f64,
+        sy: f64,
+        sz: f64,
+        count: u32,
+    ) -> Result<(), ApiError> {
+        let ids: Vec<kernel::SketchIslandId> = islands
+            .iter()
+            .map(|&i| kernel::SketchIslandId::from(KeyData::from_ffi(i)))
+            .collect();
+        let change = self
+            .doc
+            .array_sketch_islands(
+                sketch_id(sketch),
+                &ids,
+                Vec3::new(sx, sy, sz),
+                count as usize,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ArraySketchIslands {
+            sketch,
+            islands: islands.to_vec(),
+            step: [sx, sy, sz],
+            count,
+        });
+        Ok(())
+    }
+
+    /// Extends the end of `edge` nearer `(nx, ny, nz)` along its own line
+    /// until it meets `target` (`Document::extend_sketch_edge`). One undo
+    /// step; refuses `NothingToExtendTo` when the line never gets there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extend_sketch_edge(
+        &mut self,
+        sketch: u64,
+        edge: u64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        target: u64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .extend_sketch_edge(
+                sketch_id(sketch),
+                SketchEdgeId::from(KeyData::from_ffi(edge)),
+                Point3::new(nx, ny, nz),
+                SketchEdgeId::from(KeyData::from_ffi(target)),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExtendSketchEdge {
+            sketch,
+            edge,
+            near: [nx, ny, nz],
+            target,
+        });
+        Ok(())
+    }
+
+    /// Rounds the sketch corner at `vertex` with an arc of `radius`
+    /// (`Document::fillet_sketch_corner`). One undo step; refuses
+    /// `NotACorner` and `CornerTooSmall`.
+    pub fn fillet_sketch_corner(
+        &mut self,
+        sketch: u64,
+        vertex: u64,
+        radius: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .fillet_sketch_corner(sketch_id(sketch), sketch_vertex_id(vertex), radius)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FilletSketchCorner {
+            sketch,
+            vertex,
+            radius,
+        });
+        Ok(())
+    }
+
+    /// Cuts the sketch corner at `vertex` back by `distance` on both lines
+    /// (`Document::chamfer_sketch_corner`). One undo step; refuses
+    /// `NotACorner` and `CornerTooSmall`.
+    pub fn chamfer_sketch_corner(
+        &mut self,
+        sketch: u64,
+        vertex: u64,
+        distance: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .chamfer_sketch_corner(sketch_id(sketch), sketch_vertex_id(vertex), distance)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ChamferSketchCorner {
+            sketch,
+            vertex,
+            distance,
+        });
+        Ok(())
+    }
+
     /// Deep-clone a node — Move+Option "copy" — placing the copy under the
     /// same parent, offset by `affine` (the same row-major 3×4 12-float matrix as
     /// [`Scene::transform_object`]). Returns the new node (always the **same kind**
@@ -9713,6 +9959,77 @@ impl Scene {
                     }
                     MoveSketchVertex { sketch, vertex, p } => {
                         self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
+                    }
+                    SetSketchEdgeLength {
+                        sketch,
+                        edge,
+                        length,
+                    } => {
+                        self.set_sketch_edge_length(sketch, edge, length)?;
+                    }
+                    SetSketchRectangleSize {
+                        sketch,
+                        island,
+                        width,
+                        height,
+                    } => {
+                        self.set_sketch_rectangle_size(sketch, island, width, height)?;
+                    }
+                    SetSketchCircleRadius {
+                        sketch,
+                        curve,
+                        radius,
+                    } => {
+                        self.set_sketch_circle_radius(sketch, curve, radius)?;
+                    }
+                    MirrorSketchIslands {
+                        sketch,
+                        islands,
+                        axis_point,
+                        axis_dir,
+                    } => {
+                        self.mirror_sketch_islands(
+                            sketch,
+                            &islands,
+                            axis_point[0],
+                            axis_point[1],
+                            axis_point[2],
+                            axis_dir[0],
+                            axis_dir[1],
+                            axis_dir[2],
+                        )?;
+                    }
+                    ArraySketchIslands {
+                        sketch,
+                        islands,
+                        step,
+                        count,
+                    } => {
+                        self.array_sketch_islands(
+                            sketch, &islands, step[0], step[1], step[2], count,
+                        )?;
+                    }
+                    ExtendSketchEdge {
+                        sketch,
+                        edge,
+                        near,
+                        target,
+                    } => {
+                        self.extend_sketch_edge(sketch, edge, near[0], near[1], near[2], target)?;
+                    }
+                    FilletSketchCorner {
+                        sketch,
+                        vertex,
+                        radius,
+                    } => {
+                        self.fillet_sketch_corner(sketch, vertex, radius)?;
+                    }
+                    ChamferSketchCorner {
+                        sketch,
+                        vertex,
+                        distance,
+                    } => {
+                        self.chamfer_sketch_corner(sketch, vertex, distance)?;
                     }
                     Ungroup { group } => {
                         self.ungroup(group)?;

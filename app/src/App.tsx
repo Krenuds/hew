@@ -187,6 +187,9 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Slice: 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
+  Fillet: 'tool-fillet',
+  Extend: 'tool-extend',
+  Mirror: 'tool-mirror',
   'Drawing Axes': 'tool-axes',
   Text: 'tool-text',
   Orbit: 'cam-orbit',
@@ -1891,6 +1894,9 @@ export default function App() {
           !scene.sketch_locked(sketch)
         )
       })(),
+      // Look at Sketch: the selection names one sketch (whole, or any of
+      // its shapes/lines) at the top level.
+      canLookAtSketch: selectedSketchOf(selectedIds) !== undefined && activeContext.length === 0,
       canGroup: !componentFrameOpen && !hasSketchPart && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
@@ -4227,6 +4233,9 @@ export default function App() {
       case 'tool-slice':     setActiveTool('Slice'); break
       case 'tool-section-plane': setActiveTool('Section Plane'); break
       case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
+      case 'tool-fillet':    setActiveTool('Fillet'); break
+      case 'tool-extend':    setActiveTool('Extend'); break
+      case 'tool-mirror':    setActiveTool('Mirror'); break
       case 'tool-axes':        setActiveTool('Drawing Axes'); break
       case 'tool-text':      setActiveTool('Text'); break
       case 'tool-orbit':     activateTool('Orbit'); break
@@ -4254,6 +4263,11 @@ export default function App() {
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
       case 'view-top':            viewportApi.current?.setStandardView('top'); break
+      case 'view-sketch': {
+        const sketch = selectedSketchOf(selectedIdsRef.current)
+        if (sketch !== undefined) viewportApi.current?.lookAtSketch(sketch)
+        break
+      }
       case 'view-bottom':         viewportApi.current?.setStandardView('bottom'); break
       case 'view-front':          viewportApi.current?.setStandardView('front'); break
       case 'view-back':           viewportApi.current?.setStandardView('back'); break
@@ -5071,6 +5085,7 @@ export default function App() {
       'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
       'edit-group': menuGates?.canGroup ?? false,
       'edit-draw-into-sketch': menuGates?.canDrawIntoSketch ?? false,
+      'view-sketch': menuGates?.canLookAtSketch ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
       'edit-make-component': menuGates?.canMakeComponent ?? false,
       'edit-place-copy': menuGates?.canPlaceCopy ?? false,
@@ -5745,10 +5760,12 @@ export default function App() {
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
           canDrawIntoSketch: menuGates?.canDrawIntoSketch ?? false,
+          canLookAtSketch: menuGates?.canLookAtSketch ?? false,
           hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,
           clipboardHasContent: menuGates?.clipboardHasContent ?? false,
         }}
         onZoomExtents={handleZoomExtents}
+        onLookAtSketch={() => menuActionRef.current('view-sketch')}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         parallelProjectionChecked={parallelProjection}
         onToggleParallelProjection={() => viewportApi.current?.toggleProjection()}
@@ -6718,6 +6735,7 @@ export default function App() {
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
           canDrawIntoSketch: menuGates?.canDrawIntoSketch ?? false,
+          canLookAtSketch: menuGates?.canLookAtSketch ?? false,
           sceneActive: scenes.activeSid !== null,
           scenesAny: scenes.entries.length > 0,
           hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,

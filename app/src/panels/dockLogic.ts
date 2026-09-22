@@ -141,6 +141,10 @@ const SKETCH_VERBS: DockVerb[] = [
   { id: 'tool-move', label: 'Move' },
   { id: 'tool-rotate', label: 'Rotate' },
   { id: 'tool-scale', label: 'Scale' },
+  // The two sketch verbs a plan reaches for most; Extend stays in the
+  // menu and palette so the row keeps to the curated cap.
+  { id: 'tool-fillet', label: 'Fillet' },
+  { id: 'tool-mirror', label: 'Mirror' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 

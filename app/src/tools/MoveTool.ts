@@ -81,6 +81,7 @@ import {
   commitSelectionTransform,
   buildSelectionPreview,
   duplicateSketchSelection,
+  planSketchTransforms,
 } from './transformSelection'
 import {
   arrowToAxis,
@@ -191,6 +192,14 @@ export class MoveTool implements Tool {
     sources: NodeRef[]
     vector: [number, number, number]
     historyGen: string
+    /** The sketch islands the copy replayed in place — arrayed through
+     *  `array_sketch_islands`, one step per sketch. Empty for an all-node
+     *  copy. */
+    sketchArrays: { sketch: bigint; islands: bigint[] }[]
+    /** How many history steps the hot commit recorded — what one refinement
+     *  must retract before re-issuing (each sketch's gesture, plus the one
+     *  node array). */
+    entries: number
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
   private arrayTyped: string = ''
@@ -769,24 +778,24 @@ export class MoveTool implements Tool {
           if (copyables.length > 0) {
             const created = this._duplicateArray(copyables, affineF64, 1)
             committed.push(...created)
-            // The copy gesture is now "hot" for an ×N / /N array refinement
-            // — but only when the copy was purely objects/groups/instances:
-            // the array retracts and re-issues exactly ONE
-            // duplicate_selection_array step, and sketch copies live in
-            // separate gesture steps it cannot retract, so arraying a mixed
-            // copy would multiply the objects while the sketch copies stayed
-            // at one. Sketch ×N arrays are out of scope until a kernel-side
-            // sketch duplicate op exists.
-            if (sketchCopies.length === 0) {
-              this.arrayHot = {
-                sources: copyables,
-                vector: [tx, ty, tz],
-                historyGen: this.wasmScene.history_generation().toString(),
-              }
-              this.arrayTyped = ''
-            } else {
-              this.arrayHot = null
+          }
+          // The copy is now "hot" for an ×N / /N array refinement. The
+          // refinement retracts every step this commit recorded and
+          // re-issues the array: `array_sketch_islands` per sketch (in-plane
+          // copies only — an out-of-plane sketch copy is a new sketch and is
+          // left alone), then one `duplicate_selection_array` for the nodes.
+          const sketchArrays = this._inPlaneSketchArrays(nodes, [tx, ty, tz])
+          const arrayable =
+            sketchArrays !== null && (copyables.length > 0 || sketchArrays.length > 0)
+          if (arrayable) {
+            this.arrayHot = {
+              sources: copyables,
+              vector: [tx, ty, tz],
+              historyGen: this.wasmScene.history_generation().toString(),
+              sketchArrays,
+              entries: Number(this.wasmScene.history_generation() - genBefore),
             }
+            this.arrayTyped = ''
           } else {
             this.arrayHot = null
           }
@@ -850,16 +859,16 @@ export class MoveTool implements Tool {
     if (spec === null) return this._commitHot(hot, v)
     const step: [number, number, number] =
       spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
+    const sketchArrays = this.arrayHot?.sketchArrays ?? []
     try {
-      const created = this._duplicateArray(
-        hot.nodes,
-        affineToFloat64(translationAffine(step[0], step[1], step[2])),
-        spec.count,
-      )
+      const genBefore = this.wasmScene.history_generation()
+      const created = this._issueArray(sketchArrays, hot.nodes, step, spec.count)
       this.arrayHot = {
         sources: hot.nodes,
         vector: v,
         historyGen: this.wasmScene.history_generation().toString(),
+        sketchArrays,
+        entries: Number(this.wasmScene.history_generation() - genBefore),
       }
       this.selection = created
       this.onArrayCommit(created)
@@ -969,22 +978,23 @@ export class MoveTool implements Tool {
         ? [tx / spec.count, ty / spec.count, tz / spec.count]
         : [tx, ty, tz]
 
-    // Retract the previous array commit (count 1 on the first refinement).
-    this.wasmScene.scene_undo().free()
+    // Retract the previous array commit — every step it recorded (count 1
+    // on the first refinement).
+    for (let i = 0; i < hot.entries; i += 1) this.wasmScene.scene_undo().free()
+    const genAfterUndo = this.wasmScene.history_generation()
     let created: NodeRef[]
     try {
-      created = this._duplicateArray(
-        hot.sources,
-        affineToFloat64(translationAffine(step[0], step[1], step[2])),
-        spec.count,
-      )
+      created = this._issueArray(hot.sketchArrays, hot.sources, step, spec.count)
     } catch (err) {
       // Put the retracted copies back so a refused refinement never eats
-      // the committed copy. The undo+redo pair moved the history
-      // generation, so re-stamp the token — the state is the recorded one
-      // again and another count can be tried.
+      // the committed copy. A sketch array that landed before the refusal
+      // is undone first (each is its own step), then the retracted steps
+      // redo. The generation moved, so re-stamp the token — the state is
+      // the recorded one again and another count can be tried.
       try {
-        this.wasmScene.scene_redo().free()
+        const landed = Number(this.wasmScene.history_generation() - genAfterUndo)
+        for (let i = 0; i < landed; i += 1) this.wasmScene.scene_undo().free()
+        for (let i = 0; i < hot.entries; i += 1) this.wasmScene.scene_redo().free()
         this.arrayHot = {
           ...hot,
           historyGen: this.wasmScene.history_generation().toString(),
@@ -998,17 +1008,75 @@ export class MoveTool implements Tool {
       return
     }
 
+    const entries = Number(this.wasmScene.history_generation() - genAfterUndo)
     this.arrayHot = {
       sources: hot.sources,
       vector: hot.vector,
       historyGen: this.wasmScene.history_generation().toString(),
+      sketchArrays: hot.sketchArrays,
+      entries,
     }
     this.arrayLast = spec
     // A distance typed now re-spaces THIS array (see `_relayArray`); the
-    // array is one `duplicate_selection_array` step, so one undo retracts it.
-    this.retype.arm({ nodes: hot.sources, vector: hot.vector, copy: true }, 1)
+    // window retracts exactly the steps the array recorded.
+    this.retype.arm({ nodes: hot.sources, vector: hot.vector, copy: true }, entries)
     this.selection = created
     this.onArrayCommit(created)
+  }
+
+  /**
+   * The sketch islands a copy of `nodes` along `v` replays in place, per
+   * sketch — the ones `array_sketch_islands` can array. `null` when any
+   * of the selection's sketch geometry leaves its plane along `v` (that
+   * copy is a new sketch, not an in-place replay, so the array window
+   * does not open for it).
+   */
+  private _inPlaneSketchArrays(
+    nodes: readonly NodeRef[],
+    v: [number, number, number],
+  ): { sketch: bigint; islands: bigint[] }[] | null {
+    const plan = planSketchTransforms(this.wasmScene, nodes)
+    const bySketch = new Map<bigint, bigint[]>()
+    for (const sketch of plan.sketches) {
+      bySketch.set(sketch, Array.from(this.wasmScene.sketch_island_ids(sketch)))
+    }
+    for (const { sketch, island } of plan.islands) {
+      const list = bySketch.get(sketch) ?? []
+      if (!list.includes(island)) list.push(island)
+      bySketch.set(sketch, list)
+    }
+    const out: { sketch: bigint; islands: bigint[] }[] = []
+    for (const [sketch, islands] of bySketch) {
+      const plane = this.wasmScene.sketch_plane(sketch)
+      if (plane === undefined) return null
+      const offPlane = v[0] * plane[3] + v[1] * plane[4] + v[2] * plane[5]
+      if (Math.abs(offPlane) > 1e-9) return null
+      if (islands.length > 0) out.push({ sketch, islands })
+    }
+    return out
+  }
+
+  /** Lay an array down: `count` copies a `step` apart of the sketch islands
+   *  (one `array_sketch_islands` per sketch) and of the nodes (one
+   *  `duplicate_selection_array`). Returns the node copies, for the
+   *  selection. */
+  private _issueArray(
+    sketchArrays: { sketch: bigint; islands: bigint[] }[],
+    sources: NodeRef[],
+    step: [number, number, number],
+    count: number,
+  ): NodeRef[] {
+    for (const { sketch, islands } of sketchArrays) {
+      this.wasmScene.array_sketch_islands(
+        sketch, new BigUint64Array(islands), step[0], step[1], step[2], count,
+      )
+    }
+    if (sources.length === 0) return []
+    return this._duplicateArray(
+      sources,
+      affineToFloat64(translationAffine(step[0], step[1], step[2])),
+      count,
+    )
   }
 
   /**

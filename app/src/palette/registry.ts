@@ -57,6 +57,9 @@ export type PaletteGate =
   /** The selection names exactly one unlocked sketch, at the top level —
    *  gates "Draw Into Sketch". */
   | 'canDrawIntoSketch'
+  /** The selection names one sketch at the top level — gates "Look at
+   *  Sketch". */
+  | 'canLookAtSketch'
   /** A Scene is currently active (docs/design/scenes.md §5) — gates
    *  "Update Scene", which has nothing to re-capture with none active. */
   | 'sceneActive'
@@ -101,6 +104,9 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Slice': 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
+  'Fillet': 'tool-fillet',
+  'Extend': 'tool-extend',
+  'Mirror': 'tool-mirror',
   'Drawing Axes': 'tool-axes',
   'Text': 'tool-text',
   'Orbit': 'tool-orbit',
@@ -133,6 +139,9 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Slice': 'Cut a solid into two separate watertight Objects.',
   'Section Plane': 'Look inside the model with a non-destructive clipping plane.',
   'Edit Vertex': 'Drag an individual vertex to reshape a face.',
+  'Fillet': 'Round a corner of a drawn sketch with an arc; Alt-click cuts it straight.',
+  'Extend': 'Lengthen a drawn line until it meets another.',
+  'Mirror': 'Draw the mirror image of the selected sketch shapes across a line.',
   'Drawing Axes': 'Reposition the drawing axes: click an origin, then the red and green directions.',
   'Text': 'Place a leader-text annotation from a face, edge, or point.',
   'Orbit': 'Rotate the camera around the model.',
@@ -170,6 +179,9 @@ const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Protractor': ['angle'],
   'Section Plane': ['section', 'cut', 'cross-section', 'clip', 'inside', 'wall thickness'],
   'Edit Vertex': ['vertex', 'reshape'],
+  'Fillet': ['round', 'chamfer', 'corner', 'radius'],
+  'Extend': ['lengthen', 'reach', 'trim'],
+  'Mirror': ['flip', 'reflect', 'symmetry'],
   'Position Camera': ['stand', 'eye height', 'walkthrough', 'first person'],
   'Walk': ['walkthrough', 'first person', 'fps'],
   'Look Around': ['mouselook', 'walkthrough', 'first person'],
@@ -227,6 +239,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-view-chips', label: 'Toggle View Chips', description: 'Show or hide the top-left Orbit/Top/Iso/Front chips.', group: 'Actions', synonyms: ['view chips', 'chips', 'hud', 'quick views', 'orbit', 'top', 'iso', 'front'] },
   { id: 'toggle-section-active', label: 'Section Cut', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'section plane', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
+  { id: 'view-sketch', label: 'Look at Sketch', description: 'Square the camera to the selected sketch in parallel projection — the plan view.', group: 'Actions', synonyms: ['plan view', 'plan', 'square to sketch', 'look at'], gate: 'canLookAtSketch' },
   { id: 'toggle-parallel-projection', label: 'Parallel Projection', description: 'Toggle between perspective and parallel (orthographic) projection.', group: 'Actions', synonyms: ['orthographic', 'perspective', 'ortho'] },
   { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
   { id: 'view-bottom', label: 'Standard View: Bottom', description: 'Look straight up at the model.', group: 'Actions' },

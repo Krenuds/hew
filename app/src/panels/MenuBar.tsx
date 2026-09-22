@@ -201,6 +201,7 @@ export interface MenuBarProps {
     /** The selection names exactly one unlocked sketch at the top level —
      *  enables Draw Into Sketch. Defaults to disabled when omitted. */
     canDrawIntoSketch?: boolean
+    canLookAtSketch?: boolean
     /** Cut/Copy (Lane D): at least one structural (object/group/instance)
      *  node is selected. */
     hasStructuralSelection?: boolean
@@ -209,6 +210,8 @@ export interface MenuBarProps {
   }
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
+  /** Camera ▸ Look at Sketch — the plan view of the selected sketch. */
+  onLookAtSketch?: () => void
   /** View ▸ Scenes ▸ Add Scene (docs/design/scenes.md §5). */
   onScenesAdd?: () => void
   /** View ▸ Scenes ▸ Update Scene — re-captures the active Scene's checked
@@ -669,6 +672,7 @@ export function MenuBar({
   onEditAction,
   editGates,
   onZoomExtents,
+  onLookAtSketch,
   onDrawText,
   onScenesAdd,
   onScenesUpdate,
@@ -1171,6 +1175,11 @@ export function MenuBar({
               label="Zoom Extents"
               onClick={withClose(() => onZoomExtents?.())}
             />
+            <MenuItem
+              label="Look at Sketch"
+              disabled={!(editGates?.canLookAtSketch ?? false)}
+              onClick={withClose(() => onLookAtSketch?.())}
+            />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label="Parallel Projection"
@@ -1300,6 +1309,21 @@ export function MenuBar({
               label="Edit Vertex"
               checked={activeTool === 'Edit Vertex'}
               onClick={withClose(() => onSelectTool?.('Edit Vertex'))}
+            />
+            <CheckMenuItem
+              label="Fillet"
+              checked={activeTool === 'Fillet'}
+              onClick={withClose(() => onSelectTool?.('Fillet'))}
+            />
+            <CheckMenuItem
+              label="Extend"
+              checked={activeTool === 'Extend'}
+              onClick={withClose(() => onSelectTool?.('Extend'))}
+            />
+            <CheckMenuItem
+              label="Mirror"
+              checked={activeTool === 'Mirror'}
+              onClick={withClose(() => onSelectTool?.('Mirror'))}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem

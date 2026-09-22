@@ -74,6 +74,30 @@ pub const MIN_CIRCLE_SEGMENTS: usize = 24;
 /// one asked for is the kind of quiet substitution rule 4 exists to prevent.
 pub const MAX_CIRCLE_SEGMENTS: usize = 1024;
 
+/// The two plain lines meeting at a corner: their edges, far ends, and unit
+/// directions from the corner — what [`Sketch::fillet_corner`] and
+/// [`Sketch::chamfer_corner`] work from.
+type CornerArms = ([SketchEdgeId; 2], [Point3; 2], [Vec3; 2]);
+
+/// The chord tolerance a kernel-drawn arc is faceted to: how far the middle
+/// of a facet may sit inside the true circle.
+const ARC_SAGITTA_TOL: f64 = 5e-4;
+
+/// Facets per full turn for a circle of `radius` at [`ARC_SAGITTA_TOL`],
+/// never fewer than [`MIN_CIRCLE_SEGMENTS`], rounded up to a multiple of
+/// four so the quadrant points are vertices.
+fn circle_segments_for_radius(radius: f64) -> usize {
+    let ratio = (1.0 - ARC_SAGITTA_TOL / radius).clamp(-1.0, 1.0);
+    let n = (std::f64::consts::PI / ratio.acos()).ceil();
+    let n = if n.is_finite() {
+        n as usize
+    } else {
+        MIN_CIRCLE_SEGMENTS
+    };
+    let n = n.clamp(MIN_CIRCLE_SEGMENTS, 96);
+    n.div_ceil(4) * 4
+}
+
 /// The analytic definition a curve chain was drawn from: the exact circle
 /// (or circular arc) whose facets the chain's edges are. The circle lies in
 /// the sketch plane; arc extent is derived from the chain's member edges,
@@ -364,6 +388,28 @@ pub enum SketchError {
     SegmentsBelowFloor,
     /// The requested facet count is above [`MAX_CIRCLE_SEGMENTS`].
     SegmentsAboveCap,
+    /// A retyped length, size or radius is not a positive finite number.
+    InvalidDimension,
+    /// [`Sketch::resize_rectangle`] was asked to resize an island that is
+    /// not a rectangle: four edges meeting at four right-angled corners and
+    /// nothing else.
+    NotARectangle,
+    /// [`Sketch::set_circle_radius`] was asked to resize a circle that is
+    /// not an island of its own — geometry touches or shares it, and
+    /// scaling would drag that along (rule 4).
+    CircleNotFree,
+    /// [`Sketch::extend_edge`] found nothing for the line to reach: the
+    /// target edge is parallel, behind the end, or the line would pass
+    /// beside it.
+    NothingToExtendTo,
+    /// [`Sketch::fillet_corner`] / [`Sketch::chamfer_corner`] was asked to
+    /// round a vertex that is not a corner of two plain lines — a free end,
+    /// a junction of three or more, a curve's facet, or two lines that run
+    /// straight through.
+    NotACorner,
+    /// A fillet radius or chamfer distance that does not fit on the two
+    /// lines meeting at the corner.
+    CornerTooSmall,
     /// Undoing an extrusion could not re-insert the scaffolding it had
     /// deleted: geometry drawn since then crosses or overlaps where the
     /// outline was ([`Sketch::restore_edges`]). The sketch is untouched —
@@ -412,6 +458,22 @@ impl std::fmt::Display for SketchError {
             }
             SketchError::SegmentsBelowFloor => {
                 write!(f, "a circle needs at least {MIN_CIRCLE_SEGMENTS} segments")
+            }
+            SketchError::InvalidDimension => {
+                write!(f, "a length must be a positive number")
+            }
+            SketchError::NotARectangle => write!(f, "that shape is not a rectangle"),
+            SketchError::CircleNotFree => {
+                write!(f, "only a circle standing on its own can be resized")
+            }
+            SketchError::NothingToExtendTo => {
+                write!(f, "the line does not reach that edge")
+            }
+            SketchError::NotACorner => {
+                write!(f, "that is not a corner where two lines meet")
+            }
+            SketchError::CornerTooSmall => {
+                write!(f, "that size does not fit on the lines at the corner")
             }
             SketchError::SegmentsAboveCap => {
                 write!(f, "a circle allows at most {MAX_CIRCLE_SEGMENTS} segments")
@@ -1524,6 +1586,518 @@ impl Sketch {
             regions_created,
             regions_removed,
         })
+    }
+
+    /// Sets `edge`'s length to `length` by moving its `to` end — the end
+    /// drawn second — along the edge's own direction, the `from` end
+    /// staying put. Edges meeting the moved end stretch with it exactly as
+    /// [`Sketch::move_vertex`] moves them, and are refused exactly as it
+    /// refuses: nothing splits, merges or crosses. Strong guarantee.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownEdge`] if `edge` is stale.
+    /// - [`SketchError::InvalidDimension`] if `length` is not positive and
+    ///   finite.
+    /// - Anything [`Sketch::move_vertex`] refuses for the moved end.
+    pub fn set_edge_length(&mut self, edge: SketchEdgeId, length: f64) -> Result<(), SketchError> {
+        if !(length.is_finite() && length > tol::POINT_MERGE) {
+            return Err(SketchError::InvalidDimension);
+        }
+        let e = self.edges.get(edge).ok_or(SketchError::UnknownEdge)?;
+        let (from, to) = (self.vertices[e.from].position, self.vertices[e.to].position);
+        let dir = (to - from)
+            .normalized()
+            .map_err(|_| SketchError::DegenerateSegment)?;
+        let target = Point3::new(
+            from.x + dir.x * length,
+            from.y + dir.y * length,
+            from.z + dir.z * length,
+        );
+        let moved = e.to;
+        let mut trial = self.clone();
+        trial.move_vertex(moved, target)?;
+        *self = trial;
+        Ok(())
+    }
+
+    /// The corners of `island` when it is a rectangle — four edges closing
+    /// a loop at four right angles, nothing else in the island — in loop
+    /// order starting at the `from` end of its lowest edge, else `None`.
+    fn rectangle_corners(&self, island: SketchIslandId) -> Option<[SketchVertexId; 4]> {
+        let isl = self.islands.get(island)?;
+        if isl.edges.len() != 4 {
+            return None;
+        }
+        // Walk the loop from the first edge's `from`.
+        let first = self.edges.get(isl.edges[0])?;
+        let mut corners = vec![first.from];
+        let mut cur = first.to;
+        let mut used = vec![isl.edges[0]];
+        while corners.len() < 4 {
+            corners.push(cur);
+            let next = isl.edges.iter().copied().find(|&eid| {
+                !used.contains(&eid)
+                    && self
+                        .edges
+                        .get(eid)
+                        .is_some_and(|e| e.from == cur || e.to == cur)
+            })?;
+            let e = self.edges[next];
+            cur = if e.from == cur { e.to } else { e.from };
+            used.push(next);
+        }
+        if cur != corners[0] || used.len() != 4 {
+            return None;
+        }
+        let p: Vec<Point3> = corners.iter().map(|&v| self.vertices[v].position).collect();
+        for i in 0..4 {
+            let a = p[(i + 3) % 4] - p[i];
+            let b = p[(i + 1) % 4] - p[i];
+            let (la, lb) = (a.length(), b.length());
+            if la <= tol::POINT_MERGE || lb <= tol::POINT_MERGE {
+                return None;
+            }
+            if a.dot(b).abs() > tol::NORMAL_DIRECTION * la * lb {
+                return None;
+            }
+        }
+        Some([corners[0], corners[1], corners[2], corners[3]])
+    }
+
+    /// The side lengths of `island` when it is a rectangle: the first
+    /// edge's length and the one after it, in that order (the order
+    /// [`Sketch::resize_rectangle`] takes). `None` for any other shape.
+    pub fn rectangle_size(&self, island: SketchIslandId) -> Option<(f64, f64)> {
+        let c = self.rectangle_corners(island)?;
+        let p = |v: SketchVertexId| self.vertices[v].position;
+        Some(((p(c[1]) - p(c[0])).length(), (p(c[2]) - p(c[1])).length()))
+    }
+
+    /// Resizes a rectangle island to `width` along its first edge and
+    /// `height` along the next, keeping its first corner where it is (the
+    /// `from` end of its lowest edge) and its orientation. The three other
+    /// corners move one at a time through [`Sketch::move_vertex`], so any
+    /// crossing into other geometry is refused, and the island stays a
+    /// rectangle. Strong guarantee.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownIsland`] if `island` is stale.
+    /// - [`SketchError::NotARectangle`] for any other shape.
+    /// - [`SketchError::InvalidDimension`] if a size is not positive and
+    ///   finite.
+    /// - Anything [`Sketch::move_vertex`] refuses for a corner.
+    pub fn resize_rectangle(
+        &mut self,
+        island: SketchIslandId,
+        width: f64,
+        height: f64,
+    ) -> Result<(), SketchError> {
+        if !self.islands.contains_key(island) {
+            return Err(SketchError::UnknownIsland);
+        }
+        if !(width.is_finite() && width > tol::POINT_MERGE)
+            || !(height.is_finite() && height > tol::POINT_MERGE)
+        {
+            return Err(SketchError::InvalidDimension);
+        }
+        let c = self
+            .rectangle_corners(island)
+            .ok_or(SketchError::NotARectangle)?;
+        let p0 = self.vertices[c[0]].position;
+        let u = (self.vertices[c[1]].position - p0)
+            .normalized()
+            .map_err(|_| SketchError::NotARectangle)?;
+        let v = (self.vertices[c[3]].position - p0)
+            .normalized()
+            .map_err(|_| SketchError::NotARectangle)?;
+        let at = |du: f64, dv: f64| {
+            Point3::new(
+                p0.x + u.x * du + v.x * dv,
+                p0.y + u.y * du + v.y * dv,
+                p0.z + u.z * du + v.z * dv,
+            )
+        };
+        // Each intermediate shape is a simple quadrilateral, so the
+        // three moves never cross each other.
+        let mut trial = self.clone();
+        trial.move_vertex(c[1], at(width, 0.0))?;
+        trial.move_vertex(c[2], at(width, height))?;
+        trial.move_vertex(c[3], at(0.0, height))?;
+        *self = trial;
+        Ok(())
+    }
+
+    /// Sets a drawn circle's radius by scaling its island uniformly about
+    /// the circle's centre — the one map that keeps the chain's analytic
+    /// circle exact ([`Sketch::apply_transform_island`]). The circle must be
+    /// an island of its own: geometry touching it would scale along, so it
+    /// is refused instead. Strong guarantee.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownCurve`] / [`SketchError::CurveNotAnalytic`]
+    ///   if `curve` is stale or carries no circle.
+    /// - [`SketchError::InvalidDimension`] if `radius` is not positive and
+    ///   finite.
+    /// - [`SketchError::CircleNotFree`] if the circle's island holds any
+    ///   other edge.
+    /// - Anything [`Sketch::apply_transform_island`] refuses (the scaled
+    ///   ring would cross other geometry).
+    pub fn set_circle_radius(
+        &mut self,
+        curve: SketchCurveId,
+        radius: f64,
+    ) -> Result<(), SketchError> {
+        if !(radius.is_finite() && radius > tol::POINT_MERGE) {
+            return Err(SketchError::InvalidDimension);
+        }
+        let analytic = match self.curves.get(curve) {
+            None => return Err(SketchError::UnknownCurve),
+            Some(None) => return Err(SketchError::CurveNotAnalytic),
+            Some(Some(a)) => *a,
+        };
+        let edges = self.curve_edges(curve);
+        let island = edges
+            .first()
+            .and_then(|&e| self.island_of_edge(e))
+            .ok_or(SketchError::UnknownCurve)?;
+        let isl = &self.islands[island];
+        if isl.edges.len() != edges.len() || !isl.edges.iter().all(|e| edges.contains(e)) {
+            return Err(SketchError::CircleNotFree);
+        }
+        let c = analytic.geom.center;
+        let k = radius / analytic.geom.radius;
+        let t = crate::Transform::translation(Vec3::new(-c.x, -c.y, -c.z))
+            .then(&crate::Transform::uniform_scale(k))
+            .then(&crate::Transform::translation(Vec3::new(c.x, c.y, c.z)));
+        let mut trial = self.clone();
+        trial.apply_transform_island(island, &t)?;
+        *self = trial;
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────── 2D verbs
+
+    /// Draws every edge of `src`'s `islands`, mapped through `map`, into
+    /// this sketch as freshly drawn geometry — the sticky rules weld and
+    /// split it like a hand-drawn copy, and curve chains keep their identity
+    /// and analytic circle through a similarity `map`. Reads the islands
+    /// from `src` (the sketch as it was before any copy landed), so several
+    /// copies in a row see the same originals. Returns the new edges.
+    fn draw_islands_from(
+        &mut self,
+        src: &Sketch,
+        islands: &[SketchIslandId],
+        map: &dyn Fn(Point3) -> Point3,
+        radius_scale: f64,
+    ) -> Result<Vec<SketchEdgeId>, SketchError> {
+        let mut new_edges = Vec::new();
+        let mut emitted: std::collections::BTreeSet<SketchCurveId> =
+            std::collections::BTreeSet::new();
+        let ends = |edge: SketchEdge| {
+            (
+                map(src.vertices[edge.from].position),
+                map(src.vertices[edge.to].position),
+            )
+        };
+        for &island in islands {
+            let isl = src.islands.get(island).ok_or(SketchError::UnknownIsland)?;
+            for &eid in &isl.edges {
+                let e = src.edges[eid];
+                match e.curve {
+                    None => {
+                        let (a, b) = ends(e);
+                        new_edges.extend(self.add_segment(a, b)?.new_edges);
+                    }
+                    Some(cid) => {
+                        if !emitted.insert(cid) {
+                            continue;
+                        }
+                        match src.curves.get(cid).copied().flatten() {
+                            Some(a) => {
+                                self.begin_curve_with_kind(
+                                    CurveGeom {
+                                        center: map(a.geom.center),
+                                        radius: a.geom.radius * radius_scale,
+                                    },
+                                    a.kind,
+                                )?;
+                            }
+                            None => {
+                                self.begin_curve();
+                            }
+                        }
+                        for &member in isl
+                            .edges
+                            .iter()
+                            .filter(|&&m| src.edges[m].curve == Some(cid))
+                        {
+                            let (a, b) = ends(src.edges[member]);
+                            new_edges.extend(self.add_segment(a, b)?.new_edges);
+                        }
+                        self.end_curve();
+                    }
+                }
+            }
+        }
+        Ok(new_edges)
+    }
+
+    /// Draws the mirror image of `islands` across the in-plane line through
+    /// `axis_point` along `axis_dir`, into this sketch. The copy is drawn
+    /// geometry — it welds where it touches — and a drawn circle stays a
+    /// circle. The originals stay. Strong guarantee. Returns the new edges.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownIsland`] if an island is stale.
+    /// - [`SketchError::PointOffPlane`] (`which: 0`) if `axis_point` is off
+    ///   the plane; [`SketchError::DegenerateSegment`] if `axis_dir` has no
+    ///   in-plane length.
+    /// - Anything the sticky rules refuse for the mirrored lines.
+    pub fn mirror_islands(
+        &mut self,
+        islands: &[SketchIslandId],
+        axis_point: Point3,
+        axis_dir: Vec3,
+    ) -> Result<Vec<SketchEdgeId>, SketchError> {
+        if self.plane.signed_distance(axis_point).abs() > tol::PLANE_DIST {
+            return Err(SketchError::PointOffPlane { which: 0 });
+        }
+        let n = self.plane.normal();
+        let in_plane = axis_dir - n * axis_dir.dot(n);
+        let d = in_plane
+            .normalized()
+            .map_err(|_| SketchError::DegenerateSegment)?;
+        let map = move |p: Point3| {
+            let w = p - axis_point;
+            let along = d * w.dot(d);
+            let perp = w - along;
+            axis_point + along - perp
+        };
+        let mut trial = self.clone();
+        let new_edges = trial.draw_islands_from(self, islands, &map, 1.0)?;
+        *self = trial;
+        Ok(new_edges)
+    }
+
+    /// Draws `count` further copies of `islands`, each a further `step`
+    /// along the plane, into this sketch — the drawn-geometry array. Strong
+    /// guarantee. Returns the new edges.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownIsland`] if an island is stale.
+    /// - [`SketchError::PointOffPlane`] (`which: 0`) if `step` leaves the
+    ///   plane; [`SketchError::DegenerateSegment`] if it is no step at all.
+    /// - Anything the sticky rules refuse for the copies.
+    pub fn array_islands(
+        &mut self,
+        islands: &[SketchIslandId],
+        step: Vec3,
+        count: usize,
+    ) -> Result<Vec<SketchEdgeId>, SketchError> {
+        let n = self.plane.normal();
+        if step.dot(n).abs() > tol::PLANE_DIST {
+            return Err(SketchError::PointOffPlane { which: 0 });
+        }
+        if step.length() <= tol::POINT_MERGE {
+            return Err(SketchError::DegenerateSegment);
+        }
+        let mut trial = self.clone();
+        let mut new_edges = Vec::new();
+        for k in 1..=count {
+            let offset = step * (k as f64);
+            let map = move |p: Point3| p + offset;
+            new_edges.extend(trial.draw_islands_from(self, islands, &map, 1.0)?);
+        }
+        *self = trial;
+        Ok(new_edges)
+    }
+
+    /// Extends the end of `edge` nearer `near` along the edge's own line
+    /// until it meets `target`, drawing the missing piece as ordinary
+    /// geometry (it welds into `target`, splitting it). Strong guarantee.
+    /// Returns the new edges.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownEdge`] if either edge is stale.
+    /// - [`SketchError::NothingToExtendTo`] if the line never meets
+    ///   `target` ahead of that end.
+    /// - Anything the sticky rules refuse for the new piece.
+    pub fn extend_edge(
+        &mut self,
+        edge: SketchEdgeId,
+        near: Point3,
+        target: SketchEdgeId,
+    ) -> Result<Vec<SketchEdgeId>, SketchError> {
+        let e = *self.edges.get(edge).ok_or(SketchError::UnknownEdge)?;
+        let t = *self.edges.get(target).ok_or(SketchError::UnknownEdge)?;
+        let (from, to) = (self.vertices[e.from].position, self.vertices[e.to].position);
+        // The end to extend is the one nearer the click; it moves away from
+        // the other.
+        let (end, other) = if (near - to).length() <= (near - from).length() {
+            (to, from)
+        } else {
+            (from, to)
+        };
+        let dir = (end - other)
+            .normalized()
+            .map_err(|_| SketchError::DegenerateSegment)?;
+        let (a, b) = (self.vertices[t.from].position, self.vertices[t.to].position);
+        let n = self.plane.normal();
+        let ab = b - a;
+        let denom = dir.cross(ab).dot(n);
+        if denom.abs() <= tol::NORMAL_DIRECTION {
+            return Err(SketchError::NothingToExtendTo);
+        }
+        let w = a - end;
+        let s_along = w.cross(ab).dot(n) / denom;
+        let s_target = w.cross(dir).dot(n) / denom;
+        if s_along <= tol::POINT_MERGE
+            || !(-tol::POINT_MERGE..=1.0 + tol::POINT_MERGE).contains(&s_target)
+        {
+            return Err(SketchError::NothingToExtendTo);
+        }
+        let hit = end + dir * s_along;
+        let mut trial = self.clone();
+        let added = trial.add_segment(end, hit)?;
+        *self = trial;
+        Ok(added.new_edges)
+    }
+
+    /// The two plain lines meeting at `corner` and nothing else: the
+    /// vertex is a corner of exactly two edges, neither a curve facet, not
+    /// running straight through. Returns the far ends and the unit
+    /// directions from the corner along each line.
+    fn corner_arms(&self, corner: SketchVertexId) -> Result<CornerArms, SketchError> {
+        if !self.vertices.contains_key(corner) {
+            return Err(SketchError::UnknownVertex);
+        }
+        let incident: Vec<(SketchEdgeId, SketchEdge)> = self
+            .edges
+            .iter()
+            .filter(|(_, e)| e.from == corner || e.to == corner)
+            .map(|(id, e)| (id, *e))
+            .collect();
+        let [(e0, a0), (e1, a1)] = incident[..] else {
+            return Err(SketchError::NotACorner);
+        };
+        if a0.curve.is_some() || a1.curve.is_some() {
+            return Err(SketchError::NotACorner);
+        }
+        let v = self.vertices[corner].position;
+        let far =
+            |e: SketchEdge| self.vertices[if e.from == corner { e.to } else { e.from }].position;
+        let (fa, fb) = (far(a0), far(a1));
+        let da = (fa - v).normalized().map_err(|_| SketchError::NotACorner)?;
+        let db = (fb - v).normalized().map_err(|_| SketchError::NotACorner)?;
+        // Collinear arms have no corner to round.
+        if da.cross(db).length() <= tol::NORMAL_DIRECTION {
+            return Err(SketchError::NotACorner);
+        }
+        Ok(([e0, e1], [fa, fb], [da, db]))
+    }
+
+    /// Cuts the corner at `corner` back by `distance` along both lines and
+    /// joins the two cut points with a straight line. Strong guarantee.
+    /// Returns the new edges.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownVertex`] if `corner` is stale.
+    /// - [`SketchError::NotACorner`] unless exactly two plain lines meet
+    ///   there at an angle.
+    /// - [`SketchError::InvalidDimension`] / [`SketchError::CornerTooSmall`]
+    ///   if `distance` is not positive or does not fit on both lines.
+    pub fn chamfer_corner(
+        &mut self,
+        corner: SketchVertexId,
+        distance: f64,
+    ) -> Result<Vec<SketchEdgeId>, SketchError> {
+        if !(distance.is_finite() && distance > tol::POINT_MERGE) {
+            return Err(SketchError::InvalidDimension);
+        }
+        let (edges, far, dirs) = self.corner_arms(corner)?;
+        let v = self.vertices[corner].position;
+        if distance >= (far[0] - v).length() - tol::POINT_MERGE
+            || distance >= (far[1] - v).length() - tol::POINT_MERGE
+        {
+            return Err(SketchError::CornerTooSmall);
+        }
+        let ta = v + dirs[0] * distance;
+        let tb = v + dirs[1] * distance;
+        let mut trial = self.clone();
+        trial.remove_edge(edges[0])?;
+        trial.remove_edge(edges[1])?;
+        let mut new_edges = Vec::new();
+        new_edges.extend(trial.add_segment(far[0], ta)?.new_edges);
+        new_edges.extend(trial.add_segment(ta, tb)?.new_edges);
+        new_edges.extend(trial.add_segment(tb, far[1])?.new_edges);
+        *self = trial;
+        Ok(new_edges)
+    }
+
+    /// Rounds the corner at `corner` with an arc of `radius` tangent to
+    /// both lines, drawn as a curve chain carrying the arc's circle, so it
+    /// stays a true arc. Strong guarantee. Returns the new edges.
+    ///
+    /// # Errors
+    /// As [`Sketch::chamfer_corner`]: the tangent points must fit on both
+    /// lines ([`SketchError::CornerTooSmall`]).
+    pub fn fillet_corner(
+        &mut self,
+        corner: SketchVertexId,
+        radius: f64,
+    ) -> Result<Vec<SketchEdgeId>, SketchError> {
+        if !(radius.is_finite() && radius > tol::POINT_MERGE) {
+            return Err(SketchError::InvalidDimension);
+        }
+        let (edges, far, dirs) = self.corner_arms(corner)?;
+        let v = self.vertices[corner].position;
+        let cos_theta = dirs[0].dot(dirs[1]).clamp(-1.0, 1.0);
+        let theta = cos_theta.acos();
+        let half = theta / 2.0;
+        let setback = radius / half.tan();
+        if setback >= (far[0] - v).length() - tol::POINT_MERGE
+            || setback >= (far[1] - v).length() - tol::POINT_MERGE
+        {
+            return Err(SketchError::CornerTooSmall);
+        }
+        let ta = v + dirs[0] * setback;
+        let tb = v + dirs[1] * setback;
+        let bisector = (dirs[0] + dirs[1])
+            .normalized()
+            .map_err(|_| SketchError::NotACorner)?;
+        let center = v + bisector * (radius / half.sin());
+        // The arc runs from `ta` to `tb` the short way round, faceted at
+        // the density a drawn circle of this radius gets.
+        let n = self.plane.normal();
+        let e1 = (ta - center) * (1.0 / radius);
+        let e2 = n.cross(e1);
+        let rel = tb - center;
+        let sweep = rel.dot(e2).atan2(rel.dot(e1));
+        let per_turn = circle_segments_for_radius(radius);
+        let facets = ((sweep.abs() / std::f64::consts::TAU) * per_turn as f64)
+            .ceil()
+            .max(2.0) as usize;
+        let mut trial = self.clone();
+        trial.remove_edge(edges[0])?;
+        trial.remove_edge(edges[1])?;
+        let mut new_edges = Vec::new();
+        new_edges.extend(trial.add_segment(far[0], ta)?.new_edges);
+        trial.begin_curve_with(CurveGeom { center, radius })?;
+        let mut prev = ta;
+        for k in 1..=facets {
+            let phi = sweep * (k as f64) / (facets as f64);
+            let next = if k == facets {
+                tb
+            } else {
+                center + e1 * (radius * phi.cos()) + e2 * (radius * phi.sin())
+            };
+            new_edges.extend(trial.add_segment(prev, next)?.new_edges);
+            prev = next;
+        }
+        trial.end_curve();
+        new_edges.extend(trial.add_segment(tb, far[1])?.new_edges);
+        *self = trial;
+        Ok(new_edges)
     }
 
     /// Repositions vertex `v` to `new_pos`, dragging its incident edges with
