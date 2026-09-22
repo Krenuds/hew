@@ -101,7 +101,7 @@ function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
  * source SVGs carry no `fill` attribute, so `fill="currentColor"` is spliced
  * onto the root `<svg>` tag here — letting the row's `color` style (active
  * vs. idle) drive icon color without a stylesheet. */
-function InlineIcon({ svg, size = 16 }: { svg: string; size?: number }) {
+export function InlineIcon({ svg, size = 16 }: { svg: string; size?: number }) {
   const sized = svg
     .replace(/\swidth="[^"]*"/, '')
     .replace(/\sheight="[^"]*"/, '')

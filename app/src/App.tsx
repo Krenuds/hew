@@ -30,6 +30,7 @@ import { ChangesPanel } from './panels/ChangesPanel'
 import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/UnsavedChangesDialog'
 import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
+import { TrayCollapseRow, TrayExpandTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
 import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey } from './panels/tagModel'
@@ -124,6 +125,7 @@ const TRAY_WIDTH_MIN = 220
 const TRAY_WIDTH_MAX = 560
 const TRAY_WIDTH_KEY = 'hew.trayWidth'
 const RAIL_NARROW_KEY = 'hew.railNarrow'
+const TRAY_COLLAPSED_KEY = 'hew.trayCollapsed'
 const clampTrayWidth = (w: number): number =>
   Math.min(TRAY_WIDTH_MAX, Math.max(TRAY_WIDTH_MIN, Math.round(w)))
 /** Help ▸ Hew Help target — the online user guide's index. */
@@ -570,6 +572,28 @@ export default function App() {
     window.localStorage.setItem(RAIL_NARROW_KEY, railNarrow ? '1' : '0')
   }, [railNarrow])
   const toggleRailNarrow = useCallback(() => setRailNarrow((narrow) => !narrow), [])
+  /** Tray put away entirely; per window, separate from its width so the
+   *  width comes back unchanged. */
+  const [trayCollapsed, setTrayCollapsed] = useState<boolean>(
+    () => window.localStorage.getItem(TRAY_COLLAPSED_KEY) === '1',
+  )
+  useEffect(() => {
+    window.localStorage.setItem(TRAY_COLLAPSED_KEY, trayCollapsed ? '1' : '0')
+  }, [trayCollapsed])
+  const trayCollapsedRef = useRef(trayCollapsed)
+  trayCollapsedRef.current = trayCollapsed
+  /** Every section shortcut and menu item goes through here. With the tray
+   *  put away, asking for a section brings the tray back with that section
+   *  open, rather than flipping it unseen. Deliberately not an effect on the
+   *  showX flags: those sync across windows, and the tray is per window. */
+  const toggleSection = useCallback((setShown: (update: (shown: boolean) => boolean) => void) => {
+    if (trayCollapsedRef.current) {
+      setTrayCollapsed(false)
+      setShown(() => true)
+    } else {
+      setShown((shown) => !shown)
+    }
+  }, [])
   /** Open document windows (Tauri multi-window only) — the Window menu's
    *  tail of focus-this-window entries. Populated by `list_windows` at
    *  mount and kept fresh by the shell's `window-list` broadcast (window
@@ -3929,12 +3953,14 @@ export default function App() {
         setSelectedIds([{ kind, id: BigInt(idStr) }])
         setShowModelInfo(true)
         setShowObjectInfo(true)
+        setTrayCollapsed(false)
       }
       return
     }
     if (payload.startsWith('jump-tag:')) {
       const key = payload.slice('jump-tag:'.length)
       setShowTags(true)
+      setTrayCollapsed(false)
       const nonce = ++revealNonceRef.current
       setRevealTag({ key, nonce })
       // Let the highlight fade back out unless another jump superseded it.
@@ -4115,13 +4141,13 @@ export default function App() {
       case 'tool-zoom-window': activateTool('Zoom Window'); break
       case 'toggle-parallel-projection': viewportApi.current?.toggleProjection(); break
       // Window pane toggles — must use functional updaters (StrictMode safe)
-      case 'toggle-model-info':   setShowModelInfo((v) => !v); break
-      case 'toggle-materials':    setShowMaterials((v) => !v); break
-      case 'toggle-components':   setShowComponents((v) => !v); break
-      case 'toggle-tags':         setShowTags((v) => !v); break
-      case 'toggle-scenes':       setShowScenes((v) => !v); break
-      case 'toggle-changes':      setShowChanges((v) => !v); break
-      case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
+      case 'toggle-model-info':   toggleSection(setShowModelInfo); break
+      case 'toggle-materials':    toggleSection(setShowMaterials); break
+      case 'toggle-components':   toggleSection(setShowComponents); break
+      case 'toggle-tags':         toggleSection(setShowTags); break
+      case 'toggle-scenes':       toggleSection(setShowScenes); break
+      case 'toggle-changes':      toggleSection(setShowChanges); break
+      case 'toggle-object-info':  toggleSection(setShowObjectInfo); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
       case 'reset-axes':         viewportApi.current?.resetAxes(); break
@@ -4718,27 +4744,27 @@ export default function App() {
       // letter, so compare case-insensitively (else these never fire).
       if (ev.key.toLowerCase() === 'i' && ev.shiftKey) {
         ev.preventDefault()
-        setShowModelInfo((v) => !v)
+        toggleSection(setShowModelInfo)
         return
       }
       if (ev.key.toLowerCase() === 'c' && ev.shiftKey) {
         ev.preventDefault()
-        setShowMaterials((v) => !v)
+        toggleSection(setShowMaterials)
         return
       }
       if (ev.key.toLowerCase() === 'm' && ev.shiftKey) {
         ev.preventDefault()
-        setShowComponents((v) => !v)
+        toggleSection(setShowComponents)
         return
       }
       if (ev.key.toLowerCase() === 't' && ev.shiftKey) {
         ev.preventDefault()
-        setShowTags((v) => !v)
+        toggleSection(setShowTags)
         return
       }
       if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
         ev.preventDefault()
-        setShowObjectInfo((v) => !v)
+        toggleSection(setShowObjectInfo)
         return
       }
       if (ev.key.toLowerCase() === 'l' && ev.shiftKey) {
@@ -4774,7 +4800,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [saveDocument, saveAsDocument, openDocument, newDocument])
+  }, [saveDocument, saveAsDocument, openDocument, newDocument, toggleSection])
 
   // Delete / Backspace → delete the current selection (guides).
   // Registered SEPARATELY from the global-shortcut effect above because that one
@@ -5540,13 +5566,13 @@ export default function App() {
         showObjectInfo={showObjectInfo}
         showDebugLog={showDebugLog}
         showLibrary={showLibrary}
-        onToggleModelInfo={() => setShowModelInfo((v) => !v)}
-        onToggleMaterials={() => setShowMaterials((v) => !v)}
-        onToggleComponents={() => setShowComponents((v) => !v)}
-        onToggleTags={() => setShowTags((v) => !v)}
-        onToggleScenes={() => setShowScenes((v) => !v)}
-        onToggleChanges={() => setShowChanges((v) => !v)}
-        onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
+        onToggleModelInfo={() => toggleSection(setShowModelInfo)}
+        onToggleMaterials={() => toggleSection(setShowMaterials)}
+        onToggleComponents={() => toggleSection(setShowComponents)}
+        onToggleTags={() => toggleSection(setShowTags)}
+        onToggleScenes={() => toggleSection(setShowScenes)}
+        onToggleChanges={() => toggleSection(setShowChanges)}
+        onToggleObjectInfo={() => toggleSection(setShowObjectInfo)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         onToggleLibrary={() => setShowLibrary((v) => !v)}
         onScenesAdd={() => scenesRename.add()}
@@ -5671,6 +5697,7 @@ export default function App() {
           // of panel content. Clear it on the way out.
           onPointerLeave={() => setInferenceInfo(null)}
         >
+          {trayCollapsed && <TrayExpandTab onExpand={() => setTrayCollapsed(false)} />}
           <Viewport
             wasmScene={state.scene}
             onStatusChange={handleStatusChange}
@@ -5931,6 +5958,7 @@ export default function App() {
         {/* Tray resize handle — drag to adjust the tray width; the width is
             clamped and persisted so complex models' tag/outliner labels can
             be given room once and keep it across launches. */}
+        {!trayCollapsed && (<>
         <div
           role="separator"
           aria-orientation="vertical"
@@ -5980,6 +6008,8 @@ export default function App() {
           }}
         />
         <div
+          role="complementary"
+          aria-label="Tray"
           style={{
             width: `${trayWidth}px`,
             flexShrink: 0,
@@ -5990,6 +6020,7 @@ export default function App() {
             borderLeft: '1px solid var(--border-hairline)',
           }}
         >
+          <TrayCollapseRow onCollapse={() => setTrayCollapsed(true)} />
           <TraySection title="Object Info" collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
             <ObjectInfoPanel
               scene={state.scene}
@@ -6075,6 +6106,7 @@ export default function App() {
             <ChangesPanel scene={state.scene} docRev={docRev} reasons={docSession.nonUndoableReasons} />
           </TraySection>
         </div>
+        </>)}
       </div>
 
       {/* Status bar — the Studio instructor line (`02_app_shell.md`): active
