@@ -18,7 +18,7 @@ name: Desktop E2E
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, builder]
 
 env:
   # renovate: datasource=crates-io depName=tauri-driver
