@@ -58,6 +58,23 @@ availability check resolves false under jsdom, so
 `ViewportPane.test.tsx`. Note the page has only a named export and no
 sub-exports, so a test renders all of it.
 
+**The test to write.** `app/src/settings/FluentSettingsPage.test.tsx`,
+rendering the page bare and asserting on accessible names, in the shape of
+`ViewportPane.test.tsx`:
+
+- every control is present - units, theme, snap-dot size, debug, and the
+  library and server sections - each found by the name a screen reader
+  would read;
+- flipping a control writes through to the singleton it owns, and a change
+  made through the singleton's own setter shows up in the rendered page;
+- the sections that depend on host capability render their unavailable
+  state rather than throwing, since every availability check resolves false
+  under jsdom.
+
+The value is the duplication guard: settings are written once for Windows
+and once for everything else, so a setting added only to the shared panes
+is silently missing here. This test is what notices.
+
 **E2E is not reachable.** `isWindows` is fakeable from Playwright
 (`addInitScript` over `navigator.platform`, read at module eval), but
 `isTauri` is not - faking `__TAURI_INTERNALS__` flips every `isTauri` branch
