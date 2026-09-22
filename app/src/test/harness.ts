@@ -157,9 +157,14 @@ export interface HewTestHarness {
    * The containing group of a tree node (`node_parent`), or `null` at the
    * top level — for asserting Outliner drag-and-drop reparenting
    * (`reparent_nodes`) without the DOM. `kind` is `'object' | 'group' |
-   * 'instance'`.
+   * 'instance' | 'sketch'`.
    */
   getNodeParent(kind: string, id: string): string | null
+  /**
+   * Move `group` by a world translation (meters) — `transform_group` with a
+   * pure-translation affine, carrying everything the group holds.
+   */
+  moveGroup(group: string, dx: number, dy: number, dz: number): void
   /** Whether an object is currently a watertight solid (`object_solid`). */
   isObjectSolid(id: string): boolean
   /**
@@ -1232,10 +1237,15 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     getNodeParent: (kind, id) =>
       query((s) => {
-        const kindNum = kind === 'group' ? 1 : kind === 'instance' ? 2 : 0
+        const kindNum = kind === 'group' ? 1 : kind === 'instance' ? 2 : kind === 'sketch' ? 3 : 0
         const parent = s.node_parent(kindNum, BigInt(id))
         return parent === undefined ? null : parent.toString()
       }),
+
+    moveGroup: (group, dx, dy, dz) => {
+      const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
+      act((s) => s.transform_group(BigInt(group), affine))
+    },
 
     isObjectSolid: (id) => query((s) => s.object_solid(BigInt(id))),
 

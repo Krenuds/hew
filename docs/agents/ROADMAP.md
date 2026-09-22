@@ -157,8 +157,14 @@ below.
   of Ground floor". A hidden sketch is out of the cursor's way as well as out
   of view — nothing snaps to it and Push/Pull clicks through it — and its
   name, tags and hidden state save with the document (manifest v18) and are
-  captured by Scenes. A sketch is not yet a tree member: grouping,
-  duplicating and make-component refuse it typed (`SketchNodeUnsupported`)
+  captured by Scenes
+- **Sketches in groups** — a sketch groups with the walls drawn over it:
+  Group takes it, the Outliner drags it into and out of a group, and the
+  group carries it through move, duplicate, array copy, delete and its
+  editing session. Hiding the group hides it. The membership saves as
+  `sketches[].parent` (manifest v19). A boolean, Make Component or a library
+  copy of a group holding a sketch refuses typed (`SketchNodeUnsupported`)
+  rather than drop it
 - **New Sketch and Draw Into Sketch** (Object menu, command palette) —
   the draw tools keep everything drawn on one plane in one sketch so
   mixed-tool profiles close; New Sketch makes the next stroke start a fresh

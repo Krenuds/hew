@@ -13,6 +13,9 @@ import {
   nodeRefFromJs,
   nodeKindToNumber,
   isTreeMemberKind,
+  isGroupableKind,
+  groupableSelection,
+  collectSketchIds,
   shapeLabel,
   selectedSketchOf,
   canMakeComponent,
@@ -190,22 +193,70 @@ describe('isTreeMemberKind', () => {
 
   it('is false for a whole sketch even though it has a kernel node kind', () => {
     // The trap this predicate exists for: `nodeKindToNumber('sketch') >= 0`,
-    // but the kernel refuses a sketch in every structural call.
+    // but the kernel refuses a sketch in these structural calls.
     expect(isTreeMemberKind('sketch')).toBe(false)
     expect(isTreeMemberKind('sketch-island')).toBe(false)
     expect(isTreeMemberKind('imprint')).toBe(false)
   })
 
-  it('keeps a whole sketch out of every structural gate', () => {
+  it('keeps a whole sketch out of the gates the kernel refuses it in', () => {
     const o: NodeRef = { kind: 'object', id: 1n }
     const sk: NodeRef = { kind: 'sketch', id: 5n }
     const noParent = () => undefined
     expect(structuralSelection([o, sk])).toBeNull()
-    expect(canGroup([o, sk], noParent)).toBe(false)
     expect(canMakeComponent([o, sk], noParent)).toBe(false)
-    expect(
-      dropTargetFor([sk], 'root', { getGroupMembers: () => [], sessionOpen: false }),
-    ).toBeNull()
+  })
+})
+
+describe('isGroupableKind', () => {
+  it('is true for a tree member and for a whole sketch', () => {
+    expect(isGroupableKind('object')).toBe(true)
+    expect(isGroupableKind('group')).toBe(true)
+    expect(isGroupableKind('instance')).toBe(true)
+    expect(isGroupableKind('sketch')).toBe(true)
+  })
+
+  it('is false for the parts of a sketch and for imprints — no kernel node id', () => {
+    expect(isGroupableKind('sketch-island')).toBe(false)
+    expect(isGroupableKind('sketch-curve')).toBe(false)
+    expect(isGroupableKind('sketch-edge')).toBe(false)
+    expect(isGroupableKind('imprint')).toBe(false)
+  })
+})
+
+describe('groupableSelection — what group_nodes and reparent_nodes take', () => {
+  it('collapses a whole sketch at kind 3 beside the tree members', () => {
+    const sel = groupableSelection([
+      { kind: 'object', id: 1n },
+      { kind: 'sketch', id: 5n },
+    ])
+    expect(sel).not.toBeNull()
+    expect(Array.from(sel!.kinds)).toEqual([0, 3])
+    expect(Array.from(sel!.ids)).toEqual([1n, 5n])
+  })
+
+  it('refuses (null) when ANY node is a part of a sketch', () => {
+    expect(groupableSelection([
+      { kind: 'object', id: 1n },
+      { kind: 'sketch-island', id: 6n, sketch: 5n },
+    ])).toBeNull()
+  })
+})
+
+describe('collectSketchIds', () => {
+  const members = new Map<bigint, NodeRef[]>([
+    [10n, [{ kind: 'object', id: 1n }, { kind: 'group', id: 11n }, { kind: 'sketch', id: 5n }]],
+    [11n, [{ kind: 'sketch', id: 6n }]],
+  ])
+  const getGroupMembers = (id: bigint) => members.get(id) ?? []
+
+  it('names the sketches a group holds at any depth', () => {
+    expect(collectSketchIds({ kind: 'group', id: 10n }, getGroupMembers)).toEqual([6n, 5n])
+  })
+
+  it('names a sketch itself, and nothing under an object', () => {
+    expect(collectSketchIds({ kind: 'sketch', id: 5n }, getGroupMembers)).toEqual([5n])
+    expect(collectSketchIds({ kind: 'object', id: 1n }, getGroupMembers)).toEqual([])
   })
 })
 
@@ -275,10 +326,14 @@ describe('canGroup — sketch-kind guard', () => {
   const b: NodeRef = { kind: 'object', id: 2n }
   const noParent = (_n: NodeRef) => undefined
 
-  it('false when any sketch-kind node is in the selection', () => {
+  it('groups a whole sketch with a tree member under the same parent', () => {
     const sk: NodeRef = { kind: 'sketch', id: 5n }
+    expect(canGroup([a, sk], noParent)).toBe(true)
+    expect(canGroup([a, sk], (n) => (n.kind === 'sketch' ? 10n : undefined))).toBe(false)
+  })
+
+  it('false when a part of a sketch is in the selection', () => {
     const curve: NodeRef = { kind: 'sketch-curve', id: 6n, sketch: 5n }
-    expect(canGroup([a, sk], noParent)).toBe(false)
     expect(canGroup([a, b, curve], noParent)).toBe(false)
   })
 })
@@ -1024,7 +1079,13 @@ describe('dropTargetFor', () => {
     expect(dropTargetFor([a], sk, view())).toBeNull()
   })
 
-  it('refuses dragging a sketch-scoped node — it has no kernel NodeId', () => {
+  it('carries a whole sketch into a group or out to the top level', () => {
+    const plan: NodeRef = { kind: 'sketch', id: 5n }
+    expect(dropTargetFor([plan], g, view())).toEqual({ group: 10n })
+    expect(dropTargetFor([a, plan], 'root', view())).toEqual({ group: undefined })
+  })
+
+  it('refuses dragging a part of a sketch — it has no kernel NodeId', () => {
     expect(dropTargetFor([sk], g, view())).toBeNull()
   })
 

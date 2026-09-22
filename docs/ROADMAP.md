@@ -29,7 +29,8 @@ at any smoothness.
 row in the outliner with its shapes inside, with a name, tags, and a hide
 toggle. New Sketch keeps a furniture layout separate from the floor plan
 under it. Lock a sketch and Push/Pull builds from it by copy, so a plan
-survives every wall raised from it.
+survives every wall raised from it, and group the plan with those walls so
+it moves, copies and hides with them.
 
 **Precision.** Type exact sizes mid-gesture — `24cm`, `9.5"`,
 feet-and-inches. Tape measure, protractor, guides, linear and radial

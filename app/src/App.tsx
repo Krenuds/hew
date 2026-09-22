@@ -1828,13 +1828,16 @@ export default function App() {
       n.kind === 'imprint' ||
       n.kind === 'imprint-chord'
     const parentOf = (n: NodeRef) => {
+      if (n.kind === 'sketch') return scene.node_parent(3, n.id)
       if (isSketchKind(n)) return undefined
       const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
       return scene.node_parent(k, n.id)
     }
     // Sketch-scoped selections have no kernel NodeId — any in the selection
-    // disqualifies the node-level commands.
+    // disqualifies the node-level commands. A WHOLE sketch is a node and can
+    // be grouped; `canGroupHelper` takes it.
     const hasSketch = selectedIds.some(isSketchKind)
+    const hasSketchPart = selectedIds.some((n) => n.kind !== 'sketch' && isSketchKind(n))
     // The kernel refuses grouping, component creation, instance placement,
     // import, and 3D Text outright while a COMPONENT frame is open
     // (`DocumentError::ExplodeSessionScope` — each would either restructure
@@ -1888,7 +1891,7 @@ export default function App() {
           !scene.sketch_locked(sketch)
         )
       })(),
-      canGroup: !componentFrameOpen && !hasSketch && canGroupHelper(selectedIds, parentOf),
+      canGroup: !componentFrameOpen && !hasSketchPart && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
         !componentFrameOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),

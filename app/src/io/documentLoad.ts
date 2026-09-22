@@ -23,7 +23,7 @@
  */
 
 import type { Scene } from '../wasm/loader'
-import { collectLeafIds, nodeKey, nodeKindToNumber, nodeRefFromJs, type NodeRef } from '../panels/treeModel'
+import { collectLeafIds, collectSketchIds, nodeKey, nodeKindToNumber, nodeRefFromJs, type NodeRef } from '../panels/treeModel'
 import { isPathUnder, tagPathKey } from '../panels/tagModel'
 
 /** Strings that signal the Scene borrow-lock after a Rust panic (mirrors
@@ -142,7 +142,8 @@ export function seedHiddenKeysFromRegistry(scene: Scene): Set<string> {
  * manually-hidden nodes (always `object`/`group`/`instance`/`sketch` — the
  * only kinds a hide toggle ever targets, so the plain `kind:id` split below
  * never meets a sketch-scoped `kind:sketch:id` key); a whole sketch is a leaf
- * of its own, since no group holds one. `hiddenTagPaths` entries are
+ * of its own, and a hidden group hides the sketches it holds along with its
+ * solids. `hiddenTagPaths` entries are
  * `tagPathKey`-encoded path arrays. A hidden GROUP's/tag's coverage expands
  * through `collectLeafIds`/`isPathUnder` exactly as the live editor's own
  * eye toggles do. The caller decides what to do with the result — App.tsx
@@ -164,13 +165,10 @@ export function unionHiddenLeafIds(
   const hiddenInstanceIds: bigint[] = []
   const hiddenSketchIds: bigint[] = []
   const collect = (node: NodeRef) => {
-    if (node.kind === 'sketch') {
-      hiddenSketchIds.push(node.id)
-      return
-    }
     const { objectIds, instanceIds } = collectLeafIds(node, getGroupMembers)
     hiddenObjectIds.push(...objectIds)
     hiddenInstanceIds.push(...instanceIds)
+    hiddenSketchIds.push(...collectSketchIds(node, getGroupMembers))
   }
 
   // --- (a) manual per-node hides ---

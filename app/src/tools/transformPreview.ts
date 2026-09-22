@@ -242,12 +242,15 @@ export function buildSketchPreviewClone(
  * transform directly. Instance clones preserve their own world pose in their
  * matrix (via `clonePosedInstanceGroup`) — the container is the single object
  * the tool drives, and its world-space delta composes on top of each instance's
- * pose. Returns a THREE.Group containing all found clones, or null if none found.
+ * pose. The sketches the group holds (`leafSketchLines`, each one's world-space
+ * line positions) ghost as line work alongside. Returns a THREE.Group
+ * containing all found clones, or null if none found.
  */
 export function buildMultiPreviewClone(
   objectsGroup: THREE.Group | null,
   leafObjectIds: bigint[],
   leafInstanceGroups: (THREE.Group | null)[] = [],
+  leafSketchLines: (Float32Array | number[])[] = [],
 ): THREE.Group | null {
   const container = new THREE.Group()
   container.name = 'MultiPreview'
@@ -263,6 +266,13 @@ export function buildMultiPreviewClone(
   }
   for (const instanceGroup of leafInstanceGroups) {
     const clone = clonePosedInstanceGroup(instanceGroup)
+    if (clone !== null) {
+      container.add(clone)
+      found++
+    }
+  }
+  for (const lines of leafSketchLines) {
+    const clone = buildSketchPreviewClone(lines)
     if (clone !== null) {
       container.add(clone)
       found++

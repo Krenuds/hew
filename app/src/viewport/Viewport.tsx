@@ -109,7 +109,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { collectLeafIds, groupableSelection, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
@@ -4360,11 +4360,12 @@ export default function Viewport({
     function runGroup(nodes: NodeRef[]): bigint | null {
       if (nodes.length === 0) return null
       // Id-space boundary: only nodes with a kernel NodeId may cross into
-      // group_nodes' kind/id arrays. A sketch-scoped ref refuses here with a
-      // typed toast — its id lives in a different slotmap, and slotmaps reuse
-      // bit patterns, so collapsing it to kind 0 could silently mutate an
-      // unrelated live object (see structuralSelection in treeModel.ts).
-      const sel = structuralSelection(nodes)
+      // group_nodes' kind/id arrays — tree members and whole sketches. A
+      // sketch-scoped ref refuses here with a typed toast: its id lives in a
+      // different slotmap, and slotmaps reuse bit patterns, so collapsing it
+      // to kind 0 could silently mutate an unrelated live object (see
+      // groupableSelection in treeModel.ts).
+      const sel = groupableSelection(nodes)
       if (sel === null) {
         handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
         return null
@@ -4396,7 +4397,7 @@ export default function Viewport({
       if (nodes.length === 0) return false
       // Same id-space boundary as runGroup: only nodes with a kernel NodeId
       // may cross into reparent_nodes' kind/id arrays.
-      const sel = structuralSelection(nodes)
+      const sel = groupableSelection(nodes)
       if (sel === null) {
         handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
         return false

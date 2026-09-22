@@ -26,8 +26,8 @@ export function stripTagSuffix(name: string): string {
 
 /**
  * Kind of a document node. `'sketch'` is a whole sketch — a kernel node that
- * carries a name, tags and visibility (`nodeKindToNumber` gives it 3) but is
- * not a tree member (`isTreeMemberKind`). `'sketch-island'` is one of its
+ * carries a name, tags and visibility (`nodeKindToNumber` gives it 3) and can
+ * sit in a group (`isGroupableKind`). `'sketch-island'` is one of its
  * shapes, `'sketch-curve'` a drawn arc/circle, `'sketch-edge'` one line; none
  * of those has a kernel `NodeId`. Sketch geometry ops route through dedicated
  * wasm methods (`delete_sketch`/`sketch_remove_edge`/`pick_sketch`/
@@ -121,6 +121,20 @@ export function collectLeafIds(
     instanceIds.push(...is_)
   }
   return { objectIds, instanceIds }
+}
+
+/**
+ * The whole sketches at or beneath `node` — `collectLeafIds`' sketch column:
+ * the node itself if it is a sketch, or every sketch a group holds at any
+ * depth. What hiding or moving `node` carries along besides its solids.
+ */
+export function collectSketchIds(
+  node: NodeRef,
+  getGroupMembers: (groupId: bigint) => NodeRef[],
+): bigint[] {
+  if (node.kind === 'sketch') return [node.id]
+  if (node.kind !== 'group') return []
+  return getGroupMembers(node.id).flatMap((child) => collectSketchIds(child, getGroupMembers))
 }
 
 /**
@@ -372,19 +386,28 @@ export function isTreeRowDimmed(
 }
 
 /**
- * Whether `kind` is a TREE MEMBER — an object, group, or instance: a node
- * that has a parent, can sit in a group, and is what the structural kernel
- * calls (`group_nodes`, `reparent_nodes`, `delete_selection`,
- * `make_component`, `duplicate_node`, `boolean_nodes`, the node list of
- * `transform_selection`) operate on.
+ * Whether `kind` is a TREE MEMBER — an object, group, or instance: the nodes
+ * EVERY structural kernel call takes (`delete_selection`, `make_component`,
+ * `duplicate_node`, `boolean_nodes`, `extract_item`, the node list of
+ * `transform_selection`).
  *
- * A whole sketch is a kernel node too (`nodeKindToNumber` gives it 3), but
- * not a tree member: the kernel refuses it in every one of those calls with
- * `SketchNodeUnsupported`. Gate structural commands on THIS, never on
+ * A whole sketch is a kernel node too (`nodeKindToNumber` gives it 3) and can
+ * sit in a group (`isGroupableKind`), but those calls refuse it with
+ * `SketchNodeUnsupported`. Gate them on THIS, never on
  * `nodeKindToNumber(kind) >= 0`.
  */
 export function isTreeMemberKind(kind: NodeKind): boolean {
   return kind === 'object' || kind === 'group' || kind === 'instance'
+}
+
+/**
+ * Whether `kind` can sit in a group: a tree member, or a whole sketch. The
+ * gate for `group_nodes` and `reparent_nodes` — Group, and the Outliner's
+ * drag into a group — which take a sketch where the other structural calls
+ * (`isTreeMemberKind`) do not.
+ */
+export function isGroupableKind(kind: NodeKind): boolean {
+  return isTreeMemberKind(kind) || kind === 'sketch'
 }
 
 /**
@@ -414,8 +437,10 @@ export function nodeKindToNumber(kind: NodeKind): number {
 
 /**
  * Collapse a structural selection into the kernel's parallel kind/id arrays
- * (`group_nodes`, `make_component`, …) — or refuse with `null` if ANY node
+ * (`make_component`, `extract_item`, …) — or refuse with `null` if ANY node
  * is not a tree member (a whole sketch, or a sketch-scoped/imprint kind).
+ * `groupableSelection` is the wider collapse `group_nodes`/`reparent_nodes`
+ * take.
  *
  * This is the id-space boundary: sketch handles live in a different slotmap
  * than node ids, and slotmaps reuse bit patterns, so forwarding a sketch id
@@ -430,6 +455,25 @@ export function structuralSelection(
   const ids: bigint[] = []
   for (const n of nodes) {
     if (!isTreeMemberKind(n.kind)) return null
+    kinds.push(nodeKindToNumber(n.kind))
+    ids.push(n.id)
+  }
+  return { kinds: new Uint8Array(kinds), ids: new BigUint64Array(ids) }
+}
+
+/**
+ * `structuralSelection` for the two calls that take a whole sketch —
+ * `group_nodes` and `reparent_nodes`: refuses (`null`) only a sketch-scoped or
+ * imprint kind, which has no kernel node id at all. Same id-space boundary,
+ * same "treat `null` as a typed refusal" contract.
+ */
+export function groupableSelection(
+  nodes: readonly NodeRef[],
+): { kinds: Uint8Array; ids: BigUint64Array } | null {
+  const kinds: number[] = []
+  const ids: bigint[] = []
+  for (const n of nodes) {
+    if (!isGroupableKind(n.kind)) return null
     kinds.push(nodeKindToNumber(n.kind))
     ids.push(n.id)
   }
@@ -512,9 +556,9 @@ export function canGroup(
 ): boolean {
   if (selected.length < 2) return false
 
-  // Only tree members can be grouped — a sketch, or anything sketch-scoped,
-  // in the selection disqualifies it outright (see `structuralSelection`).
-  if (selected.some((n) => !isTreeMemberKind(n.kind))) return false
+  // Tree members and whole sketches can be grouped — anything sketch-scoped
+  // in the selection disqualifies it outright (see `groupableSelection`).
+  if (selected.some((n) => !isGroupableKind(n.kind))) return false
 
   // Deduplicate by kind+id
   const seen = new Set<string>()
@@ -613,8 +657,9 @@ export function canBooleanInComponent(
  * the Model row (move to the top level).
  *
  * Refused (`null`) when:
- * - `dragged` is empty, or any dragged node is not a tree member (a sketch
- *   never reaches `reparent_nodes`; see `structuralSelection`).
+ * - `dragged` is empty, or any dragged node cannot sit in a group (a shape or
+ *   line of a sketch never reaches `reparent_nodes`; see
+ *   `groupableSelection`).
  * - `view.sessionOpen` — a group/component edit session is open; the
  *   kernel refuses `ExplodeSessionScope` regardless of target.
  * - `target` is neither a group row nor `'root'` (an instance row, a
@@ -639,7 +684,7 @@ export function dropTargetFor(
 ): { group: bigint | undefined } | null {
   if (dragged.length === 0) return null
   if (view.sessionOpen) return null
-  if (dragged.some((n) => !isTreeMemberKind(n.kind))) return null
+  if (dragged.some((n) => !isGroupableKind(n.kind))) return null
 
   if (target === 'root') return { group: undefined }
   if (target.kind !== 'group') return null

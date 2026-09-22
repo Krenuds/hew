@@ -23,7 +23,7 @@
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
-import { nodeKindToNumber, collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
+import { nodeKindToNumber, collectLeafIds, collectSketchIds, nodeRefFromJs } from '../panels/treeModel'
 import {
   translationAffine,
   affineToFloat64,
@@ -983,12 +983,16 @@ export function buildNodePreview(
     // `node_leaf_objects` stops at instances (kernel `leaf_objects_under`), so
     // walk the JS tree instead to gather both — otherwise grouped instances
     // are omitted from the drag ghost and freeze in place during the drag.
-    const { objectIds, instanceIds } = collectLeafIds(node, (groupId) =>
-      wasmScene.group_members(groupId).map(nodeRefFromJs),
-    )
+    const getGroupMembers = (groupId: bigint) =>
+      wasmScene.group_members(groupId).map(nodeRefFromJs)
+    const { objectIds, instanceIds } = collectLeafIds(node, getGroupMembers)
     const instanceGroups =
       instanceGroupGetter !== null ? instanceIds.map((id) => instanceGroupGetter(id)) : []
-    return buildMultiPreviewClone(objectsGroup, objectIds, instanceGroups)
+    // The sketches the group holds move with it, so they ghost with it.
+    const sketchLines = collectSketchIds(node, getGroupMembers).map((id) =>
+      wasmScene.sketch_lines(id),
+    )
+    return buildMultiPreviewClone(objectsGroup, objectIds, instanceGroups, sketchLines)
   }
   if (node.kind === 'instance') {
     const group = instanceGroupGetter !== null ? instanceGroupGetter(node.id) : null

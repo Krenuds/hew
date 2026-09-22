@@ -162,6 +162,70 @@ test('dragging an object row onto a group row moves it into the group; undo rest
   ).toBeNull()
 })
 
+test('a sketch row drags into a group, moves with it, and is still inside after a reload', async ({ page }) => {
+  await setup(page)
+  const ids = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const wall = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const walls = h.groupNodes([{ kind: 'object', id: wall }])
+    h.setNodeName('group', walls, 'Walls')
+    const plan = h.drawRectangle([5, 5, 0], [8, 8, 0]).sketch
+    h.setNodeName('sketch', plan, 'Ground floor')
+    return { walls, plan }
+  })
+  const minX = (sketch: string) =>
+    page.evaluate((s) => {
+      const lines = window.__hew_test!.getSketchLines(s)
+      let min = Infinity
+      for (let i = 0; i < lines.length; i += 3) min = Math.min(min, lines[i])
+      return min
+    }, sketch)
+  const planParent = () =>
+    page.evaluate((id) => window.__hew_test!.getNodeParent('sketch', id), ids.plan)
+
+  expect(await planParent()).toBeNull()
+
+  // Real mouse events: carry the "Ground floor" row onto the "Walls" row.
+  const source = await rowFor(page, 'Ground floor').boundingBox()
+  const target = await rowFor(page, 'Walls').boundingBox()
+  if (source === null || target === null) throw new Error('rows not found')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 10 })
+  await page.mouse.up()
+  await page.waitForFunction(
+    (id) => window.__hew_test!.getNodeParent('sketch', id) !== null,
+    ids.plan,
+  )
+  expect(await planParent()).toBe(ids.walls)
+
+  // The row now sits under Walls, which opened for its newly selected
+  // member; closing Walls tucks the plan away with the rest.
+  await expect(rowFor(page, 'Ground floor')).toBeVisible()
+  await rowFor(page, 'Walls').getByText('▾').click()
+  await expect(page.getByText('Ground floor', { exact: true })).toHaveCount(0)
+  await rowFor(page, 'Walls').getByText('▸').click()
+  await expect(rowFor(page, 'Ground floor')).toBeVisible()
+
+  // Moving the group moves the plan; one undo puts it back.
+  expect(await minX(ids.plan)).toBeCloseTo(5)
+  await page.evaluate((g) => window.__hew_test!.moveGroup(g, 10, 0, 0), ids.walls)
+  expect(await minX(ids.plan)).toBeCloseTo(15)
+  await page.evaluate(() => window.__hew_test!.undo())
+  expect(await minX(ids.plan)).toBeCloseTo(5)
+
+  // Save, reopen: still inside.
+  const bytes = await page.evaluate(() => window.__hew_test!.save())
+  await page.evaluate((b) => window.__hew_test!.load(b), bytes)
+  const reloaded = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const plan = h.getSketchIds()[0]
+    return h.getNodeParent('sketch', plan)
+  })
+  expect(reloaded).not.toBeNull()
+  expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
+})
+
 test('the root Model row\'s eye hides the whole document and restores it', async ({ page }) => {
   await setup(page)
   await page.evaluate(() => {

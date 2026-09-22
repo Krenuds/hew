@@ -215,12 +215,16 @@ A Sketch is a **node**: it carries a display name, tag paths and
 user-hidden view state exactly as an Object, Group or Instance does, through
 the same node-keyed calls (`NodeId::Sketch`). It is what a user organizes a
 drawing by — one named row in the outliner, with its shapes nested
-underneath. It is not a tree *member*: no group or definition lists one, it
-has no parent, and every operation that works on the tree below a node
-(grouping, reparenting, duplicating, make-component, booleans, annotation
-anchors) refuses it with a typed `SketchNodeUnsupported`. A hidden sketch
-leaves the inference scene as a hidden solid does, so nothing snaps to it and
-a click passes through it.
+underneath. A world sketch can sit in a group: the group carries it when it
+moves, duplicates or is deleted, and editing the group surfaces it with the
+other members. The membership is recorded on the sketch (`sketch_parent`),
+never in a group's member list, so a sketch consumed by an extrusion or
+deleted simply drops out of its group and returns to it through undo. The
+operations that cannot carry a sketch — booleans, make-component, the
+library copy, annotation anchors — refuse it, and refuse a group holding
+one, with a typed `SketchNodeUnsupported`. A hidden sketch leaves the
+inference scene as a hidden solid does, so nothing snaps to it and a click
+passes through it.
 
 Which sketch a stroke joins is the editor's concern, not the kernel's: the
 kernel lets any number of sketches share a plane, and the draw tools
