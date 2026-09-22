@@ -4335,9 +4335,9 @@ impl Scene {
     /// # Errors
     /// - `BadNodeList` — `kinds`/`ids` differ in length, or the list is
     ///   empty.
-    /// - `BadNodeKind` — an entry names a kind other than 0/1/2.
-    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance` — a listed node
-    ///   is not a live world node.
+    /// - `BadNodeKind` — an entry names a kind other than 0/1/2/3.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownSketch`
+    ///   — a listed node is not a live world node.
     /// - `UnknownGroup` — `group` is not a live group.
     /// - `GroupCycle` — `group` is one of the moved nodes or lies inside
     ///   one (a group can't end up inside itself).

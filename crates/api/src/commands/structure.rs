@@ -7,7 +7,7 @@
 //! which then fails the balance check). These handlers just open/close
 //! the frame the resolved id names.
 
-use super::entity::{resolve_node, unknown_entity};
+use super::entity::{resolve_meta_node, resolve_node, unknown_entity};
 use super::{CmdError, Ctx, Handler};
 use crate::refusal::Refusal;
 use kernel::{EntityRef, NodeId, Transform};
@@ -40,10 +40,11 @@ struct MembersParams {
 fn group_create(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: MembersParams =
         serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    // A sketch can sit in a group, so grouping takes the wider resolver.
     let nodes: Vec<NodeId> = p
         .members
         .iter()
-        .map(|id| resolve_node(ctx, id))
+        .map(|id| resolve_meta_node(ctx, id))
         .collect::<Result<_, _>>()?;
     let (group, _) = ctx.doc.group_nodes(&nodes)?;
     let resolver = ctx.resolver();
@@ -102,13 +103,13 @@ fn group_reparent(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if p.ids.is_empty() {
         return Err(CmdError::Refusal(Refusal::api(
             "empty_ids",
-            "Select at least one object, group, or component instance to move.",
+            "Select at least one object, group, component instance, or sketch to move.",
         )));
     }
     let nodes: Vec<NodeId> = p
         .ids
         .iter()
-        .map(|id| resolve_node(ctx, id))
+        .map(|id| resolve_meta_node(ctx, id))
         .collect::<Result<_, _>>()?;
     let parent = match &p.parent {
         Some(id) => match ctx.resolver().resolve(id) {

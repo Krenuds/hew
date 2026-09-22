@@ -55,10 +55,10 @@ pub(crate) fn resolve_node(ctx: &Ctx, id: &str) -> Result<NodeId, CmdError> {
     }
 }
 
-/// Resolves a public id to a node that carries a name and tags: a tree node,
-/// or a sketch. Wider than [`resolve_node`] on purpose — a sketch is a node
-/// but not a tree member, so the structural and transform commands keep the
-/// narrower resolver and never see one.
+/// Resolves a public id to any node: an object, group, instance, or sketch.
+/// Wider than [`resolve_node`] on purpose — naming, tagging, grouping and
+/// reparenting take a sketch; the commands the kernel refuses one for
+/// (component, boolean, transform-by-node) keep the narrower resolver.
 pub(crate) fn resolve_meta_node(ctx: &Ctx, id: &str) -> Result<NodeId, CmdError> {
     match ctx.resolver().resolve(id) {
         Some(EntityRef::Sketch(s)) => Ok(NodeId::Sketch(s)),

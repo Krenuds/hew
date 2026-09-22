@@ -1,18 +1,18 @@
 //! Executable specs for the SKETCH NODE: `NodeId::Sketch`.
 //!
-//! A sketch is a node — the unit a name, tags and visibility hang on — but it
-//! is not a member of the tree. No group or definition lists one, it has no
-//! parent, and `top_level_nodes` does not return it. Every op that would make
-//! it a member, or that works on the tree below a node, refuses it with a
-//! typed `SketchNodeUnsupported` and leaves the document untouched.
+//! A sketch is a node — the unit a name, tags and visibility hang on. It can
+//! sit in a group (`sketch_in_group_specs.rs`), but `top_level_nodes` does
+//! not return it and no stored member list names it. The ops that cannot
+//! carry one refuse it with a typed `SketchNodeUnsupported` and leave the
+//! document untouched.
 //!
 //! Sections:
 //!
 //! 1. What a sketch node answers: liveness, parent, leaves.
-//! 2. Every structural op refuses it, touching nothing.
+//! 2. The ops that cannot carry it refuse, touching nothing.
 //! 3. The sketch-specific paths are unaffected.
 //! 4. Name, tags and user-hidden: set, undone, swept with the tag registry.
-//! 5. Persistence: manifest v18, written only when set, gated one way.
+//! 5. Persistence: written only when set, gated one way at manifest v18.
 //! 6. Name and tags ride every whole-sketch copy.
 //! 7. Scenes capture and restore a hidden sketch.
 
@@ -85,7 +85,7 @@ fn refuses_untouched<T: std::fmt::Debug>(
 // ================================================ 1. what the node answers
 
 #[test]
-fn a_sketch_node_has_no_parent_and_no_leaves() {
+fn a_loose_sketch_node_has_no_parent_and_no_leaves() {
     let (doc, _, s) = box_and_sketch();
     let node = NodeId::Sketch(s);
 
@@ -94,37 +94,17 @@ fn a_sketch_node_has_no_parent_and_no_leaves() {
     assert!(doc.leaf_instances_under(node).is_empty());
 }
 
-/// Not a tree member: the tree's own listing does not return it, so nothing
-/// that walks the tree — save, the outliner, a scene — can meet one.
+/// The top-level listing names objects, groups and instances; sketches are
+/// listed as sketches, whether or not a group holds them.
 #[test]
-fn the_tree_does_not_list_sketches() {
+fn the_top_level_listing_does_not_name_sketches() {
     let (doc, o, s) = box_and_sketch();
 
     assert_eq!(doc.top_level_nodes(), vec![NodeId::Object(o)]);
     assert!(doc.sketch_ids().contains(&s), "it is listed as a sketch");
 }
 
-// ============================================ 2. structural ops refuse it
-
-#[test]
-fn grouping_refuses_a_sketch() {
-    let (mut doc, o, s) = box_and_sketch();
-    refuses_untouched(&mut doc, "group_nodes", |d| {
-        d.group_nodes(&[NodeId::Object(o), NodeId::Sketch(s)])
-    });
-}
-
-#[test]
-fn reparenting_refuses_a_sketch() {
-    let (mut doc, o, s) = box_and_sketch();
-    let o2 = a_box(&mut doc, 2.0);
-    let (g, _) = doc
-        .group_nodes(&[NodeId::Object(o), NodeId::Object(o2)])
-        .expect("a group to move into");
-    refuses_untouched(&mut doc, "reparent_nodes", |d| {
-        d.reparent_nodes(&[NodeId::Sketch(s)], Some(g))
-    });
-}
+// ================================= 2. ops that cannot carry it refuse
 
 /// A sketch is deleted as a sketch. The node-delete door refuses it, alone
 /// or in a batch — and a refused batch rolls back the members before it.
@@ -423,7 +403,7 @@ fn an_unnamed_visible_sketch_writes_no_new_keys() {
     let (doc, _, _) = box_and_sketch();
     let manifest = manifest_json(&doc.save());
 
-    assert_eq!(manifest["format_version"], 18);
+    assert_eq!(manifest["format_version"], kernel::MANIFEST_FORMAT_VERSION);
     let sketch = &manifest["sketches"][0];
     for key in ["name", "tags", "hidden"] {
         assert!(sketch.get(key).is_none(), "`{key}` is absent when unset");

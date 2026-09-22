@@ -63,12 +63,12 @@ use crate::tol;
 use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
-/// Why a walk over tree member lists never meets a [`NodeId::Sketch`]: a
-/// sketch is a node (it has a name, tags and visibility) but not a tree
-/// MEMBER — no group or definition lists one, and every op that would add
-/// one refuses with [`DocumentError::SketchNodeUnsupported`].
-/// `debug_validate_tree` holds the invariant.
-pub(crate) const SKETCH_NOT_A_MEMBER: &str = "a sketch is never a tree member";
+/// Why a walk over a stored member list never meets a [`NodeId::Sketch`]: a
+/// sketch can sit in a group, but its membership is its own parent entry
+/// (`Document::sketch_parent`) — no `GroupRecord.members` or
+/// `ComponentDef.members` list names one. Walks that must reach a group's
+/// sketches go through [`Document::group_members`] or `collect_subtree`.
+pub(crate) const SKETCH_NOT_A_MEMBER: &str = "a stored member list never names a sketch";
 
 /// A node in the document tree (ARCHITECTURE.md): either a solid Object or a
 /// merge [`Group`](GroupRecord). This is the unit of selection, picking, and
@@ -83,9 +83,10 @@ pub enum NodeId {
     /// [`ComponentDef`] at a per-instance pose (ARCHITECTURE.md).
     Instance(InstanceId),
     /// A sketch: a named 2D drawing. It carries a name, tags and
-    /// visibility like any other node, but it is not yet a member of the
-    /// tree — it has no parent, no group lists it, and every structural op
-    /// refuses it with [`DocumentError::SketchNotInTree`].
+    /// visibility like any other node, and a world sketch can sit in a
+    /// group. The ops that cannot carry one — booleans, Make Component,
+    /// the library copy — refuse with
+    /// [`DocumentError::SketchNodeUnsupported`].
     Sketch(SketchId),
 }
 
@@ -352,6 +353,8 @@ struct CreatedClone {
     objects: Vec<ObjectId>,
     groups: Vec<GroupId>,
     instances: Vec<InstanceId>,
+    /// The sketches cloned groups hold.
+    sketches: Vec<SketchId>,
 }
 
 /// An open sketch-drawing gesture: the snapshot taken at
@@ -446,9 +449,11 @@ struct ExplodeSession {
 struct GroupSession {
     /// The group the user entered.
     group: GroupId,
-    /// Direct members at open time, in `GroupRecord.members` order. The
-    /// hidden group's own stored list is never edited mid-session, so this
-    /// equals `GroupRecord.members` for the session's whole duration.
+    /// Direct members at open time: `GroupRecord.members` in order, then the
+    /// group's sketches ([`Document::group_members`]). The hidden group's
+    /// own stored list is never edited mid-session, so this minus its
+    /// sketches equals `GroupRecord.members` for the session's whole
+    /// duration.
     members: Vec<NodeId>,
     /// `self.undo.actions.len()` immediately after `GroupSessionOpened`
     /// was pushed — the fold-in boundary, exactly like
@@ -963,6 +968,9 @@ enum DocAction {
         /// exact undo. `None` at the top level, whose order derives from the
         /// slotmap and is unaffected by reparenting.
         prev_parent_members: Option<Vec<NodeId>>,
+        /// The sketches grouped along with `members`. A group's member list
+        /// never names a sketch, so undo and redo move exactly these.
+        sketches: Vec<SketchId>,
     },
     /// `ungroup` dissolved a group. The exact inverse of [`DocAction::Grouped`]:
     /// undo re-forms the group, redo dissolves it again.
@@ -988,6 +996,9 @@ enum DocAction {
         group: GroupId,
         parent: Option<GroupId>,
         prev_parent_members: Option<Vec<NodeId>>,
+        /// Every sketch the group held, tombstoned ones included, moved up
+        /// to `parent` with the other members — see [`DocAction::Grouped`].
+        sketches: Vec<SketchId>,
         /// The exact before/after `detached` snapshot of every annotation
         /// [`Document::reevaluate_liveness_recorded`] changed for the
         /// dissolved `group` node itself (its members are reparented, not
@@ -1083,6 +1094,8 @@ enum DocAction {
         groups: Vec<GroupId>,
         /// Every instance created by the clone.
         instances: Vec<InstanceId>,
+        /// Every sketch created by the clone — the ones a cloned Group holds.
+        sketches: Vec<SketchId>,
     },
     /// `duplicate_nodes_array` (the Move tool's ×N / /N array copy)
     /// deep-cloned a selection `count` times along a step transform, as **one
@@ -1100,6 +1113,8 @@ enum DocAction {
         groups: Vec<GroupId>,
         /// Every instance created across all clones.
         instances: Vec<InstanceId>,
+        /// Every sketch created across all clones.
+        sketches: Vec<SketchId>,
     },
     /// `add_guide_line`/`add_guide_point` created a construction guide.
     /// Undo hides it; redo unhides. The `GuideId` stays stable.
@@ -1305,7 +1320,7 @@ enum DocAction {
     /// frame; redo re-applies the posture and re-pushes the frame.
     GroupSessionOpened {
         group: GroupId,
-        /// Direct members at open, in `GroupRecord.members` order.
+        /// Direct members at open — [`GroupSession::members`].
         members: Vec<NodeId>,
         /// The exact before/after `detached` snapshot of every annotation
         /// [`Document::reevaluate_liveness_recorded`] changed when the
@@ -1327,9 +1342,9 @@ enum DocAction {
         group: GroupId,
         /// The session's fold-in boundary, to reinstall the frame on undo.
         undo_len_at_open: usize,
-        /// The group's member list at open (unchanged through the session
-        /// — a hidden group's list is never edited mid-session), restored
-        /// by undo together with the reinstalled frame.
+        /// The session's member list at open ([`GroupSession::members`],
+        /// sketches included), restored by undo together with the
+        /// reinstalled frame.
         prev_members: Vec<NodeId>,
         /// The member list the close installed: survivors in original
         /// order, then fold-ins in creation order.
@@ -1984,8 +1999,12 @@ impl DocAction {
                     (Vec::new(), Vec::new())
                 }
             }
-            DocAction::Duplicated { objects, .. } => (objects.clone(), Vec::new()),
-            DocAction::DuplicatedArray { objects, .. } => (objects.clone(), Vec::new()),
+            DocAction::Duplicated {
+                objects, sketches, ..
+            }
+            | DocAction::DuplicatedArray {
+                objects, sketches, ..
+            } => (objects.clone(), sketches.clone()),
             DocAction::Exploded {
                 created,
                 created_sketches,
@@ -3023,6 +3042,14 @@ pub struct Document {
     /// and no tags is never kept. Persisted as `sketches[].name` / `.tags`
     /// (manifest v18+).
     sketch_meta: BTreeMap<SketchId, SketchMeta>,
+    /// The group a world sketch sits in — the child half of the
+    /// parent/members relation, and the ONLY half: a group's `members` never
+    /// lists a sketch. A group's sketches are derived from this table
+    /// ([`Document::group_sketches`]), so a tombstoned sketch simply drops
+    /// out and returns with its undo, no member list to splice. A
+    /// definition-owned sketch has no entry. Persisted as
+    /// `sketches[].parent` (manifest v19+).
+    sketch_parent: BTreeMap<SketchId, GroupId>,
     /// The working camera view at last save (manifest v13+; docs/design/
     /// camera.md §5): `None` for a document that never had one saved (every
     /// pre-v13 file, and a brand-new in-memory `Document` before the app's
@@ -3663,6 +3690,12 @@ impl Document {
                 .copied()
                 .filter(|id| self.sketches.contains_key(*id) && !self.hidden_sketches.contains(id))
                 .collect(),
+            sketch_parent: self
+                .sketch_parent
+                .iter()
+                .filter(|&(id, _)| self.node_live(NodeId::Sketch(*id)))
+                .map(|(&id, &gid)| (id, gid))
+                .collect(),
             guides,
             annotations,
             roots,
@@ -4138,6 +4171,17 @@ impl Document {
                         "the document expands beyond {MAX_EXPANDED_PLACEMENTS} placements"
                     ),
                 });
+            }
+        }
+
+        // ── 6c. Sketch parents (manifest v19+): `raw.sketch_parent` runs
+        // parallel to the sketch list and is `None` for every sketch in a
+        // pre-v19 file. Decode already checked the range and that neither
+        // side is definition-owned, so resolution here cannot dangle.
+        for (i, parent_dense) in raw.sketch_parent.iter().enumerate() {
+            if let Some(gd) = parent_dense {
+                doc.sketch_parent
+                    .insert(sketch_ids[i], grp_ids[*gd as usize]);
             }
         }
 
@@ -5542,6 +5586,11 @@ impl Document {
                 NodeId::Group(id) => {
                     if !self.group_is_live(id) {
                         return Err(DocumentError::UnknownGroup);
+                    }
+                    // The copy does not carry world sketches; a group that
+                    // holds one is refused rather than copied without it.
+                    if self.subtree_has_sketch(node) {
+                        return Err(DocumentError::SketchNodeUnsupported);
                     }
                 }
                 NodeId::Instance(id) => {
@@ -8123,13 +8172,27 @@ impl Document {
             .collect()
     }
 
-    /// Direct members of a visible group, in order, or `None` if the group is
-    /// stale or hidden.
+    /// Direct members of a visible group, or `None` if the group is stale or
+    /// hidden: its objects, groups and instances in their stored order, then
+    /// its sketches ([`Document::group_sketches`]).
     pub fn group_members(&self, group: GroupId) -> Option<Vec<NodeId>> {
         match self.groups.get(group) {
-            Some(rec) if !rec.hidden => Some(rec.members.clone()),
+            Some(rec) if !rec.hidden => {
+                let mut members = rec.members.clone();
+                members.extend(self.group_sketches(group).into_iter().map(NodeId::Sketch));
+                Some(members)
+            }
             _ => None,
         }
+    }
+
+    /// The live sketches sitting directly in `group`, in handle order.
+    pub fn group_sketches(&self, group: GroupId) -> Vec<SketchId> {
+        self.sketch_parent
+            .iter()
+            .filter(|&(s, &g)| g == group && self.node_live(NodeId::Sketch(*s)))
+            .map(|(&s, _)| s)
+            .collect()
     }
 
     /// The containing group of a node, or `None` if it is top-level (or the
@@ -8139,7 +8202,12 @@ impl Document {
             NodeId::Object(id) => self.objects.get(id).filter(|r| !r.hidden)?.group_parent(),
             NodeId::Group(id) => self.groups.get(id).filter(|r| !r.hidden)?.parent,
             NodeId::Instance(id) => self.instances.get(id).filter(|r| !r.hidden)?.parent,
-            NodeId::Sketch(_) => None,
+            NodeId::Sketch(id) => {
+                if self.hidden_sketches.contains(&id) {
+                    return None;
+                }
+                self.sketch_parent.get(&id).copied()
+            }
         }
     }
 
@@ -8279,7 +8347,29 @@ impl Document {
             for m in members {
                 self.collect_subtree(m, out);
             }
+            out.extend(self.group_sketches(id).into_iter().map(NodeId::Sketch));
         }
+    }
+
+    /// Every live sketch at or beneath `node`, in pre-order — the sketch
+    /// analog of [`Document::leaf_objects_under`]: what a transform of `node`
+    /// must carry along.
+    pub fn leaf_sketches_under(&self, node: NodeId) -> Vec<SketchId> {
+        let mut subtree = Vec::new();
+        self.collect_subtree(node, &mut subtree);
+        subtree
+            .into_iter()
+            .filter_map(|n| match n {
+                NodeId::Sketch(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a live sketch sits anywhere at or beneath `node`. The ops that
+    /// cannot carry a sketch refuse on this rather than drop it silently.
+    fn subtree_has_sketch(&self, node: NodeId) -> bool {
+        !self.leaf_sketches_under(node).is_empty()
     }
 
     // ----------------------------------------------- components & instances
@@ -8965,7 +9055,14 @@ impl Document {
             NodeId::Object(id) => self.objects[id].owner = ObjectOwner::World { parent },
             NodeId::Group(id) => self.groups[id].parent = parent,
             NodeId::Instance(id) => self.instances[id].parent = parent,
-            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+            NodeId::Sketch(id) => match parent {
+                Some(group) => {
+                    self.sketch_parent.insert(id, group);
+                }
+                None => {
+                    self.sketch_parent.remove(&id);
+                }
+            },
         }
     }
 
@@ -10794,7 +10891,7 @@ impl Document {
                 NodeId::Object(id) => self.objects[id].hidden = true,
                 NodeId::Group(id) => self.groups[id].hidden = true,
                 NodeId::Instance(_) => unreachable!("instance operands were refused"),
-                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+                NodeId::Sketch(_) => unreachable!("sketch operands were refused"),
             }
         }
         let reanchored = self.reevaluate_liveness_recorded(&hidden_operands);
@@ -10871,6 +10968,11 @@ impl Document {
         // in its subtree.
         if matches!(node, NodeId::Instance(_)) || !self.leaf_instances_under(node).is_empty() {
             return Err(DocumentError::BooleanOperandHasInstance);
+        }
+        // A boolean consumes its operand subtree, and a sketch is not
+        // something it can consume — refused, never dropped.
+        if self.subtree_has_sketch(node) {
+            return Err(DocumentError::SketchNodeUnsupported);
         }
         let leaves = self.leaf_objects_under(node);
         if leaves.is_empty() {
@@ -11928,9 +12030,6 @@ impl Document {
             }
         }
         for &m in members {
-            if matches!(m, NodeId::Sketch(_)) {
-                return Err(DocumentError::SketchNodeUnsupported);
-            }
             if !self.node_is_live(m) {
                 return Err(match m {
                     NodeId::Object(_) => DocumentError::UnknownObject,
@@ -11945,9 +12044,20 @@ impl Document {
             return Err(DocumentError::MixedParents);
         }
 
+        // A sketch's membership lives on the sketch (`sketch_parent`), so
+        // the stored member list holds the other kinds only.
+        let sketches: Vec<SketchId> = members
+            .iter()
+            .filter_map(|m| match m {
+                NodeId::Sketch(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        let listed = listed_members(members);
+
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
         let group = self.insert_group_record(GroupRecord {
-            members: members.to_vec(),
+            members: listed.clone(),
             parent,
             owner_def: None,
             hidden: false,
@@ -11958,13 +12068,19 @@ impl Document {
             self.set_node_parent(m, Some(group));
         }
         if let Some(pg) = parent {
-            self.splice_in_parent(pg, members, NodeId::Group(group));
+            if listed.is_empty() {
+                // Nothing in the parent's list to take the group's place.
+                self.groups[pg].members.push(NodeId::Group(group));
+            } else {
+                self.splice_in_parent(pg, &listed, NodeId::Group(group));
+            }
         }
 
         self.undo.push(DocAction::Grouped {
             group,
             parent,
             prev_parent_members,
+            sketches,
         });
         self.commit_new_action();
         self.debug_validate();
@@ -12014,9 +12130,6 @@ impl Document {
             return Err(DocumentError::UnknownGroup);
         }
         for &node in nodes {
-            if matches!(node, NodeId::Sketch(_)) {
-                return Err(DocumentError::SketchNodeUnsupported);
-            }
             if !self.node_is_live(node) {
                 return Err(match node {
                     NodeId::Object(_) => DocumentError::UnknownObject,
@@ -12072,11 +12185,18 @@ impl Document {
         let prev_parent = self.node_parent(node);
         let prev_parent_before = prev_parent.map(|pg| self.groups[pg].members.clone());
         let next_parent_before = next_parent.map(|pg| self.groups[pg].members.clone());
-        if let Some(pg) = prev_parent {
+        // A sketch is in no member list: its parent entry is the whole move,
+        // and the four recorded lists are equal pairs.
+        let listed = !matches!(node, NodeId::Sketch(_));
+        if let Some(pg) = prev_parent
+            && listed
+        {
             self.splice_out_parent(pg, node, &[]);
         }
         self.set_node_parent(node, next_parent);
-        if let Some(pg) = next_parent {
+        if let Some(pg) = next_parent
+            && listed
+        {
             self.groups[pg].members.push(node);
         }
         let prev_parent_after = prev_parent.map(|pg| self.groups[pg].members.clone());
@@ -12132,8 +12252,16 @@ impl Document {
             self.explode_scope_node(NodeId::Group(group))?;
         }
         let parent = self.groups[group].parent;
-        let members = self.groups[group].members.clone();
+        let mut members = self.groups[group].members.clone();
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
+        // Tombstoned sketches move up too: one that returns through a later
+        // undo must not come back inside a dissolved group.
+        let sketches: Vec<SketchId> = self
+            .sketch_parent
+            .iter()
+            .filter(|&(_, &g)| g == group)
+            .map(|(&s, _)| s)
+            .collect();
 
         for &m in &members {
             self.set_node_parent(m, parent);
@@ -12141,13 +12269,18 @@ impl Document {
         if let Some(pg) = parent {
             self.splice_out_parent(pg, NodeId::Group(group), &members);
         }
+        for &s in &sketches {
+            self.set_node_parent(NodeId::Sketch(s), parent);
+        }
         self.groups[group].hidden = true;
 
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Group(group)]);
+        members.extend(sketches.iter().map(|&s| NodeId::Sketch(s)));
         self.undo.push(DocAction::Ungrouped {
             group,
             parent,
             prev_parent_members,
+            sketches,
             reanchored,
         });
         self.commit_new_action();
@@ -12199,7 +12332,11 @@ impl Document {
                 NodeId::Object(id) => self.objects[id].hidden = true,
                 NodeId::Group(id) => self.groups[id].hidden = true,
                 NodeId::Instance(id) => self.instances[id].hidden = true,
-                NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+                // A sketch the deleted group holds goes with it. Its parent
+                // entry stays, so undo returns it to the same group.
+                NodeId::Sketch(id) => {
+                    self.hidden_sketches.insert(id);
+                }
             }
         }
         if let Some(pg) = parent {
@@ -12302,6 +12439,9 @@ impl Document {
         // exact undo) rather than the instance-blind `Transform`; before this
         // fix an instance member silently stayed put while its group moved.
         let instances = self.leaf_instances_under(NodeId::Group(group));
+        // The sketches the group holds, at any depth, bake `t` like its leaf
+        // objects do — a plan moves with the walls drawn over it.
+        let sketches = self.leaf_sketches_under(NodeId::Group(group));
 
         // Snapshot every leaf's PRE-transform state before mutating anything
         // (rule 9 posture: undo restores this verbatim, never a recomputed
@@ -12310,24 +12450,29 @@ impl Document {
             .iter()
             .map(|&id| (id, self.objects[id].object.clone()))
             .collect();
+        let pre_sketches: Vec<(SketchId, Sketch)> = sketches
+            .iter()
+            .map(|&id| (id, self.sketches[id].clone()))
+            .collect();
 
-        // `t` is invertible and non-reflecting, so per-leaf apply cannot fail
-        // for geometric reasons. Should one somehow err, roll back the leaves
-        // already baked to preserve the strong guarantee.
-        let mut done: Vec<ObjectId> = Vec::new();
+        // A per-target failure (a reflecting `t` hitting a baked target) can
+        // only happen on the first bake — but roll back whatever was already
+        // baked either way, to preserve the strong guarantee.
+        let mut baked_objects: Vec<ObjectId> = Vec::new();
+        let mut baked_sketches: Vec<SketchId> = Vec::new();
         for &obj in &leaves {
-            match self.objects[obj].object.apply_transform(t) {
-                Ok(()) => done.push(obj),
-                Err(e) => {
-                    for &d in &done {
-                        self.objects[d]
-                            .object
-                            .apply_transform(&inverse)
-                            .expect("inverse of a validated transform must re-apply");
-                    }
-                    return Err(DocumentError::Transform(e));
-                }
+            if let Err(e) = self.objects[obj].object.apply_transform(t) {
+                self.rollback_selection_bakes(&baked_objects, &baked_sketches, &inverse);
+                return Err(DocumentError::Transform(e));
             }
+            baked_objects.push(obj);
+        }
+        for &s in &sketches {
+            if let Err(e) = self.sketches[s].apply_transform(t) {
+                self.rollback_selection_bakes(&baked_objects, &baked_sketches, &inverse);
+                return Err(DocumentError::Transform(e));
+            }
+            baked_sketches.push(s);
         }
 
         // A group holds no vertex geometry of its own, but the bake above
@@ -12355,7 +12500,7 @@ impl Document {
         let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::TransformSelection {
             objects: pre_objects,
-            sketches: Vec::new(),
+            sketches: pre_sketches,
             instances: instance_prevs,
             forward: *t,
             reanchored,
@@ -12365,7 +12510,7 @@ impl Document {
 
         Ok(DocChange {
             objects_touched: leaves,
-            sketches_touched: Vec::new(),
+            sketches_touched: sketches,
             groups_touched: vec![group],
             instances_touched: instances,
             components_touched: Vec::new(),
@@ -12468,6 +12613,15 @@ impl Document {
         for &s in sketches {
             if sketch_set.insert(s) {
                 sketch_targets.push(s);
+            }
+        }
+        // A listed group carries the sketches it holds; one also listed by
+        // hand above moves once.
+        for &node in nodes {
+            for s in self.leaf_sketches_under(node) {
+                if sketch_set.insert(s) {
+                    sketch_targets.push(s);
+                }
             }
         }
 
@@ -12779,6 +12933,7 @@ impl Document {
                 let mut object_ids: Vec<ObjectId> = Vec::new();
                 let mut instance_ids: Vec<InstanceId> = Vec::new();
                 let mut group_ids: Vec<GroupId> = Vec::new();
+                let mut sketch_ids: Vec<SketchId> = Vec::new();
                 for n in scope {
                     // Deleted members, and members that left the world
                     // (consumed into a definition mid-session), do not
@@ -12793,15 +12948,15 @@ impl Document {
                             NodeId::Object(id) => object_ids.push(id),
                             NodeId::Instance(id) => instance_ids.push(id),
                             NodeId::Group(id) => group_ids.push(id),
-                            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+                            NodeId::Sketch(id) => sketch_ids.push(id),
                         }
                     }
                 }
-                // Sketches drawn while the session is open resize with it;
-                // pre-existing world sketches are outside geometry. (The
-                // component arm's scope list already includes its
-                // definition-owned and mid-session sketches.)
-                let mut sketch_ids: Vec<SketchId> = Vec::new();
+                // Sketches the open group holds resize with it, and so do
+                // sketches drawn while the session is open; other world
+                // sketches are outside geometry. (The component arm's scope
+                // list already includes its definition-owned and
+                // mid-session sketches.)
                 for action in &self.undo.actions[undo_len..] {
                     for s in action.created_objects_and_sketches().1 {
                         if !sketch_ids.contains(&s) {
@@ -12987,7 +13142,9 @@ impl Document {
             }
         }
         for &m in members {
-            if matches!(m, NodeId::Sketch(_)) {
+            // A definition does not yet take a world sketch in — not as a
+            // member, and not inside a member group.
+            if self.subtree_has_sketch(m) {
                 return Err(DocumentError::SketchNodeUnsupported);
             }
             if !self.node_is_live(m) {
@@ -15035,7 +15192,7 @@ impl Document {
                 .instances
                 .get(id)
                 .is_some_and(|r| !r.hidden && r.parent.is_none()),
-            NodeId::Sketch(_) => false,
+            NodeId::Sketch(id) => self.node_is_live(node) && !self.sketch_parent.contains_key(&id),
         }
     }
 
@@ -15071,7 +15228,7 @@ impl Document {
             return Err(DocumentError::ExplodeSessionNestedGroup);
         }
 
-        let members = self.groups[group].members.clone();
+        let members = self.group_members(group).expect("group checked live above");
         for &m in &members {
             self.set_node_parent(m, None);
         }
@@ -15118,7 +15275,7 @@ impl Document {
         // world, stays where it is.
         let created = self.nodes_surfaced_since(session.undo_len_at_open);
 
-        let prev_members = self.groups[session.group].members.clone();
+        let prev_members = session.members.clone();
 
         // Survivors in original order, then fold-ins in creation order. An
         // original member re-created in `created` cannot happen (creation
@@ -15138,7 +15295,7 @@ impl Document {
         for &m in &members {
             self.set_node_parent(m, Some(session.group));
         }
-        self.groups[session.group].members = members.clone();
+        self.groups[session.group].members = listed_members(&members);
 
         // An emptied group (every member deleted or consumed mid-session,
         // nothing folded in) does not survive the close: it stays hidden —
@@ -15355,8 +15512,12 @@ impl Document {
                     out.push(n);
                 }
             }
-            if let DocAction::Ungrouped { group, .. } = action {
-                for &m in &self.groups[*group].members {
+            if let DocAction::Ungrouped {
+                group, sketches, ..
+            } = action
+            {
+                let released = self.groups[*group].members.iter().copied();
+                for m in released.chain(sketches.iter().map(|&s| NodeId::Sketch(s))) {
                     if !out.contains(&m) {
                         out.push(m);
                     }
@@ -15423,10 +15584,10 @@ impl Document {
     }
 
     /// [`Document::explode_scope_object`]'s sketch analog. A GROUP frame
-    /// deliberately does not restrict sketch operands: world sketches are
-    /// global (a group owns none), there is no pose to corrupt, and
-    /// extruding any of them mid-session simply folds the result in —
-    /// SketchUp's "what you draw while editing goes into the context".
+    /// deliberately does not restrict sketch operands: a world sketch is
+    /// drawable from anywhere, there is no pose to corrupt, and extruding
+    /// any of them mid-session simply folds the result in — SketchUp's
+    /// "what you draw while editing goes into the context".
     fn explode_scope_sketch(&self, sketch: SketchId) -> Result<(), DocumentError> {
         if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
             return Ok(());
@@ -15623,25 +15784,7 @@ impl Document {
         let root = match self.clone_subtree(node, parent, placement, &mut created) {
             Ok(root) => root,
             Err(e) => {
-                // Roll back any records inserted before the failure so the
-                // document is untouched on error (strong guarantee). Nothing
-                // outside `created` has been mutated yet.
-                for o in created.objects {
-                    self.objects.remove(o);
-                    self.sids.remove(&EntityRef::Object(o));
-                    self.attrs.remove(&AttrTarget::Entity(EntityRef::Object(o)));
-                }
-                for g in created.groups {
-                    self.groups.remove(g);
-                    self.sids.remove(&EntityRef::Group(g));
-                    self.attrs.remove(&AttrTarget::Entity(EntityRef::Group(g)));
-                }
-                for i in created.instances {
-                    self.instances.remove(i);
-                    self.sids.remove(&EntityRef::Instance(i));
-                    self.attrs
-                        .remove(&AttrTarget::Entity(EntityRef::Instance(i)));
-                }
+                self.discard_created_clone(created);
                 return Err(e);
             }
         };
@@ -15657,6 +15800,7 @@ impl Document {
             objects: created.objects.clone(),
             groups: created.groups.clone(),
             instances: created.instances.clone(),
+            sketches: created.sketches.clone(),
         });
         self.commit_new_action();
         self.debug_validate();
@@ -15665,6 +15809,7 @@ impl Document {
             objects_touched: created.objects,
             groups_touched: created.groups,
             instances_touched: created.instances,
+            sketches_touched: created.sketches,
             ..Default::default()
         };
         change.groups_touched.extend(parent);
@@ -15762,26 +15907,9 @@ impl Document {
                 match self.clone_subtree(node, parent, &placement, &mut created) {
                     Ok(root) => roots.push((root, parent)),
                     Err(e) => {
-                        // Roll back every record inserted so far so the
-                        // document is untouched on error (strong guarantee).
-                        // Nothing outside `created` has been mutated yet —
-                        // roots are appended to parents only after the loop.
-                        for o in created.objects {
-                            self.objects.remove(o);
-                            self.sids.remove(&EntityRef::Object(o));
-                            self.attrs.remove(&AttrTarget::Entity(EntityRef::Object(o)));
-                        }
-                        for g in created.groups {
-                            self.groups.remove(g);
-                            self.sids.remove(&EntityRef::Group(g));
-                            self.attrs.remove(&AttrTarget::Entity(EntityRef::Group(g)));
-                        }
-                        for i in created.instances {
-                            self.instances.remove(i);
-                            self.sids.remove(&EntityRef::Instance(i));
-                            self.attrs
-                                .remove(&AttrTarget::Entity(EntityRef::Instance(i)));
-                        }
+                        // Roots are appended to parents only after the loop,
+                        // so the created records are all there is to undo.
+                        self.discard_created_clone(created);
                         return Err(e);
                     }
                 }
@@ -15801,6 +15929,7 @@ impl Document {
             objects: created.objects.clone(),
             groups: created.groups.clone(),
             instances: created.instances.clone(),
+            sketches: created.sketches.clone(),
         });
         self.commit_new_action();
         self.debug_validate();
@@ -15809,6 +15938,7 @@ impl Document {
             objects_touched: created.objects,
             groups_touched: created.groups,
             instances_touched: created.instances,
+            sketches_touched: created.sketches,
             ..Default::default()
         };
         // Each distinct parent group is touched once (its member list grew).
@@ -15895,9 +16025,54 @@ impl Document {
                     new_members.push(child);
                 }
                 self.groups[new_gid].members = new_members;
+                // The sketches the group holds come along, into the copy.
+                for sid in self.group_sketches(id) {
+                    let mut sketch = self.sketches[sid].clone();
+                    sketch
+                        .apply_transform(placement)
+                        .map_err(DocumentError::Transform)?;
+                    let new_sid = self.insert_sketch_record(sketch);
+                    created.sketches.push(new_sid);
+                    self.sketch_parent.insert(new_sid, new_gid);
+                    self.carry_sketch_locked(sid, new_sid);
+                    self.carry_sketch_meta(sid, new_sid);
+                    self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
+                }
                 Ok(NodeId::Group(new_gid))
             }
-            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+            // A sketch is cloned by the Group arm that holds it; both callers
+            // refuse one as a root.
+            NodeId::Sketch(_) => unreachable!("a sketch is never a clone root"),
+        }
+    }
+
+    /// Removes every record a failed [`Document::clone_subtree`] inserted, so
+    /// the document is untouched on error (strong guarantee). Nothing outside
+    /// `created` has been mutated at that point.
+    fn discard_created_clone(&mut self, created: CreatedClone) {
+        for o in created.objects {
+            self.objects.remove(o);
+            self.sids.remove(&EntityRef::Object(o));
+            self.attrs.remove(&AttrTarget::Entity(EntityRef::Object(o)));
+        }
+        for g in created.groups {
+            self.groups.remove(g);
+            self.sids.remove(&EntityRef::Group(g));
+            self.attrs.remove(&AttrTarget::Entity(EntityRef::Group(g)));
+        }
+        for i in created.instances {
+            self.instances.remove(i);
+            self.sids.remove(&EntityRef::Instance(i));
+            self.attrs
+                .remove(&AttrTarget::Entity(EntityRef::Instance(i)));
+        }
+        for s in created.sketches {
+            self.sketches.remove(s);
+            self.sketch_parent.remove(&s);
+            self.sketch_meta.remove(&s);
+            self.locked_sketches.remove(&s);
+            self.sids.remove(&EntityRef::Sketch(s));
+            self.attrs.remove(&AttrTarget::Entity(EntityRef::Sketch(s)));
         }
     }
 
@@ -17762,11 +17937,13 @@ impl Document {
                 group,
                 parent,
                 prev_parent_members,
+                sketches,
             } => {
                 // Undo grouping = dissolve: reparent members to the group's own
                 // parent, restore that parent's order, hide the group.
                 let (group, parent) = (*group, *parent);
-                let members = self.groups[group].members.clone();
+                let mut members = self.groups[group].members.clone();
+                members.extend(sketches.iter().map(|&s| NodeId::Sketch(s)));
                 for &m in &members {
                     self.set_node_parent(m, parent);
                 }
@@ -17780,13 +17957,15 @@ impl Document {
                 group,
                 parent,
                 prev_parent_members,
+                sketches,
                 reanchored,
             } => {
                 // Undo ungroup = re-form: reparent members back into the group,
                 // restore the parent's order, unhide the group.
                 let (group, parent) = (*group, *parent);
                 self.groups[group].hidden = false;
-                let members = self.groups[group].members.clone();
+                let mut members = self.groups[group].members.clone();
+                members.extend(sketches.iter().map(|&s| NodeId::Sketch(s)));
                 for &m in &members {
                     self.set_node_parent(m, Some(group));
                 }
@@ -17816,7 +17995,9 @@ impl Document {
                         NodeId::Object(id) => self.objects[id].hidden = false,
                         NodeId::Group(id) => self.groups[id].hidden = false,
                         NodeId::Instance(id) => self.instances[id].hidden = false,
-                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+                        NodeId::Sketch(id) => {
+                            self.hidden_sketches.remove(&id);
+                        }
                     }
                 }
                 if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
@@ -17934,6 +18115,7 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                sketches,
             } => {
                 // Hide the whole clone and unlink its root from its parent.
                 let (root, parent) = (*root, *parent);
@@ -17946,6 +18128,9 @@ impl Document {
                 for &i in instances {
                     self.instances[i].hidden = true;
                 }
+                for &sk in sketches {
+                    self.hidden_sketches.insert(sk);
+                }
                 if let Some(pg) = parent {
                     self.groups[pg].members.retain(|&n| n != root);
                 }
@@ -17953,6 +18138,7 @@ impl Document {
                     objects_touched: objects.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
+                    sketches_touched: sketches.clone(),
                     ..Default::default()
                 };
                 change.groups_touched.extend(parent);
@@ -17963,6 +18149,7 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                sketches,
             } => {
                 // Hide every clone and unlink each root from its parent —
                 // [`DocAction::Duplicated`]'s undo, element-wise.
@@ -17975,6 +18162,9 @@ impl Document {
                 for &i in instances {
                     self.instances[i].hidden = true;
                 }
+                for &sk in sketches {
+                    self.hidden_sketches.insert(sk);
+                }
                 for &(root, parent) in roots {
                     if let Some(pg) = parent {
                         self.groups[pg].members.retain(|&n| n != root);
@@ -17984,6 +18174,7 @@ impl Document {
                     objects_touched: objects.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
+                    sketches_touched: sketches.clone(),
                     ..Default::default()
                 };
                 for &(_, parent) in roots {
@@ -18432,7 +18623,7 @@ impl Document {
                     self.set_node_parent(m, None);
                 }
                 self.groups[group].hidden = true;
-                self.groups[group].members = prev_members.clone();
+                self.groups[group].members = listed_members(prev_members);
                 // `before` is the PRE-close state (mid-session, detached) —
                 // this is an undo, walking backwards.
                 for r in reanchored {
@@ -19235,32 +19426,46 @@ impl Document {
                     ..Default::default()
                 }
             }
-            &DocAction::Grouped { group, parent, .. } => {
+            DocAction::Grouped {
+                group,
+                parent,
+                sketches,
+                ..
+            } => {
                 // Redo grouping: re-form the group from its retained members.
+                let (group, parent) = (*group, *parent);
                 self.groups[group].hidden = false;
-                let members = self.groups[group].members.clone();
+                let listed = self.groups[group].members.clone();
+                if let Some(pg) = parent {
+                    if listed.is_empty() {
+                        self.groups[pg].members.push(NodeId::Group(group));
+                    } else {
+                        self.splice_in_parent(pg, &listed, NodeId::Group(group));
+                    }
+                }
+                let mut members = listed;
+                members.extend(sketches.iter().map(|&s| NodeId::Sketch(s)));
                 for &m in &members {
                     self.set_node_parent(m, Some(group));
-                }
-                if let Some(pg) = parent {
-                    self.splice_in_parent(pg, &members, NodeId::Group(group));
                 }
                 group_change(group, parent, &members)
             }
             DocAction::Ungrouped {
                 group,
                 parent,
+                sketches,
                 reanchored,
                 ..
             } => {
                 // Redo ungroup: dissolve the group again.
                 let (group, parent) = (*group, *parent);
-                let members = self.groups[group].members.clone();
-                for &m in &members {
-                    self.set_node_parent(m, parent);
-                }
+                let mut members = self.groups[group].members.clone();
                 if let Some(pg) = parent {
                     self.splice_out_parent(pg, NodeId::Group(group), &members);
+                }
+                members.extend(sketches.iter().map(|&s| NodeId::Sketch(s)));
+                for &m in &members {
+                    self.set_node_parent(m, parent);
                 }
                 self.groups[group].hidden = true;
                 // Verbatim replay — see the undo arm above and
@@ -19286,7 +19491,9 @@ impl Document {
                         NodeId::Object(id) => self.objects[id].hidden = true,
                         NodeId::Group(id) => self.groups[id].hidden = true,
                         NodeId::Instance(id) => self.instances[id].hidden = true,
-                        NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+                        NodeId::Sketch(id) => {
+                            self.hidden_sketches.insert(id);
+                        }
                     }
                 }
                 if let Some(pg) = parent {
@@ -19398,6 +19605,7 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                sketches,
             } => {
                 // Unhide the whole clone and re-append its root to its parent.
                 let (root, parent) = (*root, *parent);
@@ -19410,6 +19618,9 @@ impl Document {
                 for &i in instances {
                     self.instances[i].hidden = false;
                 }
+                for &sk in sketches {
+                    self.hidden_sketches.remove(&sk);
+                }
                 if let Some(pg) = parent {
                     self.groups[pg].members.push(root);
                 }
@@ -19417,6 +19628,7 @@ impl Document {
                     objects_touched: objects.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
+                    sketches_touched: sketches.clone(),
                     ..Default::default()
                 };
                 change.groups_touched.extend(parent);
@@ -19427,6 +19639,7 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                sketches,
             } => {
                 // Unhide every clone and re-append each root to its parent in
                 // creation order — [`DocAction::Duplicated`]'s redo,
@@ -19440,6 +19653,9 @@ impl Document {
                 for &i in instances {
                     self.instances[i].hidden = false;
                 }
+                for &sk in sketches {
+                    self.hidden_sketches.remove(&sk);
+                }
                 for &(root, parent) in roots {
                     if let Some(pg) = parent {
                         self.groups[pg].members.push(root);
@@ -19449,6 +19665,7 @@ impl Document {
                     objects_touched: objects.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
+                    sketches_touched: sketches.clone(),
                     ..Default::default()
                 };
                 for &(_, parent) in roots {
@@ -20240,6 +20457,22 @@ impl Document {
                     "a group parent cycle — kernel bug"
                 );
                 cursor = self.groups.get(g).and_then(|r| r.parent);
+            }
+        }
+        // Sketches: a live sketch's parent is a live world group, and a
+        // definition-owned sketch has none. (A tombstoned sketch keeps its
+        // entry, whatever became of the group — it returns only through an
+        // undo that first restores the group.)
+        for (&sid, &pg) in &self.sketch_parent {
+            debug_assert!(
+                !self.def_sketches.contains_key(&sid),
+                "a definition-owned sketch has a parent group — kernel bug"
+            );
+            if self.node_live(NodeId::Sketch(sid)) {
+                debug_assert!(
+                    self.group_is_live(pg),
+                    "a sketch's parent group is stale/hidden — kernel bug"
+                );
             }
         }
     }
@@ -21119,6 +21352,16 @@ fn reparent_change(node: NodeId, prev: Option<GroupId>, next: Option<GroupId>) -
     change
 }
 
+/// `nodes` without its sketches — the part of a group's membership its
+/// stored `members` list holds (a sketch's lives in `sketch_parent`).
+fn listed_members(nodes: &[NodeId]) -> Vec<NodeId> {
+    nodes
+        .iter()
+        .copied()
+        .filter(|n| !matches!(n, NodeId::Sketch(_)))
+        .collect()
+}
+
 /// The [`DocChange`] for a group/ungroup: the group, its parent, and any member
 /// groups changed structurally; member objects changed their top-level
 /// container. The shim re-derives the rest from current [`Document`] state.
@@ -21127,17 +21370,18 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
     groups_touched.extend(parent);
     let mut objects_touched = Vec::new();
     let mut instances_touched = Vec::new();
+    let mut sketches_touched = Vec::new();
     for &m in members {
         match m {
             NodeId::Object(o) => objects_touched.push(o),
             NodeId::Group(g) => groups_touched.push(g),
             NodeId::Instance(i) => instances_touched.push(i),
-            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+            NodeId::Sketch(s) => sketches_touched.push(s),
         }
     }
     DocChange {
         objects_touched,
-        sketches_touched: Vec::new(),
+        sketches_touched,
         groups_touched,
         instances_touched,
         components_touched: Vec::new(),
@@ -21185,12 +21429,13 @@ fn delete_change(node: NodeId, parent: Option<GroupId>, subtree: &[NodeId]) -> D
     groups_touched.extend(parent);
     let mut objects_touched = Vec::new();
     let mut instances_touched = Vec::new();
+    let mut sketches_touched = Vec::new();
     for &n in subtree {
         match n {
             NodeId::Object(o) => objects_touched.push(o),
             NodeId::Group(g) => groups_touched.push(g),
             NodeId::Instance(i) => instances_touched.push(i),
-            NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
+            NodeId::Sketch(s) => sketches_touched.push(s),
         }
     }
     // `node` itself is always in `subtree` (collect_subtree's first push), but
@@ -21201,7 +21446,7 @@ fn delete_change(node: NodeId, parent: Option<GroupId>, subtree: &[NodeId]) -> D
     );
     DocChange {
         objects_touched,
-        sketches_touched: Vec::new(),
+        sketches_touched,
         groups_touched,
         instances_touched,
         components_touched: Vec::new(),

@@ -218,7 +218,22 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// to v17 output. Gated one way by [`SKETCH_META_MIN_VERSION`], the
 /// [`LOCKED_MIN_VERSION`] posture. Geometry buffer unchanged
 /// (`GEOMETRY_FORMAT_VERSION` stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 18;
+/// **v19** (sketches in groups): one optional per-sketch field,
+/// `sketches[].parent` — the dense id of the group the sketch sits in. The
+/// membership is recorded on the sketch alone: `groups[].members` and
+/// `roots` never name a sketch, and a NodeRef keeps its three kinds. Written
+/// ONLY for a grouped sketch, so a document with none produces a
+/// byte-identical manifest to v18 output. Gated one way by
+/// [`SKETCH_PARENT_MIN_VERSION`], the [`LOCKED_MIN_VERSION`] posture.
+/// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 19;
+
+/// The manifest version at which `sketches[].parent` was introduced.
+/// Version-gated one way, the [`LOCKED_MIN_VERSION`] posture: a file
+/// declaring an OLDER version that carries one is malformed for its own
+/// declared version and rejected, never silently honored
+/// (reject-not-repair). Optional at v19+ — absence means top level.
+pub(crate) const SKETCH_PARENT_MIN_VERSION: u32 = 19;
 
 /// The manifest version at which `sketches[].name`, `sketches[].tags` and
 /// `sketches[].hidden` were introduced. Version-gated one way, the
@@ -2023,6 +2038,14 @@ pub(crate) struct SketchDto {
     /// delete tombstone — a deleted sketch is never written at all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// The group this sketch sits in (manifest v19+): the dense id of a
+    /// world [`GroupDto`]. Absent means top level. The ONLY record of the
+    /// membership — `groups[].members` never names a sketch. Presence in a
+    /// pre-v19 file is a smuggled field and rejected
+    /// ([`SKETCH_PARENT_MIN_VERSION`]); a definition-owned sketch carries
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2216,6 +2239,10 @@ pub(crate) struct DocSaveData {
     pub sketch_meta: std::collections::BTreeMap<SketchId, (Option<String>, Vec<Vec<String>>)>,
     /// The USER-hidden sketches among `sketches` (manifest v18+).
     pub sketch_hidden: std::collections::BTreeSet<SketchId>,
+    /// The group each grouped sketch sits in (manifest v19+). A sketch
+    /// absent from this map is top level; the writer emits `parent` only
+    /// for members, so a document with none writes v18-identical output.
+    pub sketch_parent: std::collections::BTreeMap<SketchId, GroupId>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
@@ -2476,6 +2503,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 dto.tags = tags.clone();
             }
             dto.hidden = data.sketch_hidden.contains(sk_id);
+            dto.parent = data.sketch_parent.get(sk_id).map(|gid| grp_to_dense[gid]);
             dto
         })
         .collect();
@@ -2727,6 +2755,7 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         name: None,    // likewise
         tags: Vec::new(),
         hidden: false,
+        parent: None,
     }
 }
 
@@ -2896,6 +2925,10 @@ pub(crate) struct DocLoadRaw {
     pub sketch_names: Vec<Option<String>>,
     pub sketch_tags: Vec<Vec<Vec<String>>>,
     pub sketch_hidden: Vec<bool>,
+    /// Each sketch's parent group (manifest v19+) as a dense group id,
+    /// parallel to `sketch_owner`: `None` — top level — for every sketch in
+    /// a pre-v19 file.
+    pub sketch_parent: Vec<Option<u32>>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
@@ -3042,6 +3075,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let sketch_tags: Vec<Vec<Vec<String>>> =
         manifest.sketches.iter().map(|s| s.tags.clone()).collect();
     let sketch_hidden: Vec<bool> = manifest.sketches.iter().map(|s| s.hidden).collect();
+    let sketch_parent: Vec<Option<u32>> = manifest.sketches.iter().map(|s| s.parent).collect();
 
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
@@ -3330,6 +3364,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketch_owner,
         sketch_locked,
         sketch_names,
+        sketch_parent,
         sketch_tags,
         sketch_hidden,
         guides,
@@ -3511,6 +3546,33 @@ fn validate_manifest_references(
                     sk.id, manifest.format_version, SKETCH_META_MIN_VERSION
                 ),
             });
+        }
+        // A sketch's parent group is gated the same way (no pre-v19 writer
+        // put a sketch in a group), and it names a WORLD group: a
+        // definition-owned sketch belongs to its definition, not to a group,
+        // and a definition's member group holds no world sketch.
+        if let Some(parent) = sk.parent {
+            if manifest.format_version < SKETCH_PARENT_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} carries a parent in a v{} manifest (introduced at v{})",
+                        sk.id, manifest.format_version, SKETCH_PARENT_MIN_VERSION
+                    ),
+                });
+            }
+            let Some(group) = manifest.groups.get(parent as usize) else {
+                return Err(LoadError::DanglingReference {
+                    what: format!("sketch {} parent group id {} out of range", sk.id, parent),
+                });
+            };
+            if sk.owner.is_some() || group.owner.is_some() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} names parent group {} across a definition boundary",
+                        sk.id, parent
+                    ),
+                });
+            }
         }
         if let Some(owner) = sk.owner
             && owner as usize >= manifest.components.len()

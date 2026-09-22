@@ -255,6 +255,45 @@ fn group_reparent_moves_a_node_into_a_group_and_refuses_an_unknown_id() {
     assert_eq!(data["refusal"], "unknown_entity");
 }
 
+/// A sketch is addressable here like any other node: it moves into a group
+/// and shows up as one of that group's members in the scene tree.
+#[test]
+fn group_reparent_moves_a_sketch_into_a_group() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
+    let plan = doc.add_sketch(ground());
+    doc.sketch_mut(plan)
+        .expect("sketch is live")
+        .add_segment(Point3::new(5.0, 5.0, 0.0), Point3::new(8.0, 5.0, 0.0))
+        .expect("a plan line");
+    let plan_pub = public_of(&doc, &EntityRef::Sketch(plan));
+    let group_pub = public_of(&doc, &EntityRef::Group(group));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.group.reparent",
+        json!({ "ids": [plan_pub], "parent": group_pub }),
+    );
+    assert_eq!(doc.node_parent(NodeId::Sketch(plan)), Some(group));
+
+    let scene = call_ok(&mut conn, &mut doc, 3, "hew.query.scene", json!({}));
+    let text = scene.to_string();
+    assert!(
+        text.contains(r#""kind":"sketch""#),
+        "the group's member list names the sketch: {text}"
+    );
+
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+    assert_eq!(doc.node_parent(NodeId::Sketch(plan)), None);
+}
+
 #[test]
 fn group_reparent_refuses_an_empty_ids_list() {
     // The kernel itself has no empty-list guard for `reparent_nodes` (an

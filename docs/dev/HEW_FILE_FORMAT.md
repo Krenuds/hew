@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 18,
+  "format_version": 19,
   "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
@@ -162,7 +162,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `18`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `19`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -263,6 +263,7 @@ of the manifest:
 | `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
 | `sketches[].locked` | 17 | absent — an ordinary sketch (the only kind before v17) |
 | `sketches[].name`, `sketches[].tags`, `sketches[].hidden` | 18 | unnamed, empty list (no tags), `false` (visible) — a sketch carried no node metadata before v18 |
+| `sketches[].parent` | 19 | absent — top level (no sketch sat in a group before v19) |
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 | `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
 | `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
@@ -326,6 +327,12 @@ with any subset of them, or none, is perfectly ordinary.
   declared version and MUST be rejected. At v18+ each is optional and written
   only when set, so a document whose sketches are all unnamed, untagged and
   visible differs from its v17 output in `format_version` alone.
+- **`sketches[].parent` (v19)** is version-gated the same single direction: a
+  file declaring a version older than 19 that carries a `parent` on a sketch
+  is malformed for its own declared version and MUST be rejected. At v19+ the
+  field is optional and written only for a sketch that sits in a group, so a
+  document with no grouped sketch differs from its v18 output in
+  `format_version` alone.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -623,6 +630,8 @@ recompute face-plane orientation from winding alone ().
 - **Groups** (`groups[]`) are a plain, ordered membership list of
   `NodeRef`s — objects or other groups, nesting unrestricted — plus an
   optional name and tags. A group has no geometry or transform of its own.
+  A group can also hold sketches; those are recorded on the sketch
+  (`sketches[].parent`, §4.6), never in `members`.
 - **Component definitions** (`components[]`) are an ordered list of member
   `NodeRef`s (v15+; pre-v15 files carry bare object dense ids, the only
   member kind that existed), plus an optional name. Members may be
@@ -789,14 +798,23 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   carries, and USER-hidden view state. `hidden` is not deletion — a deleted
   sketch is never written. Absent means unnamed, untagged and visible.
 
-  A sketch is a node but not a tree member: it never appears in `roots` or in
-  any `members` list, and a NodeRef has no `"sketch"` kind. The fields hang on
-  the `sketches[]` record itself.
-
   A writer emits each key ONLY when set. A reader MUST reject any of the three
   on a sketch in a manifest declaring a version older than 18
   (reject-not-repair). Tag paths follow the same rules as any node's: a path
   need not be registered in the top-level `tags` registry to be carried.
+
+- `parent` (v19+, optional `u32`) — the `groups[]` id of the group this
+  sketch sits in. Absent means top level. This field is the whole record of
+  the membership: a sketch never appears in `roots` or in any `members` list,
+  and a NodeRef has no `"sketch"` kind. A group's sketches are the
+  `sketches[]` entries naming it, in `sketches[]` order, and they follow the
+  group's other members.
+
+  The group MUST be a world group and the sketch world-owned: a reader MUST
+  reject a `parent` that is out of range, that names a group carrying an
+  `owner`, or that sits beside an `owner` on the same sketch. A writer emits
+  the key ONLY for a grouped sketch, and a reader MUST reject it in a manifest
+  declaring a version older than 19 (reject-not-repair).
 
   Not to be confused with the axis or plane constraint an editor may apply to
   a drawing gesture while drawing: that is transient UI state and is never

@@ -187,9 +187,19 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "def": def_id,
             }))
         }
-        // The tree walk never yields one: a sketch is a node but not a tree
-        // member. Sketches are summarized by `hew.query.scene`'s own list.
-        NodeId::Sketch(_) => Err(CmdError::Internal("sketch in tree walk".into())),
+        // A sketch sitting in a group. Its geometry is summarized once, in
+        // `hew.query.scene`'s own sketch list; here it is a member entry.
+        NodeId::Sketch(id) => {
+            let entity = EntityRef::Sketch(id);
+            Ok(json!({
+                "id": public_of_or_internal(ctx, &entity)?,
+                "kind": "sketch",
+                "name": ctx.doc.sketch_name(id),
+                "watertight": Value::Null,
+                "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
+                "tags": ctx.doc.node_tags(node),
+            }))
+        }
     }
 }
 
