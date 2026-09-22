@@ -1941,6 +1941,11 @@ impl SnapJs {
                     .sketch_curve_source
                     .map(|_| "sketch-curve".to_string())
             })
+            .or_else(|| {
+                self.snap
+                    .sketch_vertex_source
+                    .map(|_| "sketch-vertex".to_string())
+            })
     }
 
     /// The owning sketch handle when this snap derives from a committed sketch
@@ -1962,6 +1967,7 @@ impl SnapJs {
                     .sketch_curve_source
                     .map(|(s, _)| s.data().as_ffi())
             })
+            .or_else(|| self.snap.sketch_vertex_source.map(|s| s.data().as_ffi()))
     }
 
     /// The curve-chain handle when this snap is an analytic point of a drawn

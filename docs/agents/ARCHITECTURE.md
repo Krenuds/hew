@@ -221,8 +221,12 @@ other members. The membership is recorded on the sketch (`sketch_parent`),
 never in a group's member list, so a sketch consumed by an extrusion or
 deleted simply drops out of its group and returns to it through undo. The
 operations that cannot carry a sketch — booleans, make-component, the
-library copy, annotation anchors — refuse it, and refuse a group holding
-one, with a typed `SketchNodeUnsupported`. A hidden sketch leaves the
+library copy — refuse it, and refuse a group holding one, with a typed
+`SketchNodeUnsupported`. A dimension or leader anchors to a sketch's line
+work: it rides a whole-sketch move exactly, and any edit that leaves no
+line under its anchor point — a redraw, a vertex drag, an island move, an
+extrusion consuming the region, a delete — detaches it, recorded verbatim
+for undo like every other detach. A hidden sketch leaves the
 inference scene as a hidden solid does, so nothing snaps to it and a click
 passes through it.
 

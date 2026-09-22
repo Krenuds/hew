@@ -1004,11 +1004,13 @@ describe('DimensionTool — radial dimension gesture', () => {
 
     expect(radialCalls.length).toBe(1)
     expect(onCreated).toHaveBeenCalledTimes(1)
-    const [anchorKind, , anchorPoint, kind, center, radius] = radialCalls[0] as [
+    const [anchorKind, anchorId, anchorPoint, kind, center, radius] = radialCalls[0] as [
       number, bigint, Float64Array, string, Float64Array, number,
     ]
-    // A drawn (unextruded) sketch curve is never a document tree node.
-    expect(anchorKind).toBe(-1)
+    // A drawn curve's dimension anchors to its sketch (node kind 3), so it
+    // follows the sketch when that moves.
+    expect(anchorKind).toBe(3)
+    expect(anchorId).toBe(CIRCLE_SNAP.sketch)
     // Anchor projects onto the circle's rim (radius 2 centered at origin).
     expect(Math.hypot(anchorPoint[0], anchorPoint[1], anchorPoint[2])).toBeCloseTo(2, 6)
     expect(kind).toBe('radius')

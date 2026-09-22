@@ -64,8 +64,9 @@ export interface Snap {
   /** Owning sketch handle when the snap derives from a committed sketch
    *  edge (`elementKind === 'sketch-edge'`; `element` is the edge), a drawn
    *  region's fill (`elementKind === 'sketch-region'`; `sketchRegion` is the
-   *  region), or a drawn curve's analytic point (`elementKind ===
-   *  'sketch-curve'`; `sketchCurve` is the chain). */
+   *  region), a drawn curve's analytic point (`elementKind ===
+   *  'sketch-curve'`; `sketchCurve` is the chain), or a plain line's corner
+   *  (`elementKind === 'sketch-vertex'`; nothing else attached). */
   sketch?: bigint
   /** Region handle when the snap is on a drawn sketch region's fill
    *  (`elementKind === 'sketch-region'`). */

@@ -395,7 +395,7 @@ fn a_grouped_sketch_round_trips_inside_its_group() {
 fn the_parent_is_written_on_the_sketch_and_only_when_grouped() {
     let (doc, _, _, _) = walls_and_a_plan();
     let loose = manifest_json(&doc.save());
-    assert_eq!(loose["format_version"], 19);
+    assert_eq!(loose["format_version"], kernel::MANIFEST_FORMAT_VERSION);
     assert!(loose["sketches"][0].get("parent").is_none());
 
     let (doc, _, _, _) = walls_holding_a_plan();

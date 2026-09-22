@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 19,
+  "format_version": 20,
   "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
@@ -162,7 +162,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `19`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `20`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -219,7 +219,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 A `NodeRef` — used in `roots` and `groups[].members` — is `{"kind": ..,
 "id": ..}` with `kind` one of `"object"`, `"group"`, `"instance"`. There is no
 `"component"` kind: a definition is never placed directly, only reached
-through an `instance`.
+through an `instance`. An annotation anchor's NodeRef (§4.8) may also be
+`"sketch"` (v20+); `roots` and `members` never are.
 
 ### Optional-id convention
 
@@ -264,6 +265,7 @@ of the manifest:
 | `sketches[].locked` | 17 | absent — an ordinary sketch (the only kind before v17) |
 | `sketches[].name`, `sketches[].tags`, `sketches[].hidden` | 18 | unnamed, empty list (no tags), `false` (visible) — a sketch carried no node metadata before v18 |
 | `sketches[].parent` | 19 | absent — top level (no sketch sat in a group before v19) |
+| `annotations[].a.node.kind == "sketch"` (and `b`) | 20 | never present — no annotation anchored to a sketch before v20 |
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 | `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
 | `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
@@ -333,6 +335,11 @@ with any subset of them, or none, is perfectly ordinary.
   field is optional and written only for a sketch that sits in a group, so a
   document with no grouped sketch differs from its v18 output in
   `format_version` alone.
+- **A `"sketch"` anchor `NodeRef` (v20)** is version-gated the same single
+  direction: a file declaring a version older than 20 whose annotation
+  anchor names a sketch is malformed for its own declared version and MUST
+  be rejected. At v20+ it is written only for an anchor on a sketch, so a
+  document with none differs from its v19 output in `format_version` alone.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -805,8 +812,9 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
 
 - `parent` (v19+, optional `u32`) — the `groups[]` id of the group this
   sketch sits in. Absent means top level. This field is the whole record of
-  the membership: a sketch never appears in `roots` or in any `members` list,
-  and a NodeRef has no `"sketch"` kind. A group's sketches are the
+  the membership: a sketch never appears in `roots` or in any `members` list
+  (a `"sketch"` NodeRef exists only as an annotation anchor, §4.8). A group's
+  sketches are the
   `sketches[]` entries naming it, in `sketches[]` order, and they follow the
   group's other members.
 
@@ -858,7 +866,14 @@ one-flat-DTO convention as a guide's `"line"`/`"point"` shape:
 
 **`Anchor`** (`a`, and `b` for a linear dimension) is `{node?, p}`: `p` is
 the anchor's point in world space; `node` (optional) is a `NodeRef` () to
-the node this anchor tracks for re-anchoring. `node` is entirely absent for
+the node this anchor tracks for re-anchoring. Here, and only here, a
+`NodeRef` may also have `kind` `"sketch"` (v20+), its `id` the dense
+`sketches[]` index: a dimension on a sketch's line work follows the whole
+sketch when it moves and is `detached` when the line under `p` is redrawn,
+moved away, consumed or deleted. A writer emits a sketch anchor only when
+the annotation tracks one; a reader MUST reject it in a manifest declaring
+a version older than 20, and MUST reject an out-of-range id. `node` is
+entirely absent for
 a free-floating anchor (never re-anchored, never detached) — including one
 whose original node was hidden/deleted and therefore no longer exists in
 this file at all (a writer degrades such an anchor to node-less rather

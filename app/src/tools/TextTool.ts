@@ -28,6 +28,7 @@
  */
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
+import { anchorNodeFromSnap } from './anchorNode'
 import type { Ray } from '../viewport/math'
 import type { V3 } from '../viewport/geoHelpers'
 import { rayPlaneIntersect } from '../viewport/geoHelpers'
@@ -43,12 +44,6 @@ export interface PlacedLeader {
 }
 
 export type OnPlaceLeader = (leader: PlacedLeader) => void
-
-function anchorNodeFromSnap(snap: Snap): { kind: number; id: bigint } | null {
-  if (snap.instance !== undefined) return { kind: 2, id: snap.instance }
-  if (snap.object !== undefined) return { kind: 0, id: snap.object }
-  return null
-}
 
 function sub(a: V3, b: V3): V3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]

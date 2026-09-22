@@ -167,13 +167,15 @@ fn library_extract_refuses_a_sketch_root() {
     });
 }
 
-/// Nothing re-anchors an annotation when a sketch moves, so a live sketch is
-/// still refused as an anchor rather than accepted and left to go stale.
+/// A sketch is an anchor (`sketch_anchor_specs.rs`); a stale one is refused
+/// like any other stale node.
 #[test]
-fn an_annotation_refuses_a_sketch_anchor() {
+fn an_annotation_refuses_a_stale_sketch_anchor() {
     let (mut doc, _, s) = box_and_sketch();
-    refuses_untouched(&mut doc, "add_leader_text", |d| {
-        d.add_leader_text(
+    doc.delete_sketch(s).unwrap();
+    let before = doc.state_hash();
+    assert_eq!(
+        doc.add_leader_text(
             Anchor {
                 node: Some(NodeId::Sketch(s)),
                 point: Point3::new(5.0, 5.0, 0.0),
@@ -181,7 +183,10 @@ fn an_annotation_refuses_a_sketch_anchor() {
             Vec3::new(1.0, 1.0, 0.0),
             "plan".to_string(),
         )
-    });
+        .unwrap_err(),
+        DocumentError::UnknownSketch
+    );
+    assert_eq!(doc.state_hash(), before);
 }
 
 // ===================================== 3. the sketch paths are unaffected

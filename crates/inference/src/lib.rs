@@ -567,6 +567,13 @@ pub struct Snap {
     /// instead of falling through to a ray re-probe that lands on whatever
     /// region happens to be under the cursor.
     pub sketch_curve_source: Option<(SketchId, SketchCurveId)>,
+    /// Committed sketch-VERTEX provenance: the sketch a plain line's
+    /// [`SnapKind::Endpoint`] belongs to. Mutually exclusive with the four
+    /// fields above. Deliberately NOT a [`sketch_source`](Snap::sketch_source)
+    /// (a vertex is no direction reference, and that field is consumed as
+    /// one); this only says WHICH sketch the corner is a corner of, so a
+    /// tool anchoring to it — a dimension — can name the sketch.
+    pub sketch_vertex_source: Option<SketchId>,
     /// The inference direction for directional snaps (axis / parallel /
     /// perpendicular), for drawing the dashed guide line.
     pub direction: Option<Vec3>,
@@ -589,27 +596,30 @@ enum Provenance {
     SketchEdge(SketchId, SketchEdgeId),
     SketchRegion(SketchId, SketchRegionId),
     SketchCurve(SketchId, SketchCurveId),
+    SketchVertex(SketchId),
 }
 
-/// The four mutually-exclusive [`Snap`] provenance fields.
+/// The five mutually-exclusive [`Snap`] provenance fields.
 type SplitProvenance = (
     Option<SnapSource>,
     Option<(SketchId, SketchEdgeId)>,
     Option<(SketchId, SketchRegionId)>,
     Option<(SketchId, SketchCurveId)>,
+    Option<SketchId>,
 );
 
 impl Provenance {
     /// Split into the public [`Snap`] provenance fields (object, sketch edge,
-    /// sketch region, sketch curve) — exactly one is `Some` for a real
-    /// candidate.
+    /// sketch region, sketch curve, sketch vertex) — exactly one is `Some`
+    /// for a real candidate.
     fn split(this: Option<Provenance>) -> SplitProvenance {
         match this {
-            Some(Provenance::Object(s)) => (Some(s), None, None, None),
-            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None, None),
-            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid)), None),
-            Some(Provenance::SketchCurve(sid, cid)) => (None, None, None, Some((sid, cid))),
-            None => (None, None, None, None),
+            Some(Provenance::Object(s)) => (Some(s), None, None, None, None),
+            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None, None, None),
+            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid)), None, None),
+            Some(Provenance::SketchCurve(sid, cid)) => (None, None, None, Some((sid, cid)), None),
+            Some(Provenance::SketchVertex(sid)) => (None, None, None, None, Some(sid)),
+            None => (None, None, None, None, None),
         }
     }
 }
@@ -2285,14 +2295,18 @@ impl InferenceScene {
         //     is one (a circle/arc chord): a vertex is not a direction
         //     reference, but it IS part of the curve, so clicking a circle on
         //     a facet vertex selects the curve — the vertex-side analogue of
-        //     the Center/Quadrant fix above. A plain line's endpoints, and
-        //     transient segments, carry nothing. ---
+        //     the Center/Quadrant fix above. A plain line's endpoints carry
+        //     just their sketch (`Provenance::SketchVertex`); transient
+        //     segments carry nothing. ---
         let bare_segments = self
             .sketch_segments
             .iter()
             .map(|&(sid, eid, cid, ref seg)| {
                 let edge_prov = Some(Provenance::SketchEdge(sid, eid));
-                let endpoint_prov = cid.map(|c| Provenance::SketchCurve(sid, c));
+                let endpoint_prov = Some(match cid {
+                    Some(c) => Provenance::SketchCurve(sid, c),
+                    None => Provenance::SketchVertex(sid),
+                });
                 (edge_prov, endpoint_prov, seg)
             })
             .chain(self.transient_segments.iter().map(|seg| (None, None, seg)));
@@ -3014,8 +3028,13 @@ impl InferenceScene {
                 if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
-                    let (source, sketch_source, sketch_region_source, sketch_curve_source) =
-                        Provenance::split(*prov);
+                    let (
+                        source,
+                        sketch_source,
+                        sketch_region_source,
+                        sketch_curve_source,
+                        sketch_vertex_source,
+                    ) = Provenance::split(*prov);
                     Some(Snap {
                         position: projected,
                         kind: *kind,
@@ -3023,6 +3042,7 @@ impl InferenceScene {
                         sketch_source,
                         sketch_region_source,
                         sketch_curve_source,
+                        sketch_vertex_source,
                         direction: Some(lock_dir),
                         projected_from: Some(*pos),
                     })
@@ -3047,6 +3067,7 @@ impl InferenceScene {
                         sketch_source: None,
                         sketch_region_source: None,
                         sketch_curve_source: None,
+                        sketch_vertex_source: None,
                         direction: Some(lock_dir),
                         projected_from: None,
                     })
@@ -3056,8 +3077,13 @@ impl InferenceScene {
                 // No lock (or lock with no anchor): return the top-ranked
                 // candidate that is actually visible (see the occlusion cull above).
                 winner.map(|(kind, _ang, _depth, pos, prov, snap_dir)| {
-                    let (source, sketch_source, sketch_region_source, sketch_curve_source) =
-                        Provenance::split(prov);
+                    let (
+                        source,
+                        sketch_source,
+                        sketch_region_source,
+                        sketch_curve_source,
+                        sketch_vertex_source,
+                    ) = Provenance::split(prov);
                     Snap {
                         position: pos,
                         kind,
@@ -3065,6 +3091,7 @@ impl InferenceScene {
                         sketch_source,
                         sketch_region_source,
                         sketch_curve_source,
+                        sketch_vertex_source,
                         direction: snap_dir,
                         projected_from: None,
                     }

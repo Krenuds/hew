@@ -165,6 +165,12 @@ below.
   `sketches[].parent` (manifest v19). A boolean, Make Component or a library
   copy of a group holding a sketch refuses typed (`SketchNodeUnsupported`)
   rather than drop it
+- **Dimensions on sketches** — a dimension or leader placed on a sketch's
+  line anchors to the sketch (manifest v20 `"sketch"` anchor kind): it
+  moves with the sketch, alone or in its group, and turns detached when the
+  line under it is redrawn, dragged away, consumed by Push/Pull or deleted.
+  The Dimension and Text tools anchor to the snapped sketch; a click on a
+  region's fill stays free
 - **New Sketch and Draw Into Sketch** (Object menu, command palette) —
   the draw tools keep everything drawn on one plane in one sketch so
   mixed-tool profiles close; New Sketch makes the next stroke start a fresh

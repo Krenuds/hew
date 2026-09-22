@@ -226,7 +226,23 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// byte-identical manifest to v18 output. Gated one way by
 /// [`SKETCH_PARENT_MIN_VERSION`], the [`LOCKED_MIN_VERSION`] posture.
 /// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 19;
+/// **v20** (dimensions on sketches): an annotation anchor's NodeRef gains
+/// the `"sketch"` kind (dense `sketches[]` id) — a dimension or leader
+/// placed on a sketch's line work follows the sketch when it moves and
+/// detaches when the line under it goes. Written ONLY for a sketch anchor,
+/// so a document with none produces a byte-identical manifest to v19
+/// output. Gated one way by [`SKETCH_ANCHOR_MIN_VERSION`], the
+/// [`LOCKED_MIN_VERSION`] posture. `roots` and `groups[].members` still
+/// never name a sketch. Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION`
+/// stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 20;
+
+/// The manifest version at which an annotation anchor may name a sketch
+/// (`annotations[].a.node.kind == "sketch"`). Version-gated one way, the
+/// [`LOCKED_MIN_VERSION`] posture: a file declaring an OLDER version that
+/// carries one is malformed for its own declared version and rejected,
+/// never silently honored (reject-not-repair).
+pub(crate) const SKETCH_ANCHOR_MIN_VERSION: u32 = 20;
 
 /// The manifest version at which `sketches[].parent` was introduced.
 /// Version-gated one way, the [`LOCKED_MIN_VERSION`] posture: a file
@@ -2567,8 +2583,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                     id,
                 })
             }
-            crate::document::NodeId::Sketch(_) => {
-                unreachable!("{}", crate::document::SKETCH_NOT_A_MEMBER)
+            crate::document::NodeId::Sketch(sid) => {
+                sketch_to_dense.get(&sid).map(|&id| NodeRefDto {
+                    kind: "sketch".to_string(),
+                    id,
+                })
             }
         }
     };
@@ -3653,6 +3672,27 @@ fn validate_manifest_references(
                         return Err(LoadError::DanglingReference {
                             what: format!(
                                 "annotation {} anchor instance id {} out of range",
+                                ann.id, node.id
+                            ),
+                        });
+                    }
+                }
+                // Gated one way, like every sketch field: no pre-v20 writer
+                // anchored an annotation to a sketch.
+                "sketch" => {
+                    if manifest.format_version < SKETCH_ANCHOR_MIN_VERSION {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!(
+                                "annotation {} anchors to a sketch in a v{} manifest \
+                                 (introduced at v{})",
+                                ann.id, manifest.format_version, SKETCH_ANCHOR_MIN_VERSION
+                            ),
+                        });
+                    }
+                    if node.id as usize >= manifest.sketches.len() {
+                        return Err(LoadError::DanglingReference {
+                            what: format!(
+                                "annotation {} anchor sketch id {} out of range",
                                 ann.id, node.id
                             ),
                         });

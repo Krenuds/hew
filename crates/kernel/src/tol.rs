@@ -6,6 +6,12 @@
 /// Two points closer than this are considered coincident (meters).
 pub const POINT_MERGE: f64 = 1e-9;
 
+/// How far an annotation anchor may sit from a sketch's line work and still
+/// count as ON the sketch (`Sketch::has_geometry_at`). An anchor comes from a
+/// snap onto a sketch vertex or edge, so this is a rounding allowance, not a
+/// search radius.
+pub const ANNOTATION_ANCHOR: f64 = 1e-6;
+
 /// Maximum distance from a face's plane for a vertex to count as lying on it
 /// (meters).
 pub const PLANE_DIST: f64 = 1e-9;

@@ -152,6 +152,16 @@ impl Annotation {
         }
     }
 
+    /// Every anchor this annotation carries, in a fixed order.
+    pub(crate) fn anchors(&self) -> Vec<Anchor> {
+        match self {
+            Annotation::LinearDimension { a, b, .. } => vec![*a, *b],
+            Annotation::RadialDimension { anchor, .. } | Annotation::LeaderText { anchor, .. } => {
+                vec![*anchor]
+            }
+        }
+    }
+
     /// True if any of this annotation's anchors names a node in `nodes`.
     pub(crate) fn touches_any(&self, nodes: &[NodeId]) -> bool {
         self.anchored_nodes().iter().any(|n| nodes.contains(n))

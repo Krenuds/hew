@@ -1141,6 +1141,26 @@ impl Sketch {
     /// before any vertex moves, so the sketch is never left half-transformed.
     ///
     /// [`Object::apply_transform`]: crate::Object::apply_transform
+    /// Whether `point` lies on one of this sketch's edges, within `tol` of
+    /// the clamped closest point (a vertex counts through the edges that
+    /// meet there). The test an annotation anchored to a sketch must keep
+    /// passing for its anchor to stay meaningful.
+    pub fn has_geometry_at(&self, point: Point3, tol: f64) -> bool {
+        self.edges.values().any(|e| {
+            let a = self.vertices[e.from].position;
+            let b = self.vertices[e.to].position;
+            let ab = b - a;
+            let len2 = ab.dot(ab);
+            let t = if len2 <= f64::EPSILON {
+                0.0
+            } else {
+                ((point - a).dot(ab) / len2).clamp(0.0, 1.0)
+            };
+            let closest = Point3::new(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
+            (point - closest).length() <= tol
+        })
+    }
+
     pub fn apply_transform(
         &mut self,
         transform: &crate::Transform,

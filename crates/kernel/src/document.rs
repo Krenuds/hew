@@ -788,6 +788,9 @@ enum DocAction {
         /// The sketch's exact pre-transform snapshot.
         prior: Sketch,
         forward: Transform,
+        /// Annotations anchored to the sketch, carried by `forward`
+        /// ([`Document::reanchor_touched`]); undo/redo replay verbatim.
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A move/rotate baked into ONE island of a sketch (per-island Move).
     /// Undo restores the RECORDED pre-transform `prior` snapshot of the
@@ -823,6 +826,10 @@ enum DocAction {
         /// why whole-sketch, not island-scoped).
         prior: Sketch,
         forward: Transform,
+        /// Annotations anchored to the sketch that the move left with no
+        /// line work under them, detached
+        /// ([`Document::reevaluate_sketch_anchors_recorded`]).
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// An OUT-OF-PLANE island transform detached the island into its own
     /// new sketch (a sketch is planar; an island leaving the plane cannot
@@ -839,6 +846,9 @@ enum DocAction {
         source: SketchId,
         detached: SketchId,
         removed: crate::sketch::RemovedScaffolding,
+        /// Annotations anchored to `source` whose point left with the
+        /// island, detached ([`Document::reevaluate_sketch_anchors_recorded`]).
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// An OUT-OF-PLANE sketch COPY (Move+Alt off the sketch plane) built a
     /// NEW sketch holding one or more of the source's islands with the
@@ -936,6 +946,10 @@ enum DocAction {
         vertex: SketchVertexId,
         old_pos: Point3,
         new_pos: Point3,
+        /// Annotations anchored to the sketch that the drag left with no
+        /// line work under them, detached
+        /// ([`Document::reevaluate_sketch_anchors_recorded`]).
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// One sketch-drawing gesture (`begin_sketch_gesture` … `end_sketch_gesture`):
     /// a whole rectangle/circle/arc — or one committed Line segment — as a
@@ -957,6 +971,10 @@ enum DocAction {
         /// The gesture drew the first geometry into a freshly-added sketch,
         /// folding "the sketch appeared" into this one undo step.
         created: bool,
+        /// Annotations anchored to the sketch that the gesture left with no
+        /// line work under them, detached
+        /// ([`Document::reevaluate_sketch_anchors_recorded`]).
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `group_nodes` formed a group. Undo dissolves it (reparenting members to
     /// `parent` and restoring the parent's member order), redo re-forms it. The
@@ -1153,7 +1171,12 @@ enum DocAction {
     /// `delete_sketch` hid a free-standing sketch (tombstone, not a real
     /// delete — the `SketchId` stays valid for redo). Undo un-hides it; redo
     /// re-hides it. Mirrors [`DocAction::DeletedGuide`].
-    DeletedSketch { sketch: SketchId },
+    DeletedSketch {
+        sketch: SketchId,
+        /// Annotations anchored to the sketch, detached with it; undo
+        /// re-attaches them verbatim.
+        reanchored: Vec<AnnotationReanchor>,
+    },
     /// `set_sketch_locked` changed a sketch's locked-sketch flag. `was` is
     /// the flag's value BEFORE the call; undo restores it, redo re-applies
     /// its negation. Pure flag flip — no geometry moves, so there is nothing
@@ -1932,7 +1955,7 @@ impl DocAction {
             | DocAction::CreatedAnnotation { .. }
             | DocAction::DeletedAnnotation { .. }
             | DocAction::UpdatedAnnotation { .. } => Vec::new(),
-            DocAction::DeletedSketch { sketch } | DocAction::SetSketchLocked { sketch, .. } => {
+            DocAction::DeletedSketch { sketch, .. } | DocAction::SetSketchLocked { sketch, .. } => {
                 vec![*sketch]
             }
             DocAction::TransformInstance { .. } | DocAction::DefObjectOp { .. } => Vec::new(),
@@ -2276,6 +2299,9 @@ pub enum DocumentError {
     /// is about the operation, which is why this is not
     /// [`DocumentError::UnknownSketch`].
     SketchNodeUnsupported,
+    /// An annotation anchor names a sketch but its point is not on that
+    /// sketch's line work, so nothing there could carry it.
+    AnchorOffSketch,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
     /// `rename_tag`'s target path (or a nested path it would produce) is
@@ -2572,6 +2598,9 @@ impl std::fmt::Display for DocumentError {
             }
             DocumentError::SketchNodeUnsupported => {
                 write!(f, "this operation does not work on a sketch")
+            }
+            DocumentError::AnchorOffSketch => {
+                write!(f, "the anchor point is not on that sketch's lines")
             }
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
             DocumentError::DuplicateTag => write!(f, "a tag with that path already exists"),
@@ -4188,8 +4217,16 @@ impl Document {
         // ── Insert annotations (manifest v13+) — after every node kind is
         // live, so an anchor's node reference resolves; order relative to
         // guides/roots doesn't matter (independent collections).
+        // An anchor may also name a sketch (manifest v20+), which no tree
+        // walk resolves; the dense id was range-checked at decode.
         let resolve_anchor = |a: RawAnchor| -> Result<Anchor, LoadError> {
-            let node = a.node.as_ref().map(&resolve_node).transpose()?;
+            let node = match a.node.as_ref() {
+                Some(dto) if dto.kind == "sketch" => {
+                    Some(NodeId::Sketch(sketch_ids[dto.id as usize]))
+                }
+                Some(dto) => Some(resolve_node(dto)?),
+                None => None,
+            };
             Ok(Anchor {
                 node,
                 point: a.point,
@@ -6008,11 +6045,13 @@ impl Document {
             return Ok(DocChange::default());
         }
         let after = Box::new(self.sketches[sketch].clone());
+        let reanchored = self.reevaluate_sketch_anchors_recorded(sketch);
         self.undo.push(DocAction::SketchGesture {
             sketch,
             before: pending.before,
             after,
             created: pending.created,
+            reanchored,
         });
         self.commit_new_action();
         self.fresh_sketches.remove(&sketch);
@@ -6140,7 +6179,9 @@ impl Document {
             return Err(DocumentError::UnknownSketch);
         }
         self.hidden_sketches.insert(sketch);
-        self.undo.push(DocAction::DeletedSketch { sketch });
+        let reanchored = self.reevaluate_sketch_anchors_recorded(sketch);
+        self.undo
+            .push(DocAction::DeletedSketch { sketch, reanchored });
         self.commit_new_action();
         self.debug_validate();
         let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -7028,10 +7069,17 @@ impl Document {
         }
         match anchor.node {
             None => Ok(()),
-            // A live sketch is still not an anchor: nothing re-anchors an
-            // annotation when a sketch moves, so accepting one would let it
-            // report a stale measurement.
-            Some(NodeId::Sketch(_)) => Err(DocumentError::SketchNodeUnsupported),
+            // A sketch anchor must sit on the sketch's own line work: a
+            // whole-sketch move carries it, and an edit that leaves no
+            // geometry under it detaches it (`reevaluate_sketch_anchors_recorded`).
+            Some(NodeId::Sketch(id)) if self.node_is_live(NodeId::Sketch(id)) => {
+                if self.sketches[id].has_geometry_at(anchor.point, tol::ANNOTATION_ANCHOR) {
+                    Ok(())
+                } else {
+                    Err(DocumentError::AnchorOffSketch)
+                }
+            }
+            Some(NodeId::Sketch(_)) => Err(DocumentError::UnknownSketch),
             Some(node) if self.node_is_live(node) => Ok(()),
             Some(NodeId::Object(_)) => Err(DocumentError::UnknownObject),
             Some(NodeId::Group(_)) => Err(DocumentError::UnknownGroup),
@@ -7425,6 +7473,63 @@ impl Document {
             });
         }
         changes
+    }
+
+    /// [`Document::reevaluate_liveness_recorded`] for a sketch whose LINE
+    /// WORK changed while the sketch may well stay live: every annotation
+    /// anchored to `sketch` is detached unless the sketch is live and still
+    /// has geometry under each such anchor point. Called after any edit of a
+    /// sketch's contents — a drawing gesture, a vertex drag, an island move,
+    /// an extrusion consuming a region, a delete. Never re-attaches (an
+    /// annotation detached for another reason stays detached), and records
+    /// only what changed, verbatim, for undo and redo.
+    fn reevaluate_sketch_anchors_recorded(&mut self, sketch: SketchId) -> Vec<AnnotationReanchor> {
+        let node = NodeId::Sketch(sketch);
+        let live = self.node_is_live(node);
+        let updates: Vec<AnnotationId> = self
+            .annotations
+            .iter()
+            .filter(|(_, rec)| !rec.hidden && !rec.detached && rec.annotation.touches_any(&[node]))
+            .filter(|(_, rec)| {
+                !live
+                    || !rec.annotation.anchors().iter().all(|a| {
+                        a.node != Some(node)
+                            || self.sketches[sketch]
+                                .has_geometry_at(a.point, tol::ANNOTATION_ANCHOR)
+                    })
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let mut changes = Vec::new();
+        for id in updates {
+            let value = self.annotations[id].annotation.clone();
+            self.annotations[id].detached = true;
+            changes.push(AnnotationReanchor {
+                annotation: id,
+                before: value.clone(),
+                after: value,
+                before_detached: false,
+                after_detached: true,
+            });
+        }
+        changes
+    }
+
+    /// Replays recorded [`AnnotationReanchor`]s verbatim: `forward` installs
+    /// each `after` state (redo), otherwise each `before` (undo). Never a
+    /// re-derived liveness check — see
+    /// [`Document::reevaluate_liveness_recorded`]'s doc comment.
+    fn replay_reanchors(&mut self, reanchored: &[AnnotationReanchor], forward: bool) {
+        for r in reanchored {
+            let rec = &mut self.annotations[r.annotation];
+            if forward {
+                rec.annotation = r.after.clone();
+                rec.detached = r.after_detached;
+            } else {
+                rec.annotation = r.before.clone();
+                rec.detached = r.before_detached;
+            }
+        }
     }
 
     // -------------------------------------------------- node metadata ops / getters
@@ -10093,12 +10198,14 @@ impl Document {
             groups_touched.push(gid);
         }
         let mut objects_touched = vec![id];
-        let mut reanchored = Vec::new();
+        // The consumed region's edges left the sketch (and an emptied sketch
+        // left altogether): an annotation anchored on them detaches.
+        let mut reanchored = self.reevaluate_sketch_anchors_recorded(sketch);
         if let Some(base) = merged_base {
             // The merged sweep consumed the path's own solid (design §3b).
             self.objects[base].hidden = true;
             objects_touched.push(base);
-            reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(base)]);
+            reanchored.extend(self.reevaluate_liveness_recorded(&[NodeId::Object(base)]));
         }
 
         self.undo.push(DocAction::CreatedObject {
@@ -11610,10 +11717,14 @@ impl Document {
         self.sketches[sketch]
             .apply_transform(t)
             .map_err(DocumentError::Transform)?;
+        // A whole-sketch move is rigid for everything on it, so an anchored
+        // annotation rides `t` exactly, like one on an object.
+        let reanchored = self.reanchor_touched(&[NodeId::Sketch(sketch)], t);
         self.undo.push(DocAction::TransformSketch {
             sketch,
             prior,
             forward: *t,
+            reanchored,
         });
         self.commit_new_action();
         self.debug_validate();
@@ -11690,11 +11801,13 @@ impl Document {
         let prior = self.sketches[sketch].clone();
         match self.sketches[sketch].apply_transform_island(island, t) {
             Ok(()) => {
+                let reanchored = self.reevaluate_sketch_anchors_recorded(sketch);
                 self.undo.push(DocAction::TransformSketchIsland {
                     sketch,
                     island,
                     prior,
                     forward: *t,
+                    reanchored,
                 });
                 self.commit_new_action();
                 self.debug_validate();
@@ -11814,10 +11927,12 @@ impl Document {
         if let Some(component) = self.sketch_owner_component(source) {
             self.def_sketches.insert(detached, component);
         }
+        let reanchored = self.reevaluate_sketch_anchors_recorded(source);
         self.undo.push(DocAction::DetachedSketchIsland {
             source,
             detached,
             removed,
+            reanchored,
         });
         self.commit_new_action();
         self.debug_validate();
@@ -11937,11 +12052,13 @@ impl Document {
         let old_pos = self.sketches[sketch]
             .move_vertex(vertex, new_pos)
             .map_err(DocumentError::Sketch)?;
+        let reanchored = self.reevaluate_sketch_anchors_recorded(sketch);
         self.undo.push(DocAction::MovedSketchVertex {
             sketch,
             vertex,
             old_pos,
             new_pos,
+            reanchored,
         });
         self.commit_new_action();
         self.debug_validate();
@@ -12494,6 +12611,7 @@ impl Document {
 
         let mut touched: Vec<NodeId> = leaves.iter().map(|&o| NodeId::Object(o)).collect();
         touched.extend(instances.iter().map(|&i| NodeId::Instance(i)));
+        touched.extend(sketches.iter().map(|&s| NodeId::Sketch(s)));
         let mut subgroups = Vec::new();
         self.collect_groups(NodeId::Group(group), &mut subgroups);
         touched.extend(subgroups.iter().map(|&g| NodeId::Group(g)));
@@ -12697,6 +12815,7 @@ impl Document {
             .map(|&o| NodeId::Object(o))
             .chain(instances.iter().map(|&i| NodeId::Instance(i)))
             .chain(groups_touched.iter().map(|&g| NodeId::Group(g)))
+            .chain(sketch_targets.iter().map(|&s| NodeId::Sketch(s)))
             .collect();
         let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::TransformSelection {
@@ -16945,6 +17064,7 @@ impl Document {
             source,
             detached,
             removed,
+            reanchored,
         } = action
         else {
             unreachable!("dispatched on DetachedSketchIsland");
@@ -16961,14 +17081,17 @@ impl Document {
                 source,
                 detached,
                 removed,
+                reanchored,
             });
             return Err(DocumentError::Sketch(e));
         }
         self.hidden_sketches.insert(detached);
+        self.replay_reanchors(&reanchored, false);
         self.redo.push(DocAction::DetachedSketchIsland {
             source,
             detached,
             removed,
+            reanchored,
         });
         self.debug_validate();
         let (components_touched, instances_touched) = self.def_sketch_owner_change(source);
@@ -16993,6 +17116,7 @@ impl Document {
             source,
             detached,
             removed,
+            reanchored,
         } = action
         else {
             unreachable!("dispatched on DetachedSketchIsland");
@@ -17008,10 +17132,12 @@ impl Document {
             .collect();
         sk.remove_edges(&scaffolding);
         self.hidden_sketches.remove(&detached);
+        self.replay_reanchors(&reanchored, true);
         self.undo.push(DocAction::DetachedSketchIsland {
             source,
             detached,
             removed,
+            reanchored,
         });
         self.debug_validate();
         let (components_touched, instances_touched) = self.def_sketch_owner_change(source);
@@ -17810,7 +17936,12 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            DocAction::TransformSketchIsland { sketch, prior, .. } => {
+            DocAction::TransformSketchIsland {
+                sketch,
+                prior,
+                reanchored,
+                ..
+            } => {
                 // Undo an island transform by restoring the RECORDED
                 // whole-sketch pre-transform snapshot verbatim — never a
                 // recomputed inverse, and never a live-sketch island
@@ -17818,6 +17949,7 @@ impl Document {
                 // anchor-based re-resolution unnecessary).
                 let sketch = *sketch;
                 self.sketches[sketch] = prior.clone();
+                self.replay_reanchors(reanchored, false);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
@@ -17828,12 +17960,18 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            DocAction::TransformSketch { sketch, prior, .. } => {
+            DocAction::TransformSketch {
+                sketch,
+                prior,
+                reanchored,
+                ..
+            } => {
                 // Undo a sketch transform by restoring the RECORDED
                 // pre-transform snapshot verbatim (never a recomputed
                 // inverse — see the doc comment above).
                 let sketch = *sketch;
                 self.sketches[sketch] = prior.clone();
+                self.replay_reanchors(reanchored, false);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
@@ -17879,12 +18017,15 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::MovedSketchVertex {
+            DocAction::MovedSketchVertex {
                 sketch,
                 vertex,
                 old_pos,
                 new_pos,
+                reanchored,
             } => {
+                let (sketch, vertex, old_pos, new_pos) = (*sketch, *vertex, *old_pos, *new_pos);
+                let reanchored = reanchored.clone();
                 // Undo a vertex drag by moving it back. The recorded key can
                 // be stale by now (see `resolve_moved_sketch_vertex`), so the
                 // vertex is found where the drag left it. A vertex that is no
@@ -17899,6 +18040,7 @@ impl Document {
                     self.undo.push(action);
                     return Err(DocumentError::InverseDiverged);
                 }
+                self.replay_reanchors(&reanchored, false);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -17912,6 +18054,7 @@ impl Document {
                 sketch,
                 before,
                 created,
+                reanchored,
                 ..
             } => {
                 // Undo a drawing gesture: restore the exact pre-gesture
@@ -17925,6 +18068,7 @@ impl Document {
                 if created {
                     self.hidden_sketches.insert(sketch);
                 }
+                self.replay_reanchors(reanchored, false);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     sketches_touched: vec![sketch],
@@ -18246,8 +18390,10 @@ impl Document {
                     ..Default::default()
                 }
             }
-            &DocAction::DeletedSketch { sketch } => {
+            DocAction::DeletedSketch { sketch, reanchored } => {
+                let sketch = *sketch;
                 self.hidden_sketches.remove(&sketch);
+                self.replay_reanchors(reanchored, false);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     sketches_touched: vec![sketch],
@@ -19280,6 +19426,7 @@ impl Document {
                 island,
                 prior,
                 forward,
+                reanchored,
             } => {
                 // Redo an island transform by re-applying `forward` to
                 // `island` inside a FRESH CLONE of the SAME recorded
@@ -19296,6 +19443,7 @@ impl Document {
                      same transform already applied once without refusing",
                 );
                 self.sketches[sketch] = fresh;
+                self.replay_reanchors(reanchored, true);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
@@ -19310,6 +19458,7 @@ impl Document {
                 sketch,
                 prior,
                 forward,
+                reanchored,
             } => {
                 // Redo a sketch transform by re-applying `forward` to the
                 // SAME recorded pre-transform snapshot (see the doc comment
@@ -19321,6 +19470,7 @@ impl Document {
                      transform already applied once without refusing",
                 );
                 self.sketches[sketch] = fresh;
+                self.replay_reanchors(reanchored, true);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
@@ -19376,12 +19526,15 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::MovedSketchVertex {
+            DocAction::MovedSketchVertex {
                 sketch,
                 vertex,
                 old_pos,
                 new_pos,
+                reanchored,
             } => {
+                let (sketch, vertex, old_pos, new_pos) = (*sketch, *vertex, *old_pos, *new_pos);
+                let reanchored = reanchored.clone();
                 // Redo a vertex drag by re-applying the new position, finding
                 // the vertex where undo left it — the mirror of the undo arm,
                 // with the same typed refusal when the document diverged.
@@ -19393,6 +19546,7 @@ impl Document {
                     self.redo.push(action);
                     return Err(DocumentError::InverseDiverged);
                 }
+                self.replay_reanchors(&reanchored, true);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -19406,11 +19560,13 @@ impl Document {
                 sketch,
                 after,
                 created,
+                reanchored,
                 ..
             } => {
                 // Redo a drawing gesture: unhide first (when the gesture
                 // created the sketch), then restore the post-gesture
                 // snapshot.
+                self.replay_reanchors(reanchored, true);
                 let (sketch, created) = (*sketch, *created);
                 if created {
                     self.hidden_sketches.remove(&sketch);
@@ -19737,8 +19893,10 @@ impl Document {
                     ..Default::default()
                 }
             }
-            &DocAction::DeletedSketch { sketch } => {
+            DocAction::DeletedSketch { sketch, reanchored } => {
+                let sketch = *sketch;
                 self.hidden_sketches.insert(sketch);
+                self.replay_reanchors(reanchored, true);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     sketches_touched: vec![sketch],

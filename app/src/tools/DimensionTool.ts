@@ -69,18 +69,17 @@
  *        any other linear dimension).
  *      anything else identifiable   -> an ordinary linear dimension to it.
  *
- * A drawn sketch curve is not a document tree node (`NodeId` is
- * Object/Group/Instance only — sketches aren't), so a radial dimension's
- * anchor is always a FREE anchor (`node: None`): it is captured exact at
- * creation but will not geometrically re-anchor if the source sketch is
- * later edited. This is an inherent limit of D1's `Anchor` model (matching
- * the design doc's own scope — sketches were never part of the anchor node
- * space), not something this tool works around.
+ * A dimension on a drawn sketch anchors to the SKETCH (`anchorNodeFromSnap`,
+ * kind 3): it follows the whole sketch when that moves and is flagged
+ * detached when the line under it is redrawn or consumed. A radial
+ * dimension anchors to the curve's sketch the same way; its captured curve
+ * is exact at creation and rides a whole-sketch move with it.
  *
  * Esc cancels the current stage; a fresh click always starts over.
  */
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
+import { anchorNodeFromSnap } from './anchorNode'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
@@ -185,12 +184,6 @@ function centerClickTolerance(radius: number): number {
  * curve's own radius, floored so a tiny circle still gets a readable leader. */
 const DEFAULT_LEADER_LEN_FRAC = 0.4
 const DEFAULT_LEADER_LEN_MIN = 0.1
-
-function anchorNodeFromSnap(snap: Snap): { kind: number; id: bigint } | null {
-  if (snap.instance !== undefined) return { kind: 2, id: snap.instance }
-  if (snap.object !== undefined) return { kind: 0, id: snap.object }
-  return null
-}
 
 function sub(a: V3, b: V3): V3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -1165,8 +1158,8 @@ export class DimensionTool implements Tool {
   private _commitRadial(curve: ResolvedCurve, anchor: V3, leaderDir: V3, kind: 'radius' | 'diameter'): void {
     try {
       this.wasmScene.add_radial_dimension(
-        -1,
-        0n,
+        3,
+        curve.sketch,
         new Float64Array(anchor),
         kind,
         new Float64Array(curve.center),

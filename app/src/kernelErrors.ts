@@ -85,6 +85,8 @@ const DESCRIPTIONS: Record<string, string> = {
     "The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.",
   SketchLocked:
     "That sketch is locked, so it can't be drawn into or changed — it's a drawing to build from, not stock. Select it and clear 'Locked sketch' in Object Info to edit it.",
+  AnchorOffSketch:
+    "Dimensions on a sketch anchor to its lines. Click a line or a corner of the sketch, not the space inside it.",
   SketchNodeUnsupported:
     "That can't take a sketch along — not on its own, and not inside a group. Move the sketch out of the group first.",
   SketchGestureAlreadyOpen:
