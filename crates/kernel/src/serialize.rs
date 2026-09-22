@@ -2055,11 +2055,11 @@ pub(crate) struct SketchDto {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
     /// The group this sketch sits in (manifest v19+): the dense id of a
-    /// world [`GroupDto`]. Absent means top level. The ONLY record of the
-    /// membership — `groups[].members` never names a sketch. Presence in a
-    /// pre-v19 file is a smuggled field and rejected
-    /// ([`SKETCH_PARENT_MIN_VERSION`]); a definition-owned sketch carries
-    /// none.
+    /// [`GroupDto`] on the same side as the sketch — a world group for a
+    /// world sketch, a group of the same definition for a definition-owned
+    /// one. Absent means top level. The ONLY record of the membership —
+    /// `groups[].members` never names a sketch. Presence in a pre-v19 file
+    /// is a smuggled field and rejected ([`SKETCH_PARENT_MIN_VERSION`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<u32>,
 }
@@ -3584,7 +3584,9 @@ fn validate_manifest_references(
                     what: format!("sketch {} parent group id {} out of range", sk.id, parent),
                 });
             };
-            if sk.owner.is_some() || group.owner.is_some() {
+            // A sketch sits in a group of its own side: both world, or both
+            // owned by the same definition.
+            if sk.owner != group.owner {
                 return Err(LoadError::MalformedManifest {
                     what: format!(
                         "sketch {} names parent group {} across a definition boundary",

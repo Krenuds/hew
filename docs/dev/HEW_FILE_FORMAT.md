@@ -654,7 +654,9 @@ recompute face-plane orientation from winding alone ().
   rejects hand-crafted input. A definition is never placed
   directly, carries no transform/tags/position, and exists purely to be
   instanced. Its shared geometry may also include not-yet-extruded
-  sketches — those are found by scanning `sketches[].owner` (§4.6, v13+)
+  sketches — those are found by scanning `sketches[].owner` (§4.6, v13+),
+  and a definition's sketch may sit in one of the definition's groups
+  (`sketches[].parent`, v19+)
   for this definition's dense id, not listed on the `components[]` entry
   itself.
 
@@ -818,11 +820,12 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   `sketches[]` entries naming it, in `sketches[]` order, and they follow the
   group's other members.
 
-  The group MUST be a world group and the sketch world-owned: a reader MUST
-  reject a `parent` that is out of range, that names a group carrying an
-  `owner`, or that sits beside an `owner` on the same sketch. A writer emits
-  the key ONLY for a grouped sketch, and a reader MUST reject it in a manifest
-  declaring a version older than 19 (reject-not-repair).
+  The group and the sketch sit on the same side: both world, or both owned
+  by the same definition (`groups[].owner` equal to the sketch's `owner`). A
+  reader MUST reject a `parent` that is out of range or that crosses that
+  line. A writer emits the key ONLY for a grouped sketch, and a reader MUST
+  reject it in a manifest declaring a version older than 19
+  (reject-not-repair).
 
   Not to be confused with the axis or plane constraint an editor may apply to
   a drawing gesture while drawing: that is transient UI state and is never

@@ -140,14 +140,6 @@ fn duplicating_refuses_a_sketch() {
 }
 
 #[test]
-fn make_component_refuses_a_sketch() {
-    let (mut doc, o, s) = box_and_sketch();
-    refuses_untouched(&mut doc, "make_component", |d| {
-        d.make_component(&[NodeId::Object(o), NodeId::Sketch(s)])
-    });
-}
-
-#[test]
 fn a_boolean_refuses_a_sketch_operand_on_either_side() {
     let (mut doc, o, s) = box_and_sketch();
     refuses_untouched(&mut doc, "boolean_nodes (b)", |d| {

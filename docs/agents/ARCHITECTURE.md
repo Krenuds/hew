@@ -220,9 +220,12 @@ moves, duplicates or is deleted, and editing the group surfaces it with the
 other members. The membership is recorded on the sketch (`sketch_parent`),
 never in a group's member list, so a sketch consumed by an extrusion or
 deleted simply drops out of its group and returns to it through undo. The
-operations that cannot carry a sketch — booleans, make-component, the
-library copy — refuse it, and refuse a group holding one, with a typed
-`SketchNodeUnsupported`. A dimension or leader anchors to a sketch's line
+Make Component takes a selected sketch, or one held by a selected group,
+into the definition as one of its drawings (`def_sketches`), keeping it in
+its group; explode, make-unique and the library copy carry a grouped
+definition sketch in the copied group. The operations that cannot carry a
+sketch — booleans and the library copy of a bare group — refuse it, and
+refuse a group holding one, with a typed `SketchNodeUnsupported`. A dimension or leader anchors to a sketch's line
 work: it rides a whole-sketch move exactly, and any edit that leaves no
 line under its anchor point — a redraw, a vertex drag, an island move, an
 extrusion consuming the region, a delete — detaches it, recorded verbatim

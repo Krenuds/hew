@@ -7,7 +7,7 @@
 //! which then fails the balance check). These handlers just open/close
 //! the frame the resolved id names.
 
-use super::entity::{resolve_meta_node, resolve_node, unknown_entity};
+use super::entity::{resolve_meta_node, unknown_entity};
 use super::{CmdError, Ctx, Handler};
 use crate::refusal::Refusal;
 use kernel::{EntityRef, NodeId, Transform};
@@ -130,7 +130,7 @@ fn component_create(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let nodes: Vec<NodeId> = p
         .members
         .iter()
-        .map(|id| resolve_node(ctx, id))
+        .map(|id| resolve_meta_node(ctx, id))
         .collect::<Result<_, _>>()?;
     let (component, instance, _) = ctx.doc.make_component(&nodes)?;
     let resolver = ctx.resolver();

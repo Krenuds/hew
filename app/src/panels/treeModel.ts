@@ -401,9 +401,10 @@ export function isTreeMemberKind(kind: NodeKind): boolean {
 }
 
 /**
- * Whether `kind` can sit in a group: a tree member, or a whole sketch. The
- * gate for `group_nodes` and `reparent_nodes` — Group, and the Outliner's
- * drag into a group — which take a sketch where the other structural calls
+ * Whether `kind` can sit in a group or a definition: a tree member, or a
+ * whole sketch. The gate for `group_nodes`, `reparent_nodes` and
+ * `make_component` — Group, the Outliner's drag into a group, and Make
+ * Component — which take a sketch where the other structural calls
  * (`isTreeMemberKind`) do not.
  */
 export function isGroupableKind(kind: NodeKind): boolean {
@@ -439,8 +440,8 @@ export function nodeKindToNumber(kind: NodeKind): number {
  * Collapse a structural selection into the kernel's parallel kind/id arrays
  * (`make_component`, `extract_item`, …) — or refuse with `null` if ANY node
  * is not a tree member (a whole sketch, or a sketch-scoped/imprint kind).
- * `groupableSelection` is the wider collapse `group_nodes`/`reparent_nodes`
- * take.
+ * `groupableSelection` is the wider collapse `group_nodes`, `reparent_nodes`
+ * and `make_component` take.
  *
  * This is the id-space boundary: sketch handles live in a different slotmap
  * than node ids, and slotmaps reuse bit patterns, so forwarding a sketch id
@@ -462,10 +463,10 @@ export function structuralSelection(
 }
 
 /**
- * `structuralSelection` for the two calls that take a whole sketch —
- * `group_nodes` and `reparent_nodes`: refuses (`null`) only a sketch-scoped or
- * imprint kind, which has no kernel node id at all. Same id-space boundary,
- * same "treat `null` as a typed refusal" contract.
+ * `structuralSelection` for the calls that take a whole sketch —
+ * `group_nodes`, `reparent_nodes` and `make_component`: refuses (`null`) only
+ * a sketch-scoped or imprint kind, which has no kernel node id at all. Same
+ * id-space boundary, same "treat `null` as a typed refusal" contract.
  */
 export function groupableSelection(
   nodes: readonly NodeRef[],
@@ -492,12 +493,12 @@ export function canMakeComponent(
   selected: NodeRef[],
   parentOf: (n: NodeRef) => bigint | undefined,
 ): boolean {
-  // Objects, groups, and instances: a selected instance becomes a NESTED
-  // member of the new definition (the kernel keeps groups whole and folds
-  // instances in). A sketch-kind node must never reach the kernel's
-  // node-id space.
-  if (selected.some((n) => n.kind !== 'object' && n.kind !== 'group' && n.kind !== 'instance'))
-    return false
+  // Objects, groups, instances and whole sketches: a selected instance
+  // becomes a NESTED member of the new definition (the kernel keeps groups
+  // whole and folds instances in), a sketch becomes one of the
+  // definition's own drawings. A part of a sketch has no kernel node id
+  // and must never reach the node-id space.
+  if (selected.some((n) => !isGroupableKind(n.kind))) return false
 
   // Deduplicate by kind+id.
   const seen = new Set<string>()

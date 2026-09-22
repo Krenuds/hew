@@ -204,7 +204,10 @@ describe('isTreeMemberKind', () => {
     const sk: NodeRef = { kind: 'sketch', id: 5n }
     const noParent = () => undefined
     expect(structuralSelection([o, sk])).toBeNull()
-    expect(canMakeComponent([o, sk], noParent)).toBe(false)
+    // Make Component takes a whole sketch (a definition holds drawings), but
+    // not a part of one.
+    expect(canMakeComponent([o, sk], noParent)).toBe(true)
+    expect(canMakeComponent([o, { kind: 'sketch-island', id: 6n, sketch: 5n }], noParent)).toBe(false)
   })
 })
 
@@ -310,13 +313,17 @@ describe('canMakeComponent', () => {
   // Sketch-scoped NodeRefs have no kernel NodeId: letting one through the
   // gate forwards its id into the object handle space downstream, where the
   // slotmaps' reused bit patterns can silently alias an unrelated live node.
-  it('false for any sketch-kind selection (no kernel NodeId — id-space guard)', () => {
+  it('takes a whole sketch, alone or beside an object', () => {
     const sk: NodeRef = { kind: 'sketch', id: 5n }
+    expect(canMakeComponent([sk], noParent)).toBe(true)
+    expect(canMakeComponent([a, sk], noParent)).toBe(true)
+    expect(canMakeComponent([a, sk], (n) => (n.kind === 'sketch' ? 10n : undefined))).toBe(false)
+  })
+
+  it('false for a part of a sketch (no kernel NodeId — id-space guard)', () => {
     const island: NodeRef = { kind: 'sketch-island', id: 6n, sketch: 5n }
     const edge: NodeRef = { kind: 'sketch-edge', id: 7n, sketch: 5n }
-    expect(canMakeComponent([sk], noParent)).toBe(false)
     expect(canMakeComponent([island], noParent)).toBe(false)
-    expect(canMakeComponent([a, sk], noParent)).toBe(false)
     expect(canMakeComponent([a, edge], noParent)).toBe(false)
   })
 })

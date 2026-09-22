@@ -4592,8 +4592,9 @@ export default function Viewport({
       if (nodes.length === 0) return null
       // Same id-space boundary as runGroup: a sketch-scoped ref must never
       // collapse into make_component's node-id arrays (typed refusal, never a
-      // kind-0 fallback that could alias an unrelated live object).
-      const sel = structuralSelection(nodes)
+      // kind-0 fallback that could alias an unrelated live object). A whole
+      // sketch goes in: it becomes one of the definition's drawings.
+      const sel = groupableSelection(nodes)
       if (sel === null) {
         handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
         return null

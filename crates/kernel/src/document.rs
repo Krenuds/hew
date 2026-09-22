@@ -461,6 +461,17 @@ struct GroupSession {
     undo_len_at_open: usize,
 }
 
+/// What [`Document::explode_copy_group`] creates while copying a definition
+/// group's subtree out to the world, accumulated across the recursion.
+#[derive(Default)]
+struct ExplodeCopies {
+    objects: Vec<ObjectId>,
+    groups: Vec<GroupId>,
+    instances: Vec<InstanceId>,
+    /// Source definition group → its world copy.
+    group_map: BTreeMap<GroupId, GroupId>,
+}
+
 /// One open editing frame on [`Document::sessions`] — the session stack
 /// (docs/design/group-session.md). Frames open and close strictly LIFO.
 /// Frames STACK for nested drill-down: a component session surfaces its
@@ -1092,6 +1103,10 @@ enum DocAction {
         /// today this only detaches; undo/redo restore it verbatim,
         /// mirroring [`DocAction::Deleted::reanchored`].
         reanchored: Vec<AnnotationReanchor>,
+        /// Every world sketch the fold took into the definition — selected
+        /// directly, or held by a selected group — with the group it sat in
+        /// before. Undo returns each to the world side and to that group.
+        folded_sketches: Vec<(SketchId, Option<GroupId>)>,
     },
     /// `place_instance` stamped another instance of an existing
     /// definition. Undo hides it; redo unhides. The `InstanceId` stays stable.
@@ -3076,8 +3091,8 @@ pub struct Document {
     /// lists a sketch. A group's sketches are derived from this table
     /// ([`Document::group_sketches`]), so a tombstoned sketch simply drops
     /// out and returns with its undo, no member list to splice. A
-    /// definition-owned sketch has no entry. Persisted as
-    /// `sketches[].parent` (manifest v19+).
+    /// definition-owned sketch may sit in one of its definition's groups the
+    /// same way. Persisted as `sketches[].parent` (manifest v19+).
     sketch_parent: BTreeMap<SketchId, GroupId>,
     /// The working camera view at last save (manifest v13+; docs/design/
     /// camera.md §5): `None` for a document that never had one saved (every
@@ -13261,11 +13276,6 @@ impl Document {
             }
         }
         for &m in members {
-            // A definition does not yet take a world sketch in — not as a
-            // member, and not inside a member group.
-            if self.subtree_has_sketch(m) {
-                return Err(DocumentError::SketchNodeUnsupported);
-            }
             if !self.node_is_live(m) {
                 return Err(match m {
                     NodeId::Object(_) => DocumentError::UnknownObject,
@@ -13325,7 +13335,17 @@ impl Document {
         for &m in members {
             self.collect_instances(m, &mut folded_instances);
         }
-        if leaves.is_empty() && folded_instances.is_empty() {
+        // The sketches the fold takes in — selected directly, or held by a
+        // selected group — each with the group it sits in now.
+        let mut folded_sketches: Vec<(SketchId, Option<GroupId>)> = Vec::new();
+        for &m in members {
+            for s in self.leaf_sketches_under(m) {
+                if !folded_sketches.iter().any(|&(f, _)| f == s) {
+                    folded_sketches.push((s, self.sketch_parent.get(&s).copied()));
+                }
+            }
+        }
+        if leaves.is_empty() && folded_instances.is_empty() && folded_sketches.is_empty() {
             return Err(DocumentError::EmptyComponent);
         }
 
@@ -13363,8 +13383,11 @@ impl Document {
         // the definition's direct members (parent cleared: they are
         // def-local roots now), and every node beneath a selected group is
         // re-owned in place with its parent link untouched.
+        // A definition's member list, like a group's, never names a sketch:
+        // a definition's sketches are the `def_sketches` entries owning it.
+        let listed = listed_members(members);
         let component = self.insert_component_record(ComponentDef {
-            members: members.to_vec(),
+            members: listed.clone(),
             hidden: false,
             name: Some(def_name),
         });
@@ -13377,6 +13400,14 @@ impl Document {
                     prior
                 },
             };
+        }
+        // A selected sketch becomes a def-local root (no group); one held by
+        // a selected group stays in it, the group now being the definition's.
+        for &(s, _) in &folded_sketches {
+            self.def_sketches.insert(s, component);
+            if members.contains(&NodeId::Sketch(s)) {
+                self.sketch_parent.remove(&s);
+            }
         }
         for &g in &folded_groups {
             self.groups[g].owner_def = Some(component);
@@ -13408,7 +13439,11 @@ impl Document {
             tags: inherited_tags,
         });
         if let Some(pg) = parent {
-            self.splice_in_parent(pg, members, NodeId::Instance(instance));
+            if listed.is_empty() {
+                self.groups[pg].members.push(NodeId::Instance(instance));
+            } else {
+                self.splice_in_parent(pg, &listed, NodeId::Instance(instance));
+            }
         }
 
         self.undo.push(DocAction::MadeComponent {
@@ -13421,11 +13456,12 @@ impl Document {
             folded_instances: folded_instances.clone(),
             prev_parent_members,
             reanchored,
+            folded_sketches: folded_sketches.clone(),
         });
         self.commit_new_action();
         self.debug_validate();
 
-        let change = made_component_change(
+        let mut change = made_component_change(
             component,
             instance,
             parent,
@@ -13433,6 +13469,7 @@ impl Document {
             &folded_groups,
             &folded_instances,
         );
+        change.sketches_touched = folded_sketches.into_iter().map(|(s, _)| s).collect();
         Ok((component, instance, change))
     }
 
@@ -13999,6 +14036,9 @@ impl Document {
         let mut created_groups: Vec<GroupId> = Vec::new();
         let mut created_instances: Vec<InstanceId> = Vec::new();
         let mut created_roots: Vec<NodeId> = Vec::with_capacity(member_nodes.len());
+        // Source definition group → its world copy, for the sketches held
+        // inside them.
+        let mut group_map: BTreeMap<GroupId, GroupId> = BTreeMap::new();
         for m in member_nodes {
             match m {
                 NodeId::Object(o) => {
@@ -14031,14 +14071,18 @@ impl Document {
                     // bake the pose, nested instances surface as ordinary
                     // world instances with the composed pose (geometry stays
                     // shared with their definitions).
-                    let gid = self.explode_copy_group(
-                        g,
-                        &pose,
-                        parent,
-                        &mut created,
-                        &mut created_groups,
-                        &mut created_instances,
-                    )?;
+                    let mut out = ExplodeCopies {
+                        objects: std::mem::take(&mut created),
+                        groups: std::mem::take(&mut created_groups),
+                        instances: std::mem::take(&mut created_instances),
+                        group_map: std::mem::take(&mut group_map),
+                    };
+                    let copied = self.explode_copy_group(g, &pose, parent, &mut out);
+                    created = out.objects;
+                    created_groups = out.groups;
+                    created_instances = out.instances;
+                    group_map = out.group_map;
+                    let gid = copied?;
                     created_roots.push(NodeId::Group(gid));
                 }
                 NodeId::Instance(i) => {
@@ -14057,6 +14101,9 @@ impl Document {
         // world-owned from here, exactly like a baked member is genuinely
         // world-owned; the definition's own sketch is left exactly as it
         // was for any sibling instance.
+        // Each lands where its geometry does: in the copy of the definition
+        // group that held it, or beside the other created roots in the
+        // instance's own container.
         let mut created_sketches: Vec<SketchId> = Vec::with_capacity(def_owned_sketches.len());
         for sid in def_owned_sketches {
             let mut clone = self.sketches[sid].clone();
@@ -14067,6 +14114,11 @@ impl Document {
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
             self.carry_sketch_locked(sid, new_sid);
             self.carry_sketch_meta(sid, new_sid);
+            let home = match self.sketch_parent.get(&sid) {
+                Some(pg) => group_map.get(pg).copied(),
+                None => parent,
+            };
+            self.set_node_parent(NodeId::Sketch(new_sid), home);
             created_sketches.push(new_sid);
         }
 
@@ -14138,6 +14190,7 @@ impl Document {
         src: GroupId,
         new_def: ComponentId,
         parent: Option<GroupId>,
+        group_map: &mut BTreeMap<GroupId, GroupId>,
     ) -> GroupId {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -14155,6 +14208,7 @@ impl Document {
         if self.user_hidden_groups.contains(&src) {
             self.user_hidden_groups.insert(gid);
         }
+        group_map.insert(src, gid);
         let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
         for m in src_members {
             match m {
@@ -14182,7 +14236,7 @@ impl Document {
                     if self.groups.get(g).is_none_or(|r| r.hidden) {
                         continue;
                     }
-                    let child = self.unique_copy_group(g, new_def, Some(gid));
+                    let child = self.unique_copy_group(g, new_def, Some(gid), group_map);
                     members.push(NodeId::Group(child));
                 }
                 NodeId::Instance(i) => {
@@ -14280,9 +14334,7 @@ impl Document {
         src: GroupId,
         outer: &Transform,
         parent: Option<GroupId>,
-        created: &mut Vec<ObjectId>,
-        created_groups: &mut Vec<GroupId>,
-        created_instances: &mut Vec<InstanceId>,
+        out: &mut ExplodeCopies,
     ) -> Result<GroupId, DocumentError> {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -14300,7 +14352,8 @@ impl Document {
         if self.user_hidden_groups.contains(&src) {
             self.user_hidden_groups.insert(gid);
         }
-        created_groups.push(gid);
+        out.groups.push(gid);
+        out.group_map.insert(src, gid);
         let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
         for m in src_members {
             match m {
@@ -14322,21 +14375,14 @@ impl Document {
                         tags,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
-                    created.push(id);
+                    out.objects.push(id);
                     members.push(NodeId::Object(id));
                 }
                 NodeId::Group(g) => {
                     if self.groups.get(g).is_none_or(|r| r.hidden) {
                         continue;
                     }
-                    let child = self.explode_copy_group(
-                        g,
-                        outer,
-                        Some(gid),
-                        created,
-                        created_groups,
-                        created_instances,
-                    )?;
+                    let child = self.explode_copy_group(g, outer, Some(gid), out)?;
                     members.push(NodeId::Group(child));
                 }
                 NodeId::Instance(i) => {
@@ -14344,7 +14390,7 @@ impl Document {
                         continue;
                     }
                     let child = self.explode_copy_instance(i, outer, Some(gid));
-                    created_instances.push(child);
+                    out.instances.push(child);
                     members.push(NodeId::Instance(child));
                 }
                 NodeId::Sketch(_) => unreachable!("{}", SKETCH_NOT_A_MEMBER),
@@ -14444,6 +14490,7 @@ impl Document {
         // subtrees copy, but a member instance's copy still SHARES its own
         // inner definition — making the outer unique never forks the inner.
         let mut new_members: Vec<NodeId> = Vec::with_capacity(members.len());
+        let mut group_map: BTreeMap<GroupId, GroupId> = BTreeMap::new();
         for m in members {
             match m {
                 NodeId::Object(o) => {
@@ -14463,7 +14510,7 @@ impl Document {
                     new_members.push(NodeId::Object(id));
                 }
                 NodeId::Group(g) => {
-                    let gid = self.unique_copy_group(g, new_def, None);
+                    let gid = self.unique_copy_group(g, new_def, None, &mut group_map);
                     new_members.push(NodeId::Group(gid));
                 }
                 NodeId::Instance(i) => {
@@ -14504,6 +14551,14 @@ impl Document {
             self.carry_sketch_locked(sid, new_sid);
             self.carry_sketch_meta(sid, new_sid);
             self.def_sketches.insert(new_sid, new_def);
+            // A sketch held by a definition group sits in that group's copy.
+            if let Some(ng) = self
+                .sketch_parent
+                .get(&sid)
+                .and_then(|pg| group_map.get(pg))
+            {
+                self.sketch_parent.insert(new_sid, *ng);
+            }
             cloned_sketches.push(new_sid);
         }
 
@@ -18181,6 +18236,7 @@ impl Document {
                 folded_instances,
                 prev_parent_members,
                 reanchored,
+                folded_sketches,
             } => {
                 // Dissolve: return each folded node to the world side (a
                 // directly-selected group/instance also gets its parent
@@ -18190,6 +18246,14 @@ impl Document {
                 let (component, instance, parent) = (*component, *instance, *parent);
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = ObjectOwner::World { parent: prior };
+                }
+                // The sketches the fold took in go back to the world side,
+                // each to the group it sat in — before the ownership scan
+                // below, which must not mistake them for sketches drawn into
+                // the definition afterwards.
+                for &(s, prior) in folded_sketches {
+                    self.def_sketches.remove(&s);
+                    self.set_node_parent(NodeId::Sketch(s), prior);
                 }
                 for &g in folded_groups {
                     self.groups[g].owner_def = None;
@@ -18215,7 +18279,7 @@ impl Document {
                 // since nothing else can retarget `def_sketches` for a
                 // now-about-to-be-hidden component between this undo and its
                 // matching redo (LIFO replay).
-                let sketches_touched: Vec<SketchId> = self
+                let mut sketches_touched: Vec<SketchId> = self
                     .def_sketches
                     .iter()
                     .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
@@ -18224,6 +18288,7 @@ impl Document {
                 for &sid in &sketches_touched {
                     self.hidden_sketches.insert(sid);
                 }
+                sketches_touched.extend(folded_sketches.iter().map(|&(s, _)| s));
                 self.instances[instance].hidden = true;
                 self.components[component].hidden = true;
                 // Verbatim restore, not a re-derived liveness check — see
@@ -19682,6 +19747,7 @@ impl Document {
                 folded_groups,
                 folded_instances,
                 reanchored,
+                folded_sketches,
                 ..
             } => {
                 // Re-fold: re-own the whole selected subtree as definition
@@ -19690,6 +19756,12 @@ impl Document {
                 // instance, and re-splice the instance into the parent in
                 // the selection's place.
                 let (component, instance, parent) = (*component, *instance, *parent);
+                for &(s, _) in folded_sketches {
+                    self.def_sketches.insert(s, component);
+                    if selected.contains(&NodeId::Sketch(s)) {
+                        self.sketch_parent.remove(&s);
+                    }
+                }
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = ObjectOwner::Definition {
                         def: component,
@@ -19714,7 +19786,7 @@ impl Document {
                 }
                 // Un-hide any sketch this definition owned when it was
                 // dissolved (the matching undo's counterpart above).
-                let sketches_touched: Vec<SketchId> = self
+                let mut sketches_touched: Vec<SketchId> = self
                     .def_sketches
                     .iter()
                     .filter(|&(sid, &c)| c == component && self.hidden_sketches.contains(sid))
@@ -19723,10 +19795,16 @@ impl Document {
                 for &sid in &sketches_touched {
                     self.hidden_sketches.remove(&sid);
                 }
+                sketches_touched.extend(folded_sketches.iter().map(|&(s, _)| s));
                 self.components[component].hidden = false;
                 self.instances[instance].hidden = false;
                 if let Some(pg) = parent {
-                    self.splice_in_parent(pg, selected, NodeId::Instance(instance));
+                    let listed = listed_members(selected);
+                    if listed.is_empty() {
+                        self.groups[pg].members.push(NodeId::Instance(instance));
+                    } else {
+                        self.splice_in_parent(pg, &listed, NodeId::Instance(instance));
+                    }
                 }
                 // Verbatim replay — see the undo arm above and
                 // `Document::reevaluate_liveness_recorded`'s doc comment.
@@ -20617,19 +20695,22 @@ impl Document {
                 cursor = self.groups.get(g).and_then(|r| r.parent);
             }
         }
-        // Sketches: a live sketch's parent is a live world group, and a
-        // definition-owned sketch has none. (A tombstoned sketch keeps its
-        // entry, whatever became of the group — it returns only through an
-        // undo that first restores the group.)
+        // Sketches: a live sketch's parent is a live group on the same side
+        // — world for a world sketch, the same definition for a
+        // definition-owned one. (A tombstoned sketch keeps its entry,
+        // whatever became of the group — it returns only through an undo
+        // that first restores the group.)
         for (&sid, &pg) in &self.sketch_parent {
-            debug_assert!(
-                !self.def_sketches.contains_key(&sid),
-                "a definition-owned sketch has a parent group — kernel bug"
-            );
             if self.node_live(NodeId::Sketch(sid)) {
+                let group = self.groups.get(pg).filter(|r| !r.hidden);
                 debug_assert!(
-                    self.group_is_live(pg),
+                    group.is_some(),
                     "a sketch's parent group is stale/hidden — kernel bug"
+                );
+                debug_assert_eq!(
+                    group.and_then(|r| r.owner_def),
+                    self.def_sketches.get(&sid).copied(),
+                    "a sketch and its parent group disagree on their definition — kernel bug"
                 );
             }
         }
@@ -20973,6 +21054,9 @@ struct LibraryCopy {
     all_instances: Vec<InstanceId>,
     all_groups: Vec<GroupId>,
     all_sketches: Vec<SketchId>,
+    /// source definition group → destination copy, for the sketches held
+    /// inside them.
+    group_map: BTreeMap<GroupId, GroupId>,
     all_guides: Vec<GuideId>,
 }
 
@@ -20989,6 +21073,7 @@ impl LibraryCopy {
             all_groups: Vec::new(),
             all_sketches: Vec::new(),
             all_guides: Vec::new(),
+            group_map: BTreeMap::new(),
         }
     }
 }
@@ -21185,6 +21270,13 @@ fn library_copy_def(
             dst.sketch_meta.insert(new_s, meta);
         }
         dst.def_sketches.insert(new_s, new_cid);
+        if let Some(&ng) = src
+            .sketch_parent
+            .get(&s)
+            .and_then(|pg| ctx.group_map.get(pg))
+        {
+            dst.sketch_parent.insert(new_s, ng);
+        }
         ctx.all_sketches.push(new_s);
     }
 
@@ -21297,6 +21389,7 @@ fn library_copy_def_group(
         tags,
     });
     library_copy_entity_attrs(dst, src, &EntityRef::Group(gid), EntityRef::Group(new_gid));
+    ctx.group_map.insert(gid, new_gid);
     if src.user_hidden_groups.contains(&gid) {
         dst.user_hidden_groups.insert(new_gid);
     }

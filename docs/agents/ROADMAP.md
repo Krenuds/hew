@@ -171,6 +171,10 @@ below.
   line under it is redrawn, dragged away, consumed by Push/Pull or deleted.
   The Dimension and Text tools anchor to the snapped sketch; a click on a
   region's fill stays free
+- **Sketches inside components** — Make Component takes a plan along with
+  the walls selected beside it, or held in a selected group, so every
+  placement shows the plan; explode gives it back where the walls land,
+  and make-unique and the library keep a grouped plan in its group
 - **New Sketch and Draw Into Sketch** (Object menu, command palette) —
   the draw tools keep everything drawn on one plane in one sketch so
   mixed-tool profiles close; New Sketch makes the next stroke start a fresh

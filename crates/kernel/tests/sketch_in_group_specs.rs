@@ -308,7 +308,8 @@ fn refuses_untouched<T: std::fmt::Debug>(
 }
 
 /// A boolean consumes its operands. It refuses a group holding a plan rather
-/// than union the walls and drop the plan on the floor.
+/// than union the walls and drop the plan on the floor. (Make Component
+/// takes the plan along — `sketch_component_specs.rs`.)
 #[test]
 fn a_boolean_refuses_a_group_holding_a_sketch() {
     let (mut doc, g, _, _) = walls_holding_a_plan();
@@ -316,14 +317,6 @@ fn a_boolean_refuses_a_group_holding_a_sketch() {
 
     refuses_untouched(&mut doc, "boolean_nodes", |d| {
         d.boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(other))
-    });
-}
-
-#[test]
-fn make_component_refuses_a_group_holding_a_sketch() {
-    let (mut doc, g, _, _) = walls_holding_a_plan();
-    refuses_untouched(&mut doc, "make_component", |d| {
-        d.make_component(&[NodeId::Group(g)])
     });
 }
 
