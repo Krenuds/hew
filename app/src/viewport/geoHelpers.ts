@@ -206,6 +206,43 @@ export function faceRectangleCorners(
 }
 
 /**
+ * The two in-plane directions a rectangle's `W,D` pair is measured along, in
+ * the order the pair is typed and read out: `first` carries W, `second` D.
+ *
+ * `facePlaneBasis` orders its axes for right-handedness, not for people: on
+ * a vertical face `u` is vertical, and on a horizontal face `u` runs along
+ * world Y. Read straight off the basis as `W × D`, that puts height before
+ * width on a wall and depth before width on the top of a box — the opposite
+ * of the ground plane, whose pair is X then Y. This is the order a person
+ * expects instead:
+ *
+ * - The more level axis comes first (the width across the surface), the
+ *   steeper one second (the height up it).
+ * - When both are equally level — a horizontal plane — the axis nearer
+ *   world X comes first, then the other: the same X-then-Y as the ground.
+ *   "Equally level" is judged at 1e-9, the tolerance `isGroundPlane`
+ *   (drawPlane.ts) uses to call a plane horizontal, so a plane that code
+ *   canonicalises to the ground reads here as the ground does too.
+ *
+ * Both are `facePlaneBasis`'s own axes, only reordered, so extents measured
+ * along them are the same two numbers `faceRectangleCorners` builds from;
+ * only which one is called W changes. Signs are irrelevant to callers: every
+ * extent is an absolute value and growth follows the cursor. Returns null
+ * exactly when `facePlaneBasis` does.
+ */
+export function rectangleDimensionAxes(normal: V3): { first: V3; second: V3 } | null {
+  const basis = facePlaneBasis(normal)
+  if (basis === null) return null
+  const { u, v } = basis
+  const uz = Math.abs(u[2])
+  const vz = Math.abs(v[2])
+  if (Math.abs(uz - vz) < 1e-9) {
+    return Math.abs(v[0]) > Math.abs(u[0]) ? { first: v, second: u } : { first: u, second: v }
+  }
+  return vz < uz ? { first: v, second: u } : { first: u, second: v }
+}
+
+/**
  * Build a faceted regular N-gon's vertices on the ground plane (Z=0), given
  * a center and a point on the rim (the first click's radius/start-angle).
  *

@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   rectangleCorners,
   faceRectangleCorners,
+  rectangleDimensionAxes,
+  facePlaneBasis,
   projectRayOntoAxis,
   rayPlaneIntersect,
   pointInPolygonXY,
@@ -283,6 +285,60 @@ describe('faceRectangleCorners', () => {
       const diff: V3 = [corner[0]-anchor[0], corner[1]-anchor[1], corner[2]-anchor[2]]
       expect(Math.abs(diff[0]*normal[0] + diff[1]*normal[1] + diff[2]*normal[2])).toBeLessThan(1e-9)
     }
+  })
+})
+
+describe('rectangleDimensionAxes — the order a rectangle\'s W,D pair reads on a plane', () => {
+  const s = Math.SQRT1_2
+  const r6 = (x: number) => Math.round(x * 1e6) / 1e6 + 0 // + 0 folds −0 into +0
+  const near = (a: V3, b: V3) => expect(a.map(r6)).toEqual(b.map(r6))
+
+  it('on a horizontal plane W runs along X and D along Y, exactly as the ground pair does', () => {
+    for (const normal of [[0, 0, 1], [0, 0, -1]] as V3[]) {
+      const axes = rectangleDimensionAxes(normal)!
+      expect(Math.abs(axes.first[0])).toBe(1)
+      expect(Math.abs(axes.second[1])).toBe(1)
+    }
+  })
+
+  it('on every vertical face W is the level axis (width across) and D is vertical (height up)', () => {
+    for (const normal of [[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0]] as V3[]) {
+      const axes = rectangleDimensionAxes(normal)!
+      expect(r6(axes.first[2])).toBe(0)
+      expect(Math.abs(axes.second[2])).toBe(1)
+      // The level axis runs along the face, not into it.
+      expect(r6(axes.first[0] * normal[0] + axes.first[1] * normal[1])).toBe(0)
+    }
+  })
+
+  it('on a sloping face W is across the slope and D is up it', () => {
+    const a = rectangleDimensionAxes([0, -s, s])!
+    near(a.first, [-1, 0, 0])
+    near(a.second, [0, s, s])
+    const b = rectangleDimensionAxes([s, 0, s])!
+    near(b.first, [0, -1, 0])
+    near(b.second, [-s, 0, s])
+  })
+
+  it('is always facePlaneBasis\'s own two axes, reordered so W is never steeper than D', () => {
+    let seed = 7
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1
+    for (let i = 0; i < 200; i++) {
+      const raw: V3 = [rnd(), rnd(), rnd()]
+      const len = Math.hypot(...raw)
+      if (len < 1e-3) continue
+      const normal: V3 = [raw[0] / len, raw[1] / len, raw[2] / len]
+      const basis = facePlaneBasis(normal)!
+      const axes = rectangleDimensionAxes(normal)!
+      const same = (a: V3, b: V3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+      const isUV = (same(axes.first, basis.u) && same(axes.second, basis.v)) || (same(axes.first, basis.v) && same(axes.second, basis.u))
+      expect(isUV).toBe(true)
+      expect(Math.abs(axes.first[2])).toBeLessThanOrEqual(Math.abs(axes.second[2]) + 1e-9)
+    }
+  })
+
+  it('returns null exactly when facePlaneBasis does', () => {
+    expect(rectangleDimensionAxes([0, 0, 0])).toBeNull()
   })
 })
 

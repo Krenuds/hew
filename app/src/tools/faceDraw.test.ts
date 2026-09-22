@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal } from './faceDraw'
+import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane } from './faceDraw'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import type { V3 } from '../viewport/geoHelpers'
@@ -130,6 +130,41 @@ describe('worldFaceNormal (component-edit-parity.md phase A2)', () => {
   it('returns null for a stale/unknown instance — never falls back to the raw local normal', () => {
     const scene = normalScene([0, 0, 1], undefined)
     expect(worldFaceNormal(scene, 3n, 4n, 42n)).toBeNull()
+  })
+})
+
+describe('worldFaceNormal / worldFacePlane on a stale handle (the documented null, not a throw)', () => {
+  /** A scene whose face queries refuse like the kernel does for a handle
+   *  that names nothing — the state a memoized face pick is left in once a
+   *  retype has undone and recommitted the imprint under the cursor. */
+  function staleScene(code: string): WasmScene {
+    const refuse = () => {
+      throw new Error(`${code}: stale or unknown ${code === 'UnknownObject' ? 'object' : 'face'} handle`)
+    }
+    return { face_normal: vi.fn(refuse), face_plane: vi.fn(refuse), instance_pose: vi.fn(() => undefined) } as unknown as WasmScene
+  }
+
+  it.each(['UnknownFace', 'UnknownObject'])('worldFaceNormal answers null when face_normal throws %s', (code) => {
+    expect(worldFaceNormal(staleScene(code), 3n, 4n, null)).toBeNull()
+  })
+
+  it.each(['UnknownFace', 'UnknownObject'])('worldFacePlane answers null when face_plane throws %s', (code) => {
+    const scene = {
+      face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
+      face_plane: vi.fn(() => { throw new Error(`${code}: stale or unknown handle`) }),
+      instance_pose: vi.fn(() => undefined),
+    } as unknown as WasmScene
+    expect(worldFacePlane(scene, 3n, 4n, null)).toBeNull()
+  })
+
+  it('still propagates any other kernel error — only a gone handle is a documented miss', () => {
+    const scene = {
+      face_normal: vi.fn(() => { throw new Error('Internal: something else entirely') }),
+      face_plane: vi.fn(),
+      instance_pose: vi.fn(() => undefined),
+    } as unknown as WasmScene
+    expect(() => worldFaceNormal(scene, 3n, 4n, null)).toThrow('Internal')
+    expect(() => worldFacePlane(scene, 3n, 4n, null)).toThrow('Internal')
   })
 })
 

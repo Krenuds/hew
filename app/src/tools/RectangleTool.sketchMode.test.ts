@@ -206,49 +206,56 @@ describe('RectangleTool — sketch mode (drawing on a hovered non-ground sketch)
 })
 
 /**
- * The live readout names the same two numbers typing them back would use.
+ * The live readout names the same two numbers, in the same order, that typing
+ * them back would use — and that order is width across the surface first,
+ * height up it second, whichever way the rectangle was dragged.
  *
  * `faceRectangleCorners` swaps corners B and D when the drag's two signed
- * in-plane extents have opposite signs, so that the preview winds CCW from
- * +normal. Reading the two dimensions off the spacing of those corners
- * therefore reports them in the opposite order for exactly those drags, while
- * `_commitTyped` always applies the first typed number along the basis's `u`.
- * The readout and the commit have to agree, or "3, 2" draws a different
- * rectangle from the one the readout was describing.
+ * in-plane extents have opposite signs (to keep the preview CCW from
+ * +normal), so corner spacing would flip the pair for half of all drags;
+ * and `facePlaneBasis` puts the vertical axis FIRST on a wall, so the raw
+ * basis order would read height × width. `rectangleDimensionAxes` fixes the
+ * order, and every path — readout, typed commit, retype — measures along it.
  */
-describe('RectangleTool \u2014 the live readout agrees with typing it back', () => {
-  /** normal [0,-1,0] \u2192 u = [0,0,1] (world +Z), v = [-1,0,0] (world \u2212X).
-   *  Anchor (0,0,2) \u2192 cursor (3,0,4) gives du = +2 along u and dv = \u22123 along
-   *  v: opposite signs, so this is a winding-reversing drag. */
+describe('RectangleTool \u2014 the live readout reads width \u00d7 height and agrees with typing it back', () => {
+  /** normal [0,-1,0] \u2192 basis u = +Z, v = \u2212X; the dimension axes reorder that
+   *  to W along X (across the wall), D along Z (up it). */
   const ANCHOR = { x: 0, y: 0, z: 2 }
-  const CURSOR = { x: 3, y: 0, z: 4 }
+  /** 3 across, 2 up. du = +2, dv = \u22123 \u2014 opposite signs, a winding-reversing drag. */
+  const CURSOR_EAST = { x: 3, y: 0, z: 4 }
+  /** The same 3 across, 2 up, dragged the other way: du = +2, dv = +3. */
+  const CURSOR_WEST = { x: -3, y: 0, z: 4 }
 
-  /** The four corners the drag is previewing, as an order-independent set. */
-  const DRAWN_CORNERS = new Set(['0,0,2', '3,0,2', '3,0,4', '0,0,4'])
+  const CORNERS_EAST = new Set(['0,0,2', '3,0,2', '3,0,4', '0,0,4'])
+  const CORNERS_WEST = new Set(['0,0,2', '-3,0,2', '-3,0,4', '0,0,4'])
 
-  it('reports u first, v second \u2014 not the corner spacing', () => {
+  it.each([
+    ['east (winding-reversing)', CURSOR_EAST],
+    ['west', CURSOR_WEST],
+  ])('reports width first, height second, dragging %s', (_name, cursor) => {
     const { scene } = makeWasmScene({ sketchPick: TILTED_SKETCH })
     const { tool, onMeasurement } = makeTool(scene)
 
     tool.onPointerDown(makeSnap(ANCHOR), RAY)
-    tool.onPointerMove(makeSnap(CURSOR), RAY)
+    tool.onPointerMove(makeSnap(cursor), RAY)
 
-    // 2 along u (the +Z extent) first, 3 along v (the X extent) second.
-    // Corner spacing would have said 3 \u00d7 2.
-    expect(onMeasurement).toHaveBeenLastCalledWith(`${formatLength(2)} \u00d7 ${formatLength(3)}`)
+    expect(onMeasurement).toHaveBeenLastCalledWith(`${formatLength(3)} \u00d7 ${formatLength(2)}`)
   })
 
-  it('typing those two numbers back draws the rectangle the readout described', () => {
+  it.each([
+    ['east', CURSOR_EAST, CORNERS_EAST],
+    ['west', CURSOR_WEST, CORNERS_WEST],
+  ])('typing the pair back draws the rectangle the readout described, dragging %s', (_name, cursor, corners) => {
     const { scene, segmentCalls, setNextRegionsCreated } = makeWasmScene({ sketchPick: TILTED_SKETCH })
     const { tool } = makeTool(scene)
     setNextRegionsCreated([123n])
 
     tool.onPointerDown(makeSnap(ANCHOR), RAY)
-    tool.onPointerMove(makeSnap(CURSOR), RAY)
-    for (const ch of '2,3') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onPointerMove(makeSnap(cursor), RAY)
+    for (const ch of '3,2') tool.onKey({ key: ch } as KeyboardEvent)
     tool.onKey({ key: 'Enter' } as KeyboardEvent)
 
     expect(segmentCalls).toHaveLength(4)
-    expect(new Set(segmentCalls.map((s) => s.a.join(',')))).toEqual(DRAWN_CORNERS)
+    expect(new Set(segmentCalls.map((s) => s.a.join(',')))).toEqual(corners)
   })
 })

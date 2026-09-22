@@ -47,7 +47,7 @@ One consequence worth knowing: an outline that ends up spread across two planes 
 1. Click to set the first corner.
 2. Click again to set the opposite corner.
 
-**Exact dimensions:** after the first click, type both dimensions separated by a comma or an `x` (`2m,1m`, `50 x 30`, `3',18"`) and press `Enter`. A single value makes a square. The rectangle grows in the direction your cursor was heading.
+**Exact dimensions:** after the first click, type both dimensions separated by a comma or an `x` (`2m,1m`, `50 x 30`, `3',18"`) and press `Enter`. A single value makes a square. The first number is the width across the surface you're drawing on and the second is the height up it; on the ground and other flat surfaces that means along the red axis, then the green. The Measurements box shows the pair in the same order while you drag. The rectangle grows in the direction your cursor was heading.
 
 You can also type dimensions *after* the second click. The rectangle you just drew resizes in place, keeping the same first corner and growth direction — retype and press `Enter` again as many times as you like, until you click, press `Esc`, switch tools, or make any other change to the model. Every drawing tool works this way; see "Typing exact values" below.
 

@@ -37,6 +37,7 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { applyAffine3x4, transformNormalThroughPose } from '../viewport/geoHelpers'
+import { parseKernelErrorCode } from '../kernelErrors'
 
 /** May the face on `object` (hit through `instance`, when the ray struck
  *  instanced geometry) be drawn on directly? */
@@ -94,12 +95,32 @@ export function worldFaceNormal(
   face: bigint,
   activeInstance: bigint | null,
 ): V3 | null {
-  const normalArr = wasmScene.face_normal(object, face)
+  let normalArr: ReturnType<WasmScene['face_normal']>
+  try {
+    normalArr = wasmScene.face_normal(object, face)
+  } catch (err) {
+    if (isStaleHandle(err)) return null
+    throw err
+  }
   const local: V3 = [normalArr[0], normalArr[1], normalArr[2]]
   if (activeInstance === null) return local
   const pose = wasmScene.instance_pose(activeInstance)
   if (pose === undefined) return null
   return transformNormalThroughPose(pose, local)
+}
+
+/**
+ * Whether a kernel throw says the handle names nothing any more — the one
+ * failure `worldFaceNormal`/`worldFacePlane` promise to answer with `null`.
+ * A memoized face pick can outlive its face between pointer events: a
+ * typed retype undoes and recommits the imprint under a stationary cursor,
+ * and the next key press re-resolves the snap against the cached ray, so
+ * the pick still names the sub-face the undo removed. Any other kernel
+ * error is a real fault and still propagates.
+ */
+function isStaleHandle(err: unknown): boolean {
+  const code = parseKernelErrorCode(err)
+  return code === 'UnknownObject' || code === 'UnknownFace'
 }
 
 /** Metres off a face's plane a point may sit and still count as ON that
@@ -120,7 +141,13 @@ export function worldFacePlane(
 ): { point: V3; normal: V3 } | null {
   const normal = worldFaceNormal(wasmScene, object, face, activeInstance)
   if (normal === null) return null
-  const planeArr = wasmScene.face_plane(object, face)
+  let planeArr: ReturnType<WasmScene['face_plane']>
+  try {
+    planeArr = wasmScene.face_plane(object, face)
+  } catch (err) {
+    if (isStaleHandle(err)) return null
+    throw err
+  }
   let point: V3 = [planeArr[0], planeArr[1], planeArr[2]]
   if (activeInstance !== null) {
     const pose = wasmScene.instance_pose(activeInstance)

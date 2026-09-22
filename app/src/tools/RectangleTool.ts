@@ -51,7 +51,7 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { rectangleCorners, faceRectangleCorners, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
+import { rectangleCorners, faceRectangleCorners, facePlaneBasis, rectangleDimensionAxes, rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
@@ -67,6 +67,19 @@ import { PlanePin } from './planePin'
  *  degeneracy check in `onPointerDown` for why this is per-axis and why it
  *  sits deliberately above the kernel's `tol::POINT_MERGE`. */
 export const RECTANGLE_MIN_SIDE = 1e-8
+
+/** Signed extents of `cursor − anchor` along a plane's two dimension axes
+ *  (`rectangleDimensionAxes`): W's axis first, D's second. */
+function projectOntoAxes(anchor: V3, cursor: V3, axes: { first: V3; second: V3 }): [number, number] {
+  const dx = cursor[0] - anchor[0]
+  const dy = cursor[1] - anchor[1]
+  const dz = cursor[2] - anchor[2]
+  const { first, second } = axes
+  return [
+    dx * first[0] + dy * first[1] + dz * first[2],
+    dx * second[0] + dy * second[1] + dz * second[2],
+  ]
+}
 
 export type RectangleCommitResult = {
   sketchHandle: bigint
@@ -828,28 +841,42 @@ export class RectangleTool implements Tool {
 
   /**
    * The two dimensions of a rubber band, in the order `_commitTyped` applies
-   * a typed `W,D` pair: the extent along the plane basis's `u` first, then
-   * along its `v`.
+   * a typed `W,D` pair: W along `rectangleDimensionAxes(normal).first`, D
+   * along `.second` — width across the surface, then height up it (X then Y
+   * on a horizontal plane, like the ground).
    *
    * Deliberately NOT derived from the spacing of the four preview corners.
    * `faceRectangleCorners` swaps corners B and D when the drag's two signed
    * extents have opposite signs (to keep the winding CCW from +normal), so
    * corner spacing reports the pair the other way round for half of all
-   * drags — while `_commitTyped` always applies the first typed number along
-   * `u`. Reading the extents off the basis is what keeps the readout and the
-   * commit talking about the same two numbers.
+   * drags. Measuring along the same two axes the typed paths apply the pair
+   * to is what keeps the readout and the commit talking about the same two
+   * numbers.
    */
   private _planeExtents(anchor: V3, cursor: V3, normal: V3): [number, number] | null {
-    const basis = facePlaneBasis(normal)
-    if (basis === null) return null
-    const { u, v } = basis
-    const dx = cursor[0] - anchor[0]
-    const dy = cursor[1] - anchor[1]
-    const dz = cursor[2] - anchor[2]
-    return [
-      Math.abs(dx * u[0] + dy * u[1] + dz * u[2]),
-      Math.abs(dx * v[0] + dy * v[1] + dz * v[2]),
-    ]
+    const axes = rectangleDimensionAxes(normal)
+    if (axes === null) return null
+    const [w, d] = projectOntoAxes(anchor, cursor, axes)
+    return [Math.abs(w), Math.abs(d)]
+  }
+
+  /**
+   * The corners of a typed `w × d` on a non-ground plane: `w` along the
+   * plane's first dimension axis and `d` along its second, each growing the
+   * way the cursor was heading from the anchor (default +,+ when it has not
+   * moved). Null only for a degenerate normal.
+   */
+  private _typedCorners(anchor: V3, cursor: V3, normal: V3, w: number, d: number): [V3, V3, V3, V3] | null {
+    const axes = rectangleDimensionAxes(normal)
+    if (axes === null) return null
+    const { first, second } = axes
+    const [dw, dd] = projectOntoAxes(anchor, cursor, axes)
+    const sw = dw < 0 ? -1 : 1
+    const sd = dd < 0 ? -1 : 1
+    const b: V3 = [anchor[0] + first[0] * sw * w, anchor[1] + first[1] * sw * w, anchor[2] + first[2] * sw * w]
+    const c: V3 = [b[0] + second[0] * sd * d, b[1] + second[1] * sd * d, b[2] + second[2] * sd * d]
+    const dd3: V3 = [anchor[0] + second[0] * sd * d, anchor[1] + second[1] * sd * d, anchor[2] + second[2] * sd * d]
+    return [anchor, b, c, dd3]
   }
 
   /** Report the live W × D measurement. */
@@ -883,24 +910,12 @@ export class RectangleTool implements Tool {
         const farCorner: [number, number] = [anchor[0] + signX * w, anchor[1] + signY * d]
         corners = rectangleCorners([anchor[0], anchor[1]], farCorner)
       } else {
-        const basis = facePlaneBasis(plane.normal)
-        if (basis === null) {
+        const typed = this._typedCorners(anchor, cursor, plane.normal, w, d)
+        if (typed === null) {
           this.cancel()
           return
         }
-        const { u, v } = basis
-        const dx = cursor[0] - anchor[0]
-        const dy = cursor[1] - anchor[1]
-        const dz = cursor[2] - anchor[2]
-        const du = dx * u[0] + dy * u[1] + dz * u[2]
-        const dv = dx * v[0] + dy * v[1] + dz * v[2]
-        const signU = du < 0 ? -1 : 1
-        const signV = dv < 0 ? -1 : 1
-
-        const b: V3 = [anchor[0] + u[0] * signU * w, anchor[1] + u[1] * signU * w, anchor[2] + u[2] * signU * w]
-        const c: V3 = [b[0] + v[0] * signV * d, b[1] + v[1] * signV * d, b[2] + v[2] * signV * d]
-        const dd: V3 = [anchor[0] + v[0] * signV * d, anchor[1] + v[1] * signV * d, anchor[2] + v[2] * signV * d]
-        corners = [anchor, b, c, dd]
+        corners = typed
       }
 
       this.planeStage = { kind: 'idle' }
@@ -913,25 +928,11 @@ export class RectangleTool implements Tool {
       }
     } else if (this.faceStage.kind === 'anchored') {
       const { object, face, normal, anchor } = this.faceStage
-      const basis = facePlaneBasis(normal)
-      if (basis === null) {
+      const corners = this._typedCorners(anchor, this._lastFaceCursor ?? anchor, normal, w, d)
+      if (corners === null) {
         this.cancel()
         return
       }
-      const { u, v } = basis
-      const cursor = this._lastFaceCursor ?? anchor
-      const dx = cursor[0] - anchor[0]
-      const dy = cursor[1] - anchor[1]
-      const dz = cursor[2] - anchor[2]
-      const du = dx * u[0] + dy * u[1] + dz * u[2]
-      const dv = dx * v[0] + dy * v[1] + dz * v[2]
-      const signU = du < 0 ? -1 : 1
-      const signV = dv < 0 ? -1 : 1
-
-      const b: V3 = [anchor[0] + u[0] * signU * w, anchor[1] + u[1] * signU * w, anchor[2] + u[2] * signU * w]
-      const c: V3 = [b[0] + v[0] * signV * d, b[1] + v[1] * signV * d, b[2] + v[2] * signV * d]
-      const dd: V3 = [anchor[0] + v[0] * signV * d, anchor[1] + v[1] * signV * d, anchor[2] + v[2] * signV * d]
-      const corners: [V3, V3, V3, V3] = [anchor, b, c, dd]
 
       this.faceStage = { kind: 'idle' }
       this.typed = ''
@@ -966,20 +967,11 @@ export class RectangleTool implements Tool {
       return rectangleCorners([anchor[0], anchor[1]], [anchor[0] + signX * w, anchor[1] + signY * d])
     }
     const normal = hot.mode === 'plane' ? hot.plane.normal : hot.normal
-    const basis = facePlaneBasis(normal)
-    if (basis === null) return null
-    const { u, v } = basis
-    const dx = far[0] - anchor[0]
-    const dy = far[1] - anchor[1]
-    const dz = far[2] - anchor[2]
-    const signU = dx * u[0] + dy * u[1] + dz * u[2] < 0 ? -1 : 1
-    const signV = dx * v[0] + dy * v[1] + dz * v[2] < 0 ? -1 : 1
-    const newFar: V3 = [
-      anchor[0] + u[0] * signU * w + v[0] * signV * d,
-      anchor[1] + u[1] * signU * w + v[1] * signV * d,
-      anchor[2] + u[2] * signU * w + v[2] * signV * d,
-    ]
-    return faceRectangleCorners(anchor, newFar, normal)
+    const typed = this._typedCorners(anchor, far, normal, w, d)
+    if (typed === null) return null
+    // Rebuilt at the new far corner by the very helper a second click uses,
+    // so the retyped rectangle winds exactly as a clicked one would.
+    return faceRectangleCorners(anchor, typed[2], normal)
   }
 
   /**
@@ -1022,15 +1014,7 @@ export class RectangleTool implements Tool {
       return [Math.abs(far[0] - anchor[0]), Math.abs(far[1] - anchor[1])]
     }
     const normal = hot.mode === 'plane' ? hot.plane.normal : hot.normal
-    const basis = facePlaneBasis(normal)
-    if (basis === null) return [0, 0]
-    const dx = far[0] - anchor[0]
-    const dy = far[1] - anchor[1]
-    const dz = far[2] - anchor[2]
-    return [
-      Math.abs(dx * basis.u[0] + dy * basis.u[1] + dz * basis.u[2]),
-      Math.abs(dx * basis.v[0] + dy * basis.v[1] + dz * basis.v[2]),
-    ]
+    return this._planeExtents(anchor, far, normal) ?? [0, 0]
   }
 
   // ------------------------------------------------------------------ plane mode
