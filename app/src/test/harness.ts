@@ -793,6 +793,9 @@ export interface HewTestHarness {
   /** Every edge handle of `sketch` (union of its islands' edges), as
    * decimal strings — the raw material for a `followMeAlongEdges` path. */
   getSketchEdgeIds(sketch: string): string[]
+  /** One edge's endpoints `[ax,ay,az, bx,by,bz]` in world space, or `null`
+   *  for a stale handle — the probe for a retyped length. */
+  getSketchEdgeEndpoints(sketch: string, edge: string): number[] | null
 
   /** Every live sketch handle, as decimal strings — lets a spec find the
    * sketch a TOOL created (the tool's cached handle is internal). */
@@ -1932,6 +1935,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getSketchIds: () => query((s) => Array.from(s.sketch_ids(), (id) => id.toString())),
 
     getSketchLines: (sketch) => query((s) => Array.from(s.sketch_lines(BigInt(sketch)))),
+    getSketchEdgeEndpoints: (sketch, edge) =>
+      query((s) => {
+        const ends = s.sketch_edge_endpoints(BigInt(sketch), BigInt(edge))
+        return ends === undefined ? null : Array.from(ends)
+      }),
     getSketchPlane: (sketch) =>
       query((s) => {
         const p = s.sketch_plane(BigInt(sketch))
