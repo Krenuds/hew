@@ -50,7 +50,6 @@ import {
 import { SnapDotSample } from '../viewport/SnapDot'
 import { libraryStore } from '../io/libraryStore'
 import { describeIdentity, useServerSettingForm } from './serverForm'
-import { useRemoteControl } from './remoteControlForm'
 import { CLOUD_ORIGIN } from './server'
 
 // Windows 11 app type ramp (Segoe UI Variable falls back to Segoe UI in
@@ -468,38 +467,6 @@ function ServerSection() {
   )
 }
 
-/**
- * The Windows mirror of AdvancedPane.tsx's remote-control rows
- * (docs/agents/HEW_API.md §11.5's consent gate). Behavior is shared through
- * `useRemoteControl`; only the rendering differs. Absent on the desktop,
- * where a live client uses the local socket (§11.2) and needs no gate —
- * which is every Windows build, so in practice this renders only under a
- * Windows browser pointed at a hosted Hew.
- */
-function RemoteControlSection() {
-  const remote = useRemoteControl()
-  if (!remote.available) return null
-  return (
-    <>
-      <div style={sectionHeaderStyle}>Remote control</div>
-      <SettingsCard
-        title="Allow remote control"
-        description={
-          remote.statusText !== ''
-            ? remote.statusText
-            : 'Lets a client running on this server — hew-cli --live, or an AI assistant through it — read and edit the document in this tab, in your undo history, in front of you. Off until you ask for it, and only this tab: turn it on somewhere else and that tab takes over.'
-        }
-      >
-        <ToggleSwitch
-          checked={remote.on}
-          onChange={remote.setOn}
-          ariaLabel="Allow remote control"
-        />
-      </SettingsCard>
-    </>
-  )
-}
-
 export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
@@ -695,8 +662,6 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
           </div>
 
           <ServerSection />
-
-          <RemoteControlSection />
 
           <div style={sectionHeaderStyle}>Debug</div>
           <SettingsCard

@@ -48,27 +48,15 @@ build-from-source step is rewritten as a download.
 
 ## 2. The first `FluentSettingsPage.test.tsx`
 
-The Windows settings page (712 lines) has no test file and no E2E. The
+The Windows settings page (677 lines) has no test file and no E2E. The
 `adding-a-setting` skill names this as a known gap.
-
-**Decide this first: `RemoteControlSection` (`:479`) is dead code.**
-`useRemoteControl` sets `available: !isTauri`
-(`app/src/settings/remoteControlForm.ts:64`), but `FluentSettingsPage`
-renders only under `isTauri && isWindows` (`App.tsx:3789`, the sole
-`setShowFluentSettings` call site), so it always returns null. Nothing is
-broken for users - a Windows browser gets the web modal and
-`AdvancedPane`'s working copy of the row. But under jsdom `isTauri` is
-false, so a test would render the dead section and pass. Writing that test
-first would certify code that cannot run. Delete it, or make the page
-reachable from a Windows browser, before covering it.
 
 **The rest is easier than it looked.** No `vi.mock` wall is needed: every
 availability check resolves false under jsdom, so
 `render(<FluentSettingsPage onBack={vi.fn()} />)` works bare, with a
 `beforeEach` resetting the singletons through their own setters, per
 `ViewportPane.test.tsx`. Note the page has only a named export and no
-sub-exports, so a test renders all of it; and there are two `role="switch"`
-elements, so scope queries by accessible name.
+sub-exports, so a test renders all of it.
 
 **E2E is not reachable.** `isWindows` is fakeable from Playwright
 (`addInitScript` over `navigator.platform`, read at module eval), but
