@@ -321,11 +321,14 @@ running `hew-cli` will look for them ($XDG_RUNTIME_DIR).
    ```
 
    That returns `{"service":"hew-bridge","version":...}`. Through nginx,
-   `curl -s https://<host>/bridge/` returns the same — and
-   `https://<host>/bridge/session` should return **403** to an unauthenticated
-   request. If it hands you a token instead, your Access application is not
-   actually in front of this path; stop and fix that before telling anyone
-   the feature exists.
+   `curl -s https://<host>/bridge/` returns the same — and an unauthenticated
+   `curl -si https://<host>/bridge/session` must not hand you a token. Either
+   answer is correct: a **302** to the Access login means Access is turning
+   the request away at the edge before the bridge ever sees it, and a **403**
+   means the request reached the bridge and it refused the missing assertion
+   itself. If you get a token, your Access application is not actually in
+   front of this path; stop and fix that before telling anyone the feature
+   exists.
 
 5. **Use it.** Open the app, turn on Settings ▸ Advanced ▸ Allow remote
    control, then on the server:
