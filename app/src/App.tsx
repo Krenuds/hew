@@ -1428,6 +1428,13 @@ export default function App() {
   // ⊕ Add Scene button and its row list (ScenesPanel.tsx's own doc comment
   // on why this can't just be local state in one component).
   const scenesRename = useSceneRenameState(scenes)
+  /** Add Scene from a menu: reveal the Scenes section first, so the new
+   *  row's rename field is mounted when the hook focuses it. */
+  const addSceneFromMenu = () => {
+    setTrayCollapsed(false)
+    setShowScenes(true)
+    scenesRename.add()
+  }
 
   /** Validate and trim the context path when the document changes. */
   const trimContextPath = useCallback((scene: Scene, path: NodeRef[]): NodeRef[] => {
@@ -4378,7 +4385,7 @@ export default function App() {
       // View ▸ Scenes (docs/design/scenes.md §5): Add/Update/Next/Previous
       // drive the ScenesController exclusively — see its own module doc on
       // why the UI never reaches the kernel directly for Scenes.
-      case 'scenes-add': scenesRename.add(); break
+      case 'scenes-add': addSceneFromMenu(); break
       case 'scenes-update': {
         const sid = scenesRef.current.activeSid
         if (sid !== null) scenesRef.current.update(sid)
@@ -5759,7 +5766,7 @@ export default function App() {
         onToggleObjectInfo={() => toggleSection(setShowObjectInfo)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         onToggleLibrary={() => setShowLibrary((v) => !v)}
-        onScenesAdd={() => scenesRename.add()}
+        onScenesAdd={addSceneFromMenu}
         onScenesUpdate={() => menuActionRef.current('scenes-update')}
         sceneUpdateEnabled={scenes.activeSid !== null}
         onScenesNext={() => scenes.next()}
