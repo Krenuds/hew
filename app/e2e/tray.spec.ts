@@ -62,3 +62,18 @@ test('tray: a section shortcut brings a put-away tray back with that section ope
   await page.keyboard.press('Control+Shift+O')
   await expect(objectInfo).toHaveAttribute('aria-expanded', 'false')
 })
+
+test('tray: View > Scenes > Add Scene brings a put-away tray back with the rename focused', async ({ page }) => {
+  await page.getByRole('button', { name: 'Collapse tray' }).click()
+  await expect(page.getByRole('complementary', { name: 'Tray' })).toBeHidden()
+
+  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByText('Scenes', { exact: true }).last().hover()
+  await page.getByText('Add Scene', { exact: true }).last().click()
+
+  const nameInput = page.getByRole('textbox', { name: 'Scene name' })
+  await expect(nameInput).toBeFocused()
+  await expect(nameInput).toHaveValue('Scene 1')
+  await page.keyboard.press('Escape')
+  await expect(nameInput).toBeHidden()
+})
