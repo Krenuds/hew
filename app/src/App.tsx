@@ -29,6 +29,13 @@ import { ConfirmDialog } from './panels/ConfirmDialog'
 import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/ScenesPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
+import {
+  TRAY_SECTION_ORDER,
+  loadTraySectionWeights,
+  saveTraySectionWeights,
+  splitPair,
+  type TraySectionKey,
+} from './panels/traySplit'
 import { ChangesPanel } from './panels/ChangesPanel'
 import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/UnsavedChangesDialog'
 import { parseHistoryEntries } from './panels/changesModel'
@@ -619,6 +626,9 @@ export default function App() {
     const n = raw !== null ? Number(raw) : NaN
     return Number.isFinite(n) ? clampTrayWidth(n) : TRAY_WIDTH_DEFAULT
   })
+  /** Tray sections' height weights, user-set via the separators between
+   *  open sections; per window like the tray width, persisted. */
+  const [traySectionWeights, setTraySectionWeights] = useState(loadTraySectionWeights)
   /** Icons-only tool rail; per window like the tray width, persisted. */
   const [railNarrow, setRailNarrow] = useState<boolean>(
     () => window.localStorage.getItem(RAIL_NARROW_KEY) === '1',
@@ -5668,6 +5678,69 @@ export default function App() {
     }
   }
 
+  const traySectionOpen: Record<TraySectionKey, boolean> = {
+    objectInfo: showObjectInfo,
+    modelInfo: showModelInfo,
+    materials: showMaterials,
+    components: showComponents,
+    tags: showTags,
+    scenes: showScenes,
+    changes: showChanges,
+  }
+  /** A tray section's weight, plus its separator handlers when another open
+   *  section sits below it. The separator trades weight with that section
+   *  only (`splitPair`), so nothing else in the tray moves. */
+  const traySplitProps = (key: TraySectionKey) => {
+    const weight = traySectionWeights[key]
+    const below = TRAY_SECTION_ORDER.slice(TRAY_SECTION_ORDER.indexOf(key) + 1).find((k) => traySectionOpen[k])
+    if (below === undefined) return { weight }
+    return {
+      weight,
+      onResizeStart: (ev: React.PointerEvent<HTMLDivElement>) => {
+        ev.preventDefault()
+        const el = ev.currentTarget
+        const sections = el.closest('[role="complementary"]')?.querySelectorAll('[data-tray-section]')
+        const upper = sections?.[TRAY_SECTION_ORDER.indexOf(key)]
+        const lower = sections?.[TRAY_SECTION_ORDER.indexOf(below)]
+        if (upper === undefined || lower === undefined) return
+        const startY = ev.clientY
+        const hA = upper.getBoundingClientRect().height
+        const hB = lower.getBoundingClientRect().height
+        const start = traySectionWeights
+        const drag = { weights: start }
+        el.setPointerCapture(ev.pointerId)
+        const onMove = (mv: PointerEvent) => {
+          const [a, b] = splitPair(start[key], start[below], hA, hB, mv.clientY - startY)
+          drag.weights = { ...start, [key]: a, [below]: b }
+          setTraySectionWeights(drag.weights)
+        }
+        // Same single teardown as the tray-width handle, for the same reason.
+        const endDrag = () => {
+          el.removeEventListener('pointermove', onMove)
+          el.removeEventListener('pointerup', endDrag)
+          el.removeEventListener('pointercancel', endDrag)
+          el.removeEventListener('lostpointercapture', endDrag)
+          try {
+            el.releasePointerCapture(ev.pointerId)
+          } catch {
+            /* capture already gone (lostpointercapture path) */
+          }
+          saveTraySectionWeights(drag.weights)
+        }
+        el.addEventListener('pointermove', onMove)
+        el.addEventListener('pointerup', endDrag)
+        el.addEventListener('pointercancel', endDrag)
+        el.addEventListener('lostpointercapture', endDrag)
+      },
+      onResizeReset: () => {
+        const even = (traySectionWeights[key] + traySectionWeights[below]) / 2
+        const next = { ...traySectionWeights, [key]: even, [below]: even }
+        setTraySectionWeights(next)
+        saveTraySectionWeights(next)
+      },
+    }
+  }
+
   return (
     <main
       style={{
@@ -6236,7 +6309,7 @@ export default function App() {
           }}
         >
           <TrayCollapseRow onCollapse={() => setTrayCollapsed(true)} />
-          <TraySection title="Object Info" collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
+          <TraySection title="Object Info" {...traySplitProps('objectInfo')} collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
             <ObjectInfoPanel
               scene={state.scene}
               docRev={docRev}
@@ -6248,7 +6321,7 @@ export default function App() {
               onToast={handleToast}
             />
           </TraySection>
-          <TraySection title="Outliner" collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
+          <TraySection title="Outliner" {...traySplitProps('modelInfo')} collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
             <DocumentTree
               scene={state.scene}
               docRev={docRev}
@@ -6271,7 +6344,7 @@ export default function App() {
               onDrawIntoSketch={(sketch) => handleDrawIntoSketch(sketch)}
             />
           </TraySection>
-          <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
+          <TraySection title="Materials" {...traySplitProps('materials')} collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
             <MaterialPalette
               scene={state.scene}
               docRev={docRev}
@@ -6288,6 +6361,7 @@ export default function App() {
           </TraySection>
           <TraySection
             title="Components"
+            {...traySplitProps('components')}
             collapsed={!showComponents}
             onToggle={() => setShowComponents((v) => !v)}
             headerRight={<PurgeUnusedButton onClick={requestPurgeUnused} />}
@@ -6301,7 +6375,7 @@ export default function App() {
               onDeleteComponent={handleDeleteComponent}
             />
           </TraySection>
-          <TraySection title="Tags" collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
+          <TraySection title="Tags" {...traySplitProps('tags')} collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
             <TagsPanel
               scene={state.scene}
               docRev={docRev}
@@ -6315,13 +6389,14 @@ export default function App() {
           </TraySection>
           <TraySection
             title="Scenes"
+            {...traySplitProps('scenes')}
             collapsed={!showScenes}
             onToggle={() => setShowScenes((v) => !v)}
             headerRight={<ScenesAddButton rename={scenesRename} />}
           >
             <ScenesPanel scenes={scenes} rename={scenesRename} />
           </TraySection>
-          <TraySection title="Changes" collapsed={!showChanges} onToggle={() => setShowChanges((v) => !v)}>
+          <TraySection title="Changes" {...traySplitProps('changes')} collapsed={!showChanges} onToggle={() => setShowChanges((v) => !v)}>
             <ChangesPanel scene={state.scene} docRev={docRev} reasons={docSession.nonUndoableReasons} />
           </TraySection>
         </div>

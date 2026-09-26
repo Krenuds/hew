@@ -77,3 +77,35 @@ test('tray: View > Scenes > Add Scene brings a put-away tray back with the renam
   await page.keyboard.press('Escape')
   await expect(nameInput).toBeHidden()
 })
+
+test('tray: dragging the line between two open sections resizes just that pair, and it sticks', async ({ page }) => {
+  const sections = page.locator('[data-tray-section]')
+  const outliner = sections.nth(1)
+  const components = sections.nth(3)
+  const scenes = sections.nth(5)
+  const height = async (l: typeof outliner) => (await l.boundingBox())!.height
+
+  await page.getByRole('button', { name: 'Components', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Components', exact: true })).toHaveAttribute('aria-expanded', 'true')
+  const before = { outliner: await height(outliner), components: await height(components), scenes: await height(scenes) }
+
+  // Materials sits collapsed between them; the Outliner's line trades with Components.
+  const handle = page.getByRole('separator', { name: 'Resize Outliner' })
+  const h = (await handle.boundingBox())!
+  await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2 + 60, { steps: 5 })
+  await page.mouse.up()
+
+  await expect.poll(() => height(outliner)).toBeCloseTo(before.outliner + 60, 0)
+  expect(await height(components)).toBeCloseTo(before.components - 60, 0)
+  expect(await height(scenes)).toBeCloseTo(before.scenes, 0)
+
+  await page.reload()
+  await ready(page)
+  await expect.poll(() => height(outliner)).toBeCloseTo(before.outliner + 60, 0)
+
+  await page.getByRole('separator', { name: 'Resize Outliner' }).dblclick()
+  await expect.poll(() => height(outliner)).toBeCloseTo(before.outliner, 0)
+  expect(await height(components)).toBeCloseTo(before.components, 0)
+})

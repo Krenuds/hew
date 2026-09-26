@@ -5,13 +5,11 @@
  * with FloatingPanel's drag/resize/snap/z-order logic stripped (a fixed
  * tray has no need for any of it) and a collapse/expand toggle in its place.
  *
- * Layout note (a deliberate simplification vs. the spec): rather than "only
- * the bottom-most section stretches, others size to content," every
- * currently-expanded section gets `flex: 1` and scrolls independently —
- * flexbox then splits the tray's remaining height evenly across however
- * many sections happen to be open (1, 2, 3, or 4). This is simpler and more
- * robust than tracking which section is "last expanded" and avoids any
- * section growing unboundedly tall.
+ * Layout note: every currently-expanded section gets `flex: <weight> 1 0`
+ * and scrolls independently, so flexbox splits the tray's remaining height
+ * across the open sections in proportion to their weights (equal by
+ * default). The separator along a section's bottom edge moves weight
+ * between it and the next open section below; `traySplit.ts` holds the math.
  */
 export interface TraySectionProps {
   title: string
@@ -25,17 +23,35 @@ export interface TraySectionProps {
    *  consumer. Omitted for every other section, so their header markup and
    *  behavior stay unchanged. */
   headerRight?: React.ReactNode
+  /** Share of the tray's height while expanded (flex-grow). Default 1. */
+  weight?: number
+  /** When set, a drag separator rides the section's bottom edge; App.tsx
+   *  passes it only when another expanded section sits below. */
+  onResizeStart?: (ev: React.PointerEvent<HTMLDivElement>) => void
+  /** Double-click on the separator: even out this section and the next. */
+  onResizeReset?: () => void
 }
 
-export function TraySection({ title, collapsed, onToggle, children, headerRight }: TraySectionProps) {
+export function TraySection({
+  title,
+  collapsed,
+  onToggle,
+  children,
+  headerRight,
+  weight = 1,
+  onResizeStart,
+  onResizeReset,
+}: TraySectionProps) {
   return (
     <div
+      data-tray-section
       style={{
+        position: 'relative',
         display: 'flex',
         flexDirection: 'column',
         borderBottom: '1px solid var(--border-hairline)',
         minHeight: 0,
-        flex: collapsed ? '0 0 auto' : '1 1 0',
+        flex: collapsed ? '0 0 auto' : `${weight} 1 0`,
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
@@ -72,6 +88,26 @@ export function TraySection({ title, collapsed, onToggle, children, headerRight 
         <div style={{ flex: '1 1 0', minHeight: 0, overflowY: 'auto', padding: '0 13px 13px' }}>
           {children}
         </div>
+      )}
+      {!collapsed && onResizeStart !== undefined && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label={`Resize ${title}`}
+          onPointerDown={onResizeStart}
+          onDoubleClick={onResizeReset}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: '-3px',
+            height: '5px',
+            cursor: 'row-resize',
+            zIndex: 5,
+            // Invisible grab strip riding on the section's bottom hairline.
+            background: 'transparent',
+          }}
+        />
       )}
     </div>
   )
