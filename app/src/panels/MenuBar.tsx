@@ -140,10 +140,6 @@ export interface MenuBarProps {
   showGrid?: boolean
   /** Whether construction guides are shown (View ▸ Guides). */
   showGuides?: boolean
-  /** Whether the orientation cube is shown (View ▸ View Cube). */
-  showViewCube?: boolean
-  /** Whether the top-left Orbit/Top/Iso/Front chips are shown (View ▸ View Chips). */
-  showViewChips?: boolean
   /** Toggle the world axes. */
   onToggleAxes?: () => void
   /** Reset the movable drawing axes to world identity (View ▸ Reset Drawing Axes). */
@@ -152,10 +148,6 @@ export interface MenuBarProps {
   onToggleGrid?: () => void
   /** Toggle construction-guide visibility. */
   onToggleGuides?: () => void
-  /** Toggle the viewport's orientation cube (docs/design/camera.md §8). */
-  onToggleViewCube?: () => void
-  /** Toggle the viewport's top-left camera chips (`viewport/ViewportHUD.tsx`). */
-  onToggleViewChips?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   onDeleteGuides?: () => void
   /** View ▸ Section Cut's check state: true only when a section is BOTH
@@ -656,14 +648,10 @@ export function MenuBar({
   showAxes = true,
   showGrid = true,
   showGuides = true,
-  showViewCube = true,
-  showViewChips = false,
   onToggleAxes,
   onResetAxes,
   onToggleGrid,
   onToggleGuides,
-  onToggleViewCube,
-  onToggleViewChips,
   onDeleteGuides,
   sectionPlaneChecked = false,
   sectionPlaneExists = false,
@@ -999,23 +987,6 @@ export function MenuBar({
               label="Guides"
               checked={showGuides}
               onClick={withClose(() => onToggleGuides?.())}
-            />
-            {/* Viewport chrome, so it sits with Axes/Grid/Guides rather than
-                under Camera: the cube is something you show or hide, not a
-                camera command. The camera ACTIONS it offers already live in
-                the Camera menu. */}
-            <CheckMenuItem
-              label="View Cube"
-              checked={showViewCube}
-              onClick={withClose(() => onToggleViewCube?.())}
-            />
-            {/* The chips the cube superseded — same cluster, same reason they
-                sit here rather than under Camera. Hidden by default; this is
-                how someone who wants a one-click Top back gets it. */}
-            <CheckMenuItem
-              label="View Chips"
-              checked={showViewChips}
-              onClick={withClose(() => onToggleViewChips?.())}
             />
             {/* "Section Cut", not "Section Plane": the TOOL that places the
                 plane keeps that name under Tools; this toggle clips/unclips

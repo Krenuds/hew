@@ -8,20 +8,7 @@
  * near-identical singleton files each re-implementing the storage + Tauri +
  * 'storage'-event triple).
  *
- * Today it carries three fields:
- *
- *   `showViewCube` — whether the orientation cube draws in the corner of
- *   the viewport (`viewport/ViewCube.tsx`). Shown by default. Surfaced as a
- *   View ▸ View Cube checkmark rather than a Settings row, the same posture
- *   `sceneTransitions` takes: it is chrome you flick on and off next to
- *   Axes/Grid/Guides, not a value you go and tune.
- *
- *   `showViewChips` — whether the top-left Orbit/Top/Iso/Front cluster
- *   draws (`viewport/ViewportHUD.tsx`). HIDDEN by default: the cube reaches
- *   every orientation the chips do and says where the camera already is, so
- *   the chips are the opt-in shortcut rather than the shipped affordance.
- *   Same checkmark posture as the cube, and deliberately the neighbouring
- *   field — one is the other's alternative.
+ * Today it carries one field:
  *
  *   `snapDotScale` — how big the on-cursor inference marker draws
  *   (`viewport/SnapDot.tsx`), as a UNITLESS multiple of the shipped size.
@@ -53,10 +40,6 @@ import { isTauri } from '../io/fileHost'
 
 /** The viewport display preferences. */
 export interface ViewportSettings {
-  /** Whether the orientation cube is drawn (docs/design/camera.md §8). */
-  showViewCube: boolean
-  /** Whether the top-left Orbit/Top/Iso/Front chips are drawn. */
-  showViewChips: boolean
   /** Snap-marker size as a multiple of the shipped size (1 = as designed). */
   snapDotScale: number
 }
@@ -74,12 +57,6 @@ export const SNAP_DOT_SCALE_MAX = 1.5
 export const SNAP_DOT_SCALE_STEP = 0.1
 
 export const DEFAULT_VIEWPORT_SETTINGS: ViewportSettings = {
-  // On by default: an orientation aid nobody can find is no orientation aid.
-  showViewCube: true,
-  // Off by default: the cube supersedes the chips, reaching every view they
-  // reach and marking the one you are parked on. They stay in the product
-  // for people who want a one-click Top without learning a gizmo.
-  showViewChips: false,
   snapDotScale: 1,
 }
 
@@ -115,16 +92,9 @@ function parseViewportSettings(v: unknown): ViewportSettings | null {
   }
   if (typeof obj !== 'object' || obj === null) return null
   const out = { ...DEFAULT_VIEWPORT_SETTINGS }
-  const fields = obj as Record<string, unknown>
-  const scale = fields.snapDotScale
+  const scale = (obj as Record<string, unknown>).snapDotScale
   if (typeof scale === 'number' && Number.isFinite(scale)) {
     out.snapDotScale = normalizeScale(scale)
-  }
-  if (typeof fields.showViewCube === 'boolean') {
-    out.showViewCube = fields.showViewCube
-  }
-  if (typeof fields.showViewChips === 'boolean') {
-    out.showViewChips = fields.showViewChips
   }
   return out
 }
@@ -163,14 +133,6 @@ export function getSnapDotScale(): number {
  */
 export function setViewportSettings(next: ViewportSettings): void {
   currentViewportSettings = {
-    showViewCube:
-      typeof next.showViewCube === 'boolean'
-        ? next.showViewCube
-        : DEFAULT_VIEWPORT_SETTINGS.showViewCube,
-    showViewChips:
-      typeof next.showViewChips === 'boolean'
-        ? next.showViewChips
-        : DEFAULT_VIEWPORT_SETTINGS.showViewChips,
     snapDotScale: Number.isFinite(next.snapDotScale)
       ? normalizeScale(next.snapDotScale)
       : DEFAULT_VIEWPORT_SETTINGS.snapDotScale,
@@ -187,26 +149,6 @@ export function setViewportSettings(next: ViewportSettings): void {
 /** Convenience: set just the snap-marker scale (clamped + quantized). */
 export function setSnapDotScale(next: number): void {
   setViewportSettings({ ...currentViewportSettings, snapDotScale: next })
-}
-
-/** Convenience: is the orientation cube shown? */
-export function getShowViewCube(): boolean {
-  return currentViewportSettings.showViewCube
-}
-
-/** Convenience: show or hide the orientation cube. */
-export function setShowViewCube(next: boolean): void {
-  setViewportSettings({ ...currentViewportSettings, showViewCube: next })
-}
-
-/** Convenience: are the top-left view chips shown? */
-export function getShowViewChips(): boolean {
-  return currentViewportSettings.showViewChips
-}
-
-/** Convenience: show or hide the top-left view chips. */
-export function setShowViewChips(next: boolean): void {
-  setViewportSettings({ ...currentViewportSettings, showViewChips: next })
 }
 
 /** Subscribe to viewport-settings changes (local + cross-window). Returns an unsubscribe fn. */
@@ -234,11 +176,7 @@ function broadcastTauri(settings: ViewportSettings): void {
 }
 
 function sameSettings(a: ViewportSettings, b: ViewportSettings): boolean {
-  return (
-    a.snapDotScale === b.snapDotScale &&
-    a.showViewCube === b.showViewCube &&
-    a.showViewChips === b.showViewChips
-  )
+  return a.snapDotScale === b.snapDotScale
 }
 
 function applyExternal(next: unknown): void {

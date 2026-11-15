@@ -348,22 +348,6 @@ below.
   protractor/rotate disks, section-plane and slice previews) correctly
   sized in both projections; a typed Field of View control; Zoom Window
   (drag a rectangle to frame it)
-- A View Cube in the top-right of the viewport that always shows which way
-  the camera is pointing, with the view you are currently parked on marked
-  on it: click any of its 26 regions (6 faces, 12 edges, 8 corners) to swing
-  to that orientation, or drag the cube itself to orbit exactly as a
-  middle-drag does. Clicking a region reorients WITHOUT re-framing — the
-  pivot and distance you were already working at survive, unlike the
-  Standard Views menu entries, which fit the model. A glyph strip beneath it
-  jumps to a framed iso view and switches between perspective and parallel
-  projection. Shown by default; View ▸ View Cube hides it and the choice
-  persists with the rest of the viewport display preferences
-- A quick-view chip cluster in the top-left of the viewport — Orbit, Top,
-  Iso, Front — shortcuts to the Orbit tool and three of the Standard Views,
-  each of which re-frames the model the way the Camera menu does. The View
-  Cube supersedes them, so they ship HIDDEN; View ▸ View Chips shows them
-  and the choice persists alongside the cube's in the same viewport display
-  preferences
 - Orbit and zoom pivot on the geometry under the cursor: a middle-drag
   orbits around the surface being pointed at and each scroll step covers
   a fixed fraction of the distance to it, with a near-absolute zoom floor

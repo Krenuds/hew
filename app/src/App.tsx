@@ -13,8 +13,6 @@ import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
 import { sameMeasurementAxes, type MeasurementAxes } from './viewport/measurementAxes'
 import { ViewportHUD } from './viewport/ViewportHUD'
-import { ViewCube, VIEW_CUBE_TWEEN_MS } from './viewport/ViewCube'
-import { regionById } from './viewport/viewCubeRegions'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
@@ -119,7 +117,6 @@ import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugM
 import { getRemoteControl, subscribe as subscribeRemoteControl } from './settings/remoteControl'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
-import { getShowViewCube, setShowViewCube, getShowViewChips, setShowViewChips, subscribe as subscribeViewportSettings } from './settings/viewport'
 import { useScenesController } from './scenes/useScenesController'
 import { parseCameraJson, parseSectionJson } from './scenes/scenesModel'
 import type { SceneSource } from './print/printJob'
@@ -336,45 +333,6 @@ export default function App() {
   const activateTool = useCallback((name: ToolName) => {
     setActiveTool(name)
     if (CAMERA_HANDOFF_TOOL_NAMES.has(name)) setToolActivationSeq((s) => s + 1)
-  }, [])
-
-  /** The viewport container, for the ViewCube drag's pixel→radian rate:
-   * OrbitControls scales a drag by the CANVAS height, so the cube has to
-   * divide by the same number or dragging it would not match a middle-drag. */
-  const viewportHostRef = useRef<HTMLDivElement | null>(null)
-
-  /**
-   * Swing the camera to a ViewCube region (docs/design/camera.md §8).
-   *
-   * REORIENT ONLY, and that is the whole point of the cube as against
-   * `setStandardView`: the pivot and the orbit distance you were working at
-   * survive, so clicking Top while zoomed into a detail leaves you zoomed
-   * into that detail, looking down at it. `setStandardView` — the Camera menu
-   * and the HUD chips — deliberately still re-fits the whole model, because
-   * "show me the model from the top" is a different request.
-   */
-  const reorientToRegion = useCallback((regionId: string) => {
-    const api = viewportApi.current
-    if (!api) return
-    const current = api.getCameraState()
-    const [tx, ty, tz] = current.target
-    const distance = Math.hypot(
-      current.eye[0] - tx,
-      current.eye[1] - ty,
-      current.eye[2] - tz,
-    )
-    const dir = regionById(regionId).eye
-    api.tweenCameraState(
-      {
-        ...current,
-        eye: [tx + dir[0] * distance, ty + dir[1] * distance, tz + dir[2] * distance],
-        // Every region keeps world-up +Z; Top and Bottom stay off the
-        // degenerate pole through POLE_TILT baked into their directions,
-        // not through a different up (see `standardViews.ts`).
-        up: [0, 0, 1],
-      },
-      VIEW_CUBE_TWEEN_MS,
-    )
   }, [])
   /** The truthful source `activeTool` is built from for every INTERNAL tool
    * transition — Viewport's switchToolRef reports the tool that just
@@ -817,21 +775,6 @@ export default function App() {
   // duration; this is only the menu/palette checkmark's own render cache.
   const [sceneTransitionsOn, setSceneTransitionsOn] = useState(() => getSceneTransitions())
   useEffect(() => subscribeSceneTransitions(setSceneTransitionsOn), [])
-
-  /** View ▸ View Cube checkmark (docs/design/camera.md §8) — same posture as
-   * Scene Transitions above: the singleton owns the truth and the
-   * persistence, this is the render cache the menu, the palette and the
-   * overlay's own mount all read. It is a field of the `viewport` settings
-   * cluster rather than a key of its own, so the subscription is to the
-   * whole object. */
-  const [viewCubeOn, setViewCubeOn] = useState(() => getShowViewCube())
-  useEffect(() => subscribeViewportSettings((s) => setViewCubeOn(s.showViewCube)), [])
-
-  /** View ▸ View Chips checkmark — the top-left Orbit/Top/Iso/Front cluster
-   * the cube superseded. Same shape as the cube above, off by default, and
-   * a sibling field of the same `viewport` object. */
-  const [viewChipsOn, setViewChipsOn] = useState(() => getShowViewChips())
-  useEffect(() => subscribeViewportSettings((s) => setViewChipsOn(s.showViewChips)), [])
 
   // ---------------------------------------------------------------- tray layout persistence
   // Write the four section flags back to the singleton whenever any of them
@@ -4404,8 +4347,6 @@ export default function App() {
       case 'scenes-next': scenesRef.current.next(); break
       case 'scenes-previous': scenesRef.current.previous(); break
       case 'scenes-transitions': setSceneTransitions(!sceneTransitionsOn); break
-      case 'toggle-view-cube': setShowViewCube(!viewCubeOn); break
-      case 'toggle-view-chips': setShowViewChips(!viewChipsOn); break
     }
   }
 
@@ -5127,8 +5068,6 @@ export default function App() {
       'win-library': showLibrary,
       'cam-parallel-projection': parallelProjection,
       'scenes-transitions': sceneTransitionsOn,
-      'view-cube': viewCubeOn,
-      'view-chips': viewChipsOn,
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
       checked[id] = tool === activeTool
@@ -5200,8 +5139,6 @@ export default function App() {
     undoLabel,
     redoLabel,
     sceneTransitionsOn,
-    viewCubeOn,
-    viewChipsOn,
     scenes.activeSid,
     scenes.entries.length,
   ])
@@ -5850,14 +5787,10 @@ export default function App() {
         showAxes={showAxes}
         showGrid={showGrid}
         showGuides={showGuides}
-        showViewCube={viewCubeOn}
-        showViewChips={viewChipsOn}
         onToggleAxes={() => setShowAxes((v) => !v)}
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
-        onToggleViewCube={() => setShowViewCube(!viewCubeOn)}
-        onToggleViewChips={() => setShowViewChips(!viewChipsOn)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         sectionPlaneChecked={sectionPlaneMenuState.checked}
         sectionPlaneExists={sectionPlaneMenuState.exists}
@@ -5959,7 +5892,6 @@ export default function App() {
           onToggleNarrow={toggleRailNarrow}
         />
         <div
-          ref={viewportHostRef}
           style={{ flex: 1, minWidth: 0, position: 'relative' }}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
@@ -6034,26 +5966,10 @@ export default function App() {
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
             <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} axes={measurementAxes} />
-            {viewChipsOn && (
-              <ViewportHUD
-                onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
-                onOrbit={() => activateTool('Orbit')}
-              />
-            )}
-            {viewCubeOn && (
-              <ViewCube
-                parallelProjection={parallelProjection}
-                onSelectRegion={reorientToRegion}
-                onOrbitBy={(theta, phi) => viewportApi.current?.orbitBy(theta, phi)}
-                onToggleProjection={() => viewportApi.current?.toggleProjection()}
-                // The one control in the widget that RE-FRAMES. Everything
-                // else on the cube preserves your zoom; this is the deliberate
-                // "get me un-lost" button, so it is the existing
-                // fit-and-orient Iso the Camera menu already has.
-                onIso={() => viewportApi.current?.setStandardView('iso')}
-                viewportHeightPx={() => viewportHostRef.current?.clientHeight ?? 0}
-              />
-            )}
+            <ViewportHUD
+              onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
+              onOrbit={() => activateTool('Orbit')}
+            />
           </div>
 
           {/* Session status: the only other place the app names the current
